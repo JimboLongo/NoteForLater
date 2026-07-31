@@ -2,16 +2,18 @@ import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
 
-/// Bulk-import tasks from a .csv or .xlsx file. Recognized columns: Title
+/// Bulk-import tasks from a .csv or .xlsx file. Recognized columns: Task
 /// (required), Notes, Shelf, Due Date, Next Step, Duration, Tags, Priority,
 /// Date Added — matched case-insensitively, see ImportedTaskField for the
 /// accepted aliases. Rows whose Shelf doesn't match an existing shelf land
-/// on the chosen default shelf instead, so no attributes are ever dropped.
+/// on the chosen default — a real shelf, or Inbox (the default) for plain
+/// capture-and-sort-later entries.
 struct ImportView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \Shelf.sortOrder) private var shelves: [Shelf]
 
+    /// nil means "Inbox" — the default.
     @State private var defaultShelf: Shelf?
     @State private var isShowingFilePicker = false
     @State private var summary: TaskImportSummary?
@@ -27,28 +29,28 @@ struct ImportView: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("Title (required), Notes, Shelf, Due Date, Next Step, Duration, Tags, Priority, Date Added")
+                    Text("Task (required), Notes, Shelf, Due Date, Next Step, Duration, Tags, Priority, Date Added")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } header: {
                     Text("Recognized Columns")
                 } footer: {
-                    Text("Tags can be separated by commas or semicolons. Rows whose Shelf doesn't match an existing shelf use the default shelf below.")
+                    Text("Tags can be separated by commas or semicolons. Rows whose Shelf doesn't match an existing shelf use the default below.")
                 }
 
-                Section("Default Shelf") {
-                    if shelves.isEmpty {
-                        Text("Add a shelf first from the More tab.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Picker("Default Shelf", selection: $defaultShelf) {
-                            ForEach(shelves) { shelf in
-                                Text(shelf.name).tag(shelf as Shelf?)
-                            }
+                Section {
+                    Picker("Default Shelf", selection: $defaultShelf) {
+                        Text("Inbox").tag(nil as Shelf?)
+                        ForEach(shelves) { shelf in
+                            Text(shelf.name).tag(shelf as Shelf?)
                         }
-                        .labelsHidden()
-                        .pickerStyle(.inline)
                     }
+                    .labelsHidden()
+                    .pickerStyle(.inline)
+                } header: {
+                    Text("Default Shelf")
+                } footer: {
+                    Text("Inbox keeps just the title for sorting later; a shelf keeps every column.")
                 }
 
                 Section {
@@ -61,7 +63,7 @@ struct ImportView: View {
                             Label("Choose File...", systemImage: "square.and.arrow.down")
                         }
                     }
-                    .disabled(defaultShelf == nil || isImporting)
+                    .disabled(isImporting)
                 }
 
                 if let summary {
@@ -89,9 +91,6 @@ struct ImportView: View {
                     Button("Done") { dismiss() }
                 }
             }
-            .onAppear {
-                if defaultShelf == nil { defaultShelf = shelves.first }
-            }
             .fileImporter(isPresented: $isShowingFilePicker, allowedContentTypes: supportedTypes) { result in
                 handlePickedFile(result)
             }
@@ -103,7 +102,6 @@ struct ImportView: View {
         case .failure(let error):
             errorMessage = error.localizedDescription
         case .success(let url):
-            guard let defaultShelf else { return }
             errorMessage = nil
             summary = nil
             isImporting = true

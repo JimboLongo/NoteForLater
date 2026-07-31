@@ -13,7 +13,7 @@ enum TaskImportError: LocalizedError {
         switch self {
         case .unsupportedFileType: return "That file isn't a .csv or .xlsx."
         case .emptyFile: return "The file has no rows to import."
-        case .missingTitleColumn: return "The file needs a \"Title\" column."
+        case .missingTitleColumn: return "The file needs a \"Task\" column."
         case .invalidArchive: return "This .xlsx file couldn't be read."
         case .unsupportedCompression: return "This .xlsx file uses an unsupported compression method."
         case .decompressionFailed: return "This .xlsx file's contents couldn't be decompressed."
@@ -52,14 +52,16 @@ struct TaskImportSummary {
     var errors: [String] = []
 }
 
-/// Bulk-creates TaskItems from a parsed .csv/.xlsx table. Every imported row
-/// becomes a full TaskItem (never a bare InboxItem) so none of its columns
-/// get silently dropped; rows whose Shelf column doesn't match an existing
-/// shelf fall back to `defaultShelf`.
+/// Bulk-creates tasks from a parsed .csv/.xlsx table. A row whose Shelf
+/// column matches an existing shelf always becomes a full TaskItem there,
+/// preserving every column. Rows that don't match land on `defaultShelf` —
+/// or, if `defaultShelf` is nil (the user picked "Inbox"), as a plain
+/// InboxItem with just the title, same as anything typed into the Inbox by
+/// hand, ready to be sorted later.
 enum TaskImportService {
     static func importTasks(
         from url: URL,
-        defaultShelf: Shelf,
+        defaultShelf: Shelf?,
         allShelves: [Shelf],
         modelContext: ModelContext
     ) throws -> TaskImportSummary {
@@ -99,9 +101,17 @@ enum TaskImportService {
                 continue
             }
 
-            let shelf = values[.shelf]
+            let matchedShelf = values[.shelf]
                 .flatMap { name in allShelves.first { $0.name.caseInsensitiveCompare(name) == .orderedSame } }
-                ?? defaultShelf
+
+            guard let shelf = matchedShelf ?? defaultShelf else {
+                // No column match and the default is "Inbox": a plain
+                // capture entry, same as typing it by hand.
+                let createdAt = values[.dateAdded].flatMap(TaskImportDateParser.parse) ?? .now
+                modelContext.insert(InboxItem(text: title, createdAt: createdAt))
+                summary.importedCount += 1
+                continue
+            }
 
             let tags = (values[.tags] ?? "")
                 .split(whereSeparator: { $0 == "," || $0 == ";" })
