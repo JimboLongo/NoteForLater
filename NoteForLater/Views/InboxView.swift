@@ -12,6 +12,9 @@ struct InboxView: View {
     @State private var draftText: String = ""
     @State private var itemBeingRouted: InboxItem?
     @State private var isShowingImporter = false
+    @State private var isSyncingGmail = false
+    @State private var isShowingGmailAlert = false
+    @State private var gmailSyncMessage = ""
 
     var body: some View {
         NavigationStack {
@@ -49,10 +52,24 @@ struct InboxView: View {
             .navigationTitle("Note for Later")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        isShowingImporter = true
+                    Menu {
+                        Button {
+                            isShowingImporter = true
+                        } label: {
+                            Label("Import from File...", systemImage: "doc.badge.plus")
+                        }
+                        Button {
+                            syncGmail()
+                        } label: {
+                            Label("Sync Unread Gmail", systemImage: "envelope.badge")
+                        }
+                        .disabled(isSyncingGmail)
                     } label: {
-                        Image(systemName: "tray.and.arrow.down")
+                        if isSyncingGmail {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "tray.and.arrow.down")
+                        }
                     }
                 }
             }
@@ -65,6 +82,11 @@ struct InboxView: View {
             .sheet(isPresented: $isShowingImporter) {
                 ImportView()
             }
+            .alert("Gmail Sync", isPresented: $isShowingGmailAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(gmailSyncMessage)
+            }
             .onAppear {
                 if viewModel == nil {
                     viewModel = InboxViewModel(modelContext: modelContext)
@@ -76,6 +98,21 @@ struct InboxView: View {
     private func addDraft() {
         viewModel?.addItem(draftText)
         draftText = ""
+    }
+
+    private func syncGmail() {
+        guard let viewModel else { return }
+        isSyncingGmail = true
+        Task {
+            do {
+                let count = try await viewModel.syncGmail(existingItems: items, gmailService: GoogleGmailService())
+                gmailSyncMessage = count == 0 ? "No new unread emails." : "Imported \(count) email\(count == 1 ? "" : "s")."
+            } catch {
+                gmailSyncMessage = error.localizedDescription
+            }
+            isSyncingGmail = false
+            isShowingGmailAlert = true
+        }
     }
 }
 

@@ -30,4 +30,24 @@ final class InboxViewModel {
     func discard(_ item: InboxItem) {
         modelContext.delete(item)
     }
+
+    /// Pulls in every unread inbox email as a new InboxItem, skipping any
+    /// message already imported by a previous sync. Returns how many were
+    /// newly added.
+    @discardableResult
+    func syncGmail(existingItems: [InboxItem], gmailService: GmailServiceProtocol) async throws -> Int {
+        let alreadyImported = Set(existingItems.compactMap(\.sourceGmailMessageID))
+        let messages = try await gmailService.fetchUnreadInboxMessages()
+
+        var importedCount = 0
+        for message in messages where !alreadyImported.contains(message.id) {
+            let text = message.subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? message.snippet.trimmingCharacters(in: .whitespacesAndNewlines)
+                : message.subject
+            guard !text.isEmpty else { continue }
+            modelContext.insert(InboxItem(text: text, sourceGmailMessageID: message.id))
+            importedCount += 1
+        }
+        return importedCount
+    }
 }

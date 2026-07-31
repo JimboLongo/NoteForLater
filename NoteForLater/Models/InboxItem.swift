@@ -9,9 +9,14 @@ final class InboxItem {
     var text: String
     var createdAt: Date
 
-    init(text: String, createdAt: Date = .now) {
+    /// Set when this item came from a Gmail sync rather than manual typing,
+    /// so re-syncing doesn't create duplicates for mail already imported.
+    var sourceGmailMessageID: String?
+
+    init(text: String, createdAt: Date = .now, sourceGmailMessageID: String? = nil) {
         self.id = UUID()
         self.text = text
         self.createdAt = createdAt
+        self.sourceGmailMessageID = sourceGmailMessageID
     }
 }

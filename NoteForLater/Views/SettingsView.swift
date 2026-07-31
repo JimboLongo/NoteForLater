@@ -3,7 +3,9 @@ import SwiftData
 
 /// App-wide settings. Currently just the Scheduler section: link a Google
 /// account and choose which of its calendars count as "busy" so the AI
-/// Scheduler doesn't propose blocks over existing events.
+/// Scheduler doesn't propose blocks over existing events. The same sign-in
+/// also grants Gmail read access, used by the Inbox tab's "Sync Unread
+/// Gmail" action.
 struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var subscriptions: [CalendarSubscription]
@@ -30,7 +32,7 @@ struct SettingsView: View {
                         if isSigningIn {
                             ProgressView()
                         } else {
-                            Label("Connect Google Calendar", systemImage: "calendar.badge.plus")
+                            Label("Connect Google Account", systemImage: "calendar.badge.plus")
                         }
                     }
                     .disabled(isSigningIn || !GoogleOAuthConfig.isConfigured)
