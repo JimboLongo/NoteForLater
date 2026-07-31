@@ -8,7 +8,8 @@ struct NoteForLaterApp: App {
             InboxItem.self,
             TaskItem.self,
             ScheduledBlock.self,
-            Shelf.self
+            Shelf.self,
+            CalendarSubscription.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {

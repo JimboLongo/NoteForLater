@@ -13,13 +13,15 @@ struct ScheduleReviewView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \TaskItem.createdAt) private var allTasks: [TaskItem]
     @Query private var allBlocks: [ScheduledBlock]
+    @Query private var calendarSubscriptions: [CalendarSubscription]
 
     @State private var viewModel: ScheduleReviewViewModel?
     @State private var pickerTarget: ScheduledBlock?
 
-    // TODO(Claude Code): inject the real services once implemented; for now
-    // this wires up the mocks so the flow is fully runnable/testable.
-    private let calendarService: CalendarServiceProtocol = MockCalendarService()
+    // AI scheduling itself is still mocked (that's a separate TODO: swap in
+    // a real Claude API call). The calendar side is real — it hits Google
+    // Calendar directly using whichever account is signed in via Settings.
+    private let calendarService: CalendarServiceProtocol = GoogleCalendarService()
     private let schedulingService: AISchedulingServiceProtocol = MockAISchedulingService()
 
     var body: some View {
@@ -101,6 +103,8 @@ struct ScheduleReviewView: View {
 
     private func setupIfNeeded() {
         guard viewModel == nil else { return }
+        let enabledIDs = calendarSubscriptions.filter(\.isEnabled).map(\.calendarID)
+        calendarService.enabledCalendarIDs = enabledIDs.isEmpty ? ["primary"] : enabledIDs
         let vm = ScheduleReviewViewModel(
             modelContext: modelContext,
             calendarService: calendarService,
@@ -183,5 +187,5 @@ private struct ReplacementPickerSheet: View {
 
 #Preview {
     ScheduleReviewView()
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self], inMemory: true)
 }

@@ -68,6 +68,11 @@ struct MoreView: View {
                     } label: {
                         Label("Manage Shelves", systemImage: "square.stack.3d.up")
                     }
+                    NavigationLink {
+                        SettingsView()
+                    } label: {
+                        Label("Settings", systemImage: "gearshape")
+                    }
                 }
             }
             .navigationTitle("More")
@@ -77,5 +82,5 @@ struct MoreView: View {
 
 #Preview {
     ContentView()
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self], inMemory: true)
 }
