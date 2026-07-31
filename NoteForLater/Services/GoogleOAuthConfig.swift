@@ -15,19 +15,21 @@ import Foundation
 /// No client secret is needed — this uses the Authorization Code + PKCE
 /// flow for native apps, so the client is public.
 enum GoogleOAuthConfig {
-    /// e.g. "1234567890-abcdefghijklmnop.apps.googleusercontent.com"
-    static let clientID = "YOUR_CLIENT_ID.apps.googleusercontent.com"
+    static let clientID = "1058526752623-19qb8of0ut7hhdam0rkrta8e40gd20fa.apps.googleusercontent.com"
 
-    /// The "iOS URL scheme" Google shows you for this client, e.g.
-    /// "com.googleusercontent.apps.1234567890-abcdefghijklmnop".
-    static let redirectScheme = "com.googleusercontent.apps.YOUR_CLIENT_ID"
+    /// The reversed Client ID, used as the custom URL scheme
+    /// ASWebAuthenticationSession watches for on redirect.
+    static let redirectScheme = "com.googleusercontent.apps.1058526752623-19qb8of0ut7hhdam0rkrta8e40gd20fa"
 
     static var redirectURI: String { "\(redirectScheme):/oauth2redirect" }
 
+    // gmail.readonly is deliberately left out for now — the Gmail sync
+    // feature (Services/GmailService.swift, InboxViewModel.syncGmail) is
+    // built but not wired into any UI yet. Add it back here (and the
+    // "Sync Unread Gmail" toolbar action in InboxView) to re-enable.
     static let scopes = [
         "https://www.googleapis.com/auth/calendar.readonly",
         "https://www.googleapis.com/auth/calendar.events",
-        "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/userinfo.email",
         "openid"
     ]
