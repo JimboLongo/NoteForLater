@@ -1,29 +1,5 @@
 import Foundation
 
-/// The designated "holding pens" that inbox items get sorted into.
-enum HoldingPen: String, Codable, CaseIterable, Identifiable {
-    case todo = "To-Do List"
-    case shopping = "Stuff to Buy"
-    case futureProject = "Future Project"
-    case reference = "Reference"
-
-    var id: String { rawValue }
-
-    var systemImage: String {
-        switch self {
-        case .todo: return "checklist"
-        case .shopping: return "cart"
-        case .futureProject: return "lightbulb"
-        case .reference: return "archivebox"
-        }
-    }
-
-    /// Only items in these pens are eligible to be auto-scheduled onto the calendar.
-    var isSchedulable: Bool {
-        self == .todo
-    }
-}
-
 enum Priority: String, Codable, CaseIterable, Identifiable {
     case low, medium, high
     var id: String { rawValue }

@@ -183,5 +183,5 @@ private struct ReplacementPickerSheet: View {
 
 #Preview {
     ScheduleReviewView()
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self], inMemory: true)
 }

@@ -1,20 +1,21 @@
 import SwiftUI
 import SwiftData
 
-/// A single reusable list for any of the four holding pens (To-Do List,
-/// Stuff to Buy, Future Project, Reference).
-struct HoldingPenListView: View {
-    let pen: HoldingPen
+/// A single reusable list for any user-defined shelf (To-Do List, Stuff to
+/// Buy, Future Project, Reference, or anything the user adds from the
+/// Shelves screen).
+struct ShelfListView: View {
+    let shelf: Shelf
 
     @Environment(\.modelContext) private var modelContext
     @Query private var allTasks: [TaskItem]
     @State private var searchText = ""
 
-    init(pen: HoldingPen) {
-        self.pen = pen
-        let rawValue = pen.rawValue
+    init(shelf: Shelf) {
+        self.shelf = shelf
+        let shelfID = shelf.id
         _allTasks = Query(
-            filter: #Predicate<TaskItem> { $0.holdingPenRaw == rawValue },
+            filter: #Predicate<TaskItem> { $0.shelf?.id == shelfID },
             sort: \TaskItem.createdAt,
             order: .reverse
         )
@@ -41,7 +42,7 @@ struct HoldingPenListView: View {
                     NavigationLink {
                         TaskDetailView(task: task)
                     } label: {
-                        TaskRow(task: task, showsScheduledBadge: pen.isSchedulable)
+                        TaskRow(task: task, showsScheduledBadge: shelf.isEligibleForScheduling)
                     }
                     .swipeActions(edge: .trailing) {
                         Button(role: .destructive) {
@@ -52,7 +53,7 @@ struct HoldingPenListView: View {
                     }
                 }
             }
-            .navigationTitle(pen.rawValue)
+            .navigationTitle(shelf.name)
             .searchable(text: $searchText, prompt: "Search title or tags")
         }
     }
@@ -111,6 +112,7 @@ private struct TaskRow: View {
 }
 
 #Preview {
-    HoldingPenListView(pen: .todo)
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self], inMemory: true)
+    let shelf = Shelf(name: "To-Do List", systemImage: "checklist", showsInTabBar: true, isEligibleForScheduling: true)
+    return ShelfListView(shelf: shelf)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self], inMemory: true)
 }

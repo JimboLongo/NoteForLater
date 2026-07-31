@@ -121,14 +121,14 @@ final class ScheduleReviewViewModel {
         }
     }
 
-    /// Tasks eligible to fill an empty/replaced slot: unscheduled, schedulable pen.
+    /// Tasks eligible to fill an empty/replaced slot: unscheduled, on a schedulable shelf.
     func unscheduledCandidates(from allTasks: [TaskItem], excluding block: ScheduledBlock) -> [TaskItem] {
-        allTasks.filter { $0.holdingPen.isSchedulable && !$0.isScheduled && $0.id != block.task?.id }
+        allTasks.filter { ($0.shelf?.isEligibleForScheduling ?? false) && !$0.isScheduled && $0.id != block.task?.id }
     }
 
     private func nextCandidate(from pool: [TaskItem], excluding outgoing: TaskItem?) -> TaskItem? {
         pool
-            .filter { $0.holdingPen.isSchedulable && !$0.isScheduled && $0.id != outgoing?.id }
+            .filter { ($0.shelf?.isEligibleForScheduling ?? false) && !$0.isScheduled && $0.id != outgoing?.id }
             .sorted { lhs, rhs in
                 if lhs.priority != rhs.priority {
                     return priorityRank(lhs.priority) > priorityRank(rhs.priority)

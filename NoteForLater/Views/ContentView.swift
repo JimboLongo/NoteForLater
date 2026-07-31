@@ -2,32 +2,71 @@ import SwiftUI
 import SwiftData
 
 struct ContentView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \Shelf.sortOrder) private var shelves: [Shelf]
+
     var body: some View {
         TabView {
             InboxView()
                 .tabItem { Label("Inbox", systemImage: "tray") }
 
-            HoldingPenListView(pen: .todo)
-                .tabItem { Label("To-Do", systemImage: HoldingPen.todo.systemImage) }
+            ForEach(pinnedShelves) { shelf in
+                ShelfListView(shelf: shelf)
+                    .tabItem { Label(shelf.name, systemImage: shelf.systemImage) }
+            }
 
             ScheduleReviewView()
                 .tabItem { Label("Schedule", systemImage: "calendar") }
 
-            MorePenListView()
+            MoreView(unpinnedShelves: unpinnedShelves)
                 .tabItem { Label("More", systemImage: "ellipsis.circle") }
+        }
+        .onAppear(perform: seedDefaultShelvesIfNeeded)
+    }
+
+    private var pinnedShelves: [Shelf] {
+        shelves.filter(\.showsInTabBar)
+    }
+
+    private var unpinnedShelves: [Shelf] {
+        shelves.filter { !$0.showsInTabBar }
+    }
+
+    private func seedDefaultShelvesIfNeeded() {
+        guard shelves.isEmpty else { return }
+        for shelf in Shelf.defaultSeedShelves() {
+            modelContext.insert(shelf)
         }
     }
 }
 
-/// Groups the remaining, less-frequently-visited holding pens behind one tab
-/// so the tab bar doesn't get crowded.
-struct MorePenListView: View {
+/// Groups shelves not pinned to the tab bar, plus the entry point for
+/// managing shelves (add/edit/reorder/pin), so the tab bar doesn't get
+/// crowded.
+struct MoreView: View {
+    let unpinnedShelves: [Shelf]
+
     var body: some View {
         NavigationStack {
             List {
-                ForEach([HoldingPen.shopping, .futureProject, .reference]) { pen in
-                    NavigationLink(pen.rawValue) {
-                        HoldingPenListView(pen: pen)
+                Section("Shelves") {
+                    if unpinnedShelves.isEmpty {
+                        Text("All shelves are pinned to the tab bar.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(unpinnedShelves) { shelf in
+                        NavigationLink {
+                            ShelfListView(shelf: shelf)
+                        } label: {
+                            Label(shelf.name, systemImage: shelf.systemImage)
+                        }
+                    }
+                }
+                Section {
+                    NavigationLink {
+                        ShelvesView()
+                    } label: {
+                        Label("Manage Shelves", systemImage: "square.stack.3d.up")
                     }
                 }
             }
@@ -38,5 +77,5 @@ struct MorePenListView: View {
 
 #Preview {
     ContentView()
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self], inMemory: true)
 }

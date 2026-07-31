@@ -32,7 +32,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
         date: Date
     ) async throws -> [ScheduledBlock] {
         let schedulable = tasks
-            .filter { $0.holdingPen.isSchedulable && !$0.isScheduled }
+            .filter { ($0.shelf?.isEligibleForScheduling ?? false) && !$0.isScheduled }
             .sorted { lhs, rhs in
                 if lhs.priority != rhs.priority {
                     return priorityRank(lhs.priority) > priorityRank(rhs.priority)

@@ -6,10 +6,12 @@ import SwiftData
 struct InboxView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \InboxItem.createdAt, order: .reverse) private var items: [InboxItem]
+    @Query(sort: \Shelf.sortOrder) private var shelves: [Shelf]
 
     @State private var viewModel: InboxViewModel?
     @State private var draftText: String = ""
     @State private var itemBeingRouted: InboxItem?
+    @State private var isShowingImporter = false
 
     var body: some View {
         NavigationStack {
@@ -45,11 +47,23 @@ struct InboxView: View {
                 }
             }
             .navigationTitle("Note for Later")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        isShowingImporter = true
+                    } label: {
+                        Image(systemName: "tray.and.arrow.down")
+                    }
+                }
+            }
             .sheet(item: $itemBeingRouted) { item in
-                PenPickerSheet(itemText: item.text) { pen in
-                    viewModel?.route(item, to: pen)
+                ShelfPickerSheet(itemText: item.text, shelves: shelves) { shelf in
+                    viewModel?.route(item, to: shelf)
                     itemBeingRouted = nil
                 }
+            }
+            .sheet(isPresented: $isShowingImporter) {
+                ImportView()
             }
             .onAppear {
                 if viewModel == nil {
@@ -65,10 +79,11 @@ struct InboxView: View {
     }
 }
 
-/// Tap an inbox item, pick which holding pen it belongs in.
-private struct PenPickerSheet: View {
+/// Tap an inbox item, pick which shelf it belongs on.
+private struct ShelfPickerSheet: View {
     let itemText: String
-    let onPick: (HoldingPen) -> Void
+    let shelves: [Shelf]
+    let onPick: (Shelf) -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -78,11 +93,15 @@ private struct PenPickerSheet: View {
                     Text(itemText).font(.headline)
                 }
                 Section("Send to...") {
-                    ForEach(HoldingPen.allCases) { pen in
+                    if shelves.isEmpty {
+                        Text("No shelves yet. Add one from the More tab.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(shelves) { shelf in
                         Button {
-                            onPick(pen)
+                            onPick(shelf)
                         } label: {
-                            Label(pen.rawValue, systemImage: pen.systemImage)
+                            Label(shelf.name, systemImage: shelf.systemImage)
                         }
                     }
                 }
@@ -99,5 +118,5 @@ private struct PenPickerSheet: View {
 
 #Preview {
     InboxView()
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self], inMemory: true)
 }

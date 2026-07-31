@@ -122,8 +122,9 @@ private struct TagChip: View {
 }
 
 #Preview {
-    NavigationStack {
-        TaskDetailView(task: TaskItem(title: "Sample task", holdingPen: .todo))
+    let shelf = Shelf(name: "To-Do List", systemImage: "checklist", showsInTabBar: true, isEligibleForScheduling: true)
+    return NavigationStack {
+        TaskDetailView(task: TaskItem(title: "Sample task", shelf: shelf))
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self], inMemory: true)
 }

@@ -7,7 +7,8 @@ struct NoteForLaterApp: App {
         let schema = Schema([
             InboxItem.self,
             TaskItem.self,
-            ScheduledBlock.self
+            ScheduledBlock.self,
+            Shelf.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {

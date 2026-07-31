@@ -1,15 +1,14 @@
 import Foundation
 import SwiftData
 
-/// A sorted item living in one of the four holding pens. Inbox items become
-/// TaskItems once the user routes them to a pen. Only `.todo` items are
-/// candidates for auto-scheduling.
+/// A sorted item living on one of the user's shelves. Inbox items become
+/// TaskItems once the user routes them to a shelf. Only tasks on a shelf
+/// with `isEligibleForScheduling` are candidates for auto-scheduling.
 @Model
 final class TaskItem {
     var id: UUID
     var title: String
     var notes: String
-    var holdingPenRaw: String
     var createdAt: Date
     var dueDate: Date?
     var nextStep: String
@@ -18,35 +17,33 @@ final class TaskItem {
     var priorityRaw: String
     var isScheduled: Bool
 
+    var shelf: Shelf?
+
     @Relationship(deleteRule: .nullify, inverse: \ScheduledBlock.task)
     var scheduledBlock: ScheduledBlock?
 
     init(
         title: String,
         notes: String = "",
-        holdingPen: HoldingPen,
+        shelf: Shelf,
         dueDate: Date? = nil,
         nextStep: String = "",
         estimatedMinutes: Int = 30,
         tags: [String] = [],
-        priority: Priority = .medium
+        priority: Priority = .medium,
+        createdAt: Date = .now
     ) {
         self.id = UUID()
         self.title = title
         self.notes = notes
-        self.holdingPenRaw = holdingPen.rawValue
-        self.createdAt = .now
+        self.shelf = shelf
+        self.createdAt = createdAt
         self.dueDate = dueDate
         self.nextStep = nextStep
         self.estimatedMinutes = estimatedMinutes
         self.tags = tags
         self.priorityRaw = priority.rawValue
         self.isScheduled = false
-    }
-
-    var holdingPen: HoldingPen {
-        get { HoldingPen(rawValue: holdingPenRaw) ?? .reference }
-        set { holdingPenRaw = newValue.rawValue }
     }
 
     var priority: Priority {
