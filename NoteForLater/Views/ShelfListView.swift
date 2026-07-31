@@ -10,6 +10,7 @@ struct ShelfListView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var allTasks: [TaskItem]
     @State private var searchText = ""
+    @State private var draftTitle = ""
 
     init(shelf: Shelf) {
         self.shelf = shelf
@@ -34,6 +35,18 @@ struct ShelfListView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    HStack {
+                        TextField("Add to \(shelf.name)", text: $draftTitle, axis: .vertical)
+                            .submitLabel(.done)
+                            .onSubmit(addTask)
+                        Button(action: addTask) {
+                            Image(systemName: "plus.circle.fill")
+                        }
+                        .disabled(draftTitle.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                }
+
                 if filteredTasks.isEmpty {
                     Text(allTasks.isEmpty ? "Nothing here yet." : "No matches.")
                         .foregroundStyle(.secondary)
@@ -56,6 +69,13 @@ struct ShelfListView: View {
             .navigationTitle(shelf.name)
             .searchable(text: $searchText, prompt: "Search title or tags")
         }
+    }
+
+    private func addTask() {
+        let trimmed = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        modelContext.insert(TaskItem(title: trimmed, shelf: shelf))
+        draftTitle = ""
     }
 }
 

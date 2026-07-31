@@ -18,6 +18,9 @@ struct ContentView: View {
             ScheduleReviewView()
                 .tabItem { Label("Schedule", systemImage: "calendar") }
 
+            ShelvesView()
+                .tabItem { Label("Shelves", systemImage: "square.stack.3d.up") }
+
             MoreView(unpinnedShelves: unpinnedShelves)
                 .tabItem { Label("More", systemImage: "ellipsis.circle") }
         }
@@ -40,9 +43,8 @@ struct ContentView: View {
     }
 }
 
-/// Groups shelves not pinned to the tab bar, plus the entry point for
-/// managing shelves (add/edit/reorder/pin), so the tab bar doesn't get
-/// crowded.
+/// Groups shelves not pinned to the tab bar, plus Settings, so the tab bar
+/// doesn't get crowded. (Shelf management itself has its own tab.)
 struct MoreView: View {
     let unpinnedShelves: [Shelf]
 
@@ -63,11 +65,6 @@ struct MoreView: View {
                     }
                 }
                 Section {
-                    NavigationLink {
-                        ShelvesView()
-                    } label: {
-                        Label("Manage Shelves", systemImage: "square.stack.3d.up")
-                    }
                     NavigationLink {
                         SettingsView()
                     } label: {

@@ -12,41 +12,43 @@ struct ShelvesView: View {
     @State private var showsCannotDeleteAlert = false
 
     var body: some View {
-        List {
-            Section {
-                ForEach(shelves) { shelf in
-                    NavigationLink {
-                        ShelfEditView(shelf: shelf)
-                    } label: {
-                        HStack {
-                            Label(shelf.name, systemImage: shelf.systemImage)
-                            Spacer()
-                            if shelf.showsInTabBar {
-                                Text("In Tab Bar")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(shelves) { shelf in
+                        NavigationLink {
+                            ShelfEditView(shelf: shelf)
+                        } label: {
+                            HStack {
+                                Label(shelf.name, systemImage: shelf.systemImage)
+                                Spacer()
+                                if shelf.showsInTabBar {
+                                    Text("In Tab Bar")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }
-                }
-                .onDelete(perform: deleteShelves)
-                .onMove(perform: moveShelves)
+                    .onDelete(perform: deleteShelves)
+                    .onMove(perform: moveShelves)
 
-                Button {
-                    addShelf()
-                } label: {
-                    Label("Add Shelf", systemImage: "plus.circle.fill")
+                    Button {
+                        addShelf()
+                    } label: {
+                        Label("Add Shelf", systemImage: "plus.circle.fill")
+                    }
+                } footer: {
+                    Text("Tap a shelf to rename it, change its icon, pin it to the tab bar, or make it eligible for the AI Scheduler.")
                 }
-            } footer: {
-                Text("Tap a shelf to rename it, change its icon, pin it to the tab bar, or make it eligible for the AI Scheduler.")
             }
-        }
-        .navigationTitle("Shelves")
-        .toolbar { EditButton() }
-        .alert("Can't Delete Shelf", isPresented: $showsCannotDeleteAlert) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("Move or delete the tasks on this shelf first.")
+            .navigationTitle("Shelves")
+            .toolbar { EditButton() }
+            .alert("Can't Delete Shelf", isPresented: $showsCannotDeleteAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Move or delete the tasks on this shelf first.")
+            }
         }
     }
 
@@ -77,8 +79,6 @@ struct ShelvesView: View {
 }
 
 #Preview {
-    NavigationStack {
-        ShelvesView()
-    }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self], inMemory: true)
+    ShelvesView()
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self], inMemory: true)
 }
