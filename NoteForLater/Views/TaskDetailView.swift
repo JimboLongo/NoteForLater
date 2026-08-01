@@ -10,6 +10,7 @@ struct TaskDetailView: View {
     @State private var newTag: String = ""
 
     private static let durationOptions = [15, 30, 45, 60, 90, 120, 180, 240]
+    private static let segmentOptions = [5, 10, 15, 20, 30, 45, 60]
 
     init(task: TaskItem) {
         self.task = task
@@ -48,6 +49,14 @@ struct TaskDetailView: View {
                 Picker("Estimated duration", selection: $task.estimatedMinutes) {
                     ForEach(Self.durationOptions, id: \.self) { minutes in
                         Text(TaskItem.durationLabel(for: minutes)).tag(minutes)
+                    }
+                }
+                Toggle("Divisible into segments", isOn: $task.isDivisible)
+                if task.isDivisible {
+                    Picker("Smallest segment", selection: $task.minimumSegmentMinutes) {
+                        ForEach(Self.segmentOptions, id: \.self) { minutes in
+                            Text(TaskItem.durationLabel(for: minutes)).tag(minutes)
+                        }
                     }
                 }
             }
@@ -122,9 +131,9 @@ private struct TagChip: View {
 }
 
 #Preview {
-    let shelf = Shelf(name: "To-Do List", systemImage: "checklist", showsInTabBar: true, isEligibleForScheduling: true)
+    let shelf = Shelf(name: "To-Do List", systemImage: "checklist", showsInTabBar: true)
     return NavigationStack {
         TaskDetailView(task: TaskItem(title: "Sample task", shelf: shelf))
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self], inMemory: true)
 }

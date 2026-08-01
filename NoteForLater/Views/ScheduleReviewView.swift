@@ -12,6 +12,7 @@ import SwiftData
 struct ScheduleReviewView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \TaskItem.createdAt) private var allTasks: [TaskItem]
+    @Query(sort: \Shelf.sortOrder) private var allShelves: [Shelf]
     @Query private var allBlocks: [ScheduledBlock]
     @Query private var calendarSubscriptions: [CalendarSubscription]
 
@@ -100,7 +101,7 @@ struct ScheduleReviewView: View {
                 if viewModel.blocks.isEmpty {
                     Section {
                         Button("Generate Tomorrow's Schedule") {
-                            Task { await viewModel.generateProposedSchedule(allTasks: allTasks) }
+                            Task { await viewModel.generateProposedSchedule(shelves: allShelves) }
                         }
                         .buttonStyle(.borderedProminent)
                         .frame(maxWidth: .infinity)
@@ -121,6 +122,13 @@ struct ScheduleReviewView: View {
         guard viewModel == nil else { return }
         let enabledIDs = calendarSubscriptions.filter(\.isEnabled).map(\.calendarID)
         calendarService.enabledCalendarIDs = enabledIDs.isEmpty ? ["primary"] : enabledIDs
+        // Full day, not a fixed 8am-9pm business-hours window — individual
+        // SchedulingRules define their own windows now, and some (e.g. a
+        // 6pm-10pm evening rule) fall outside the old default.
+        calendarService.workingHours = (
+            DateComponents(hour: 0, minute: 0),
+            DateComponents(hour: 23, minute: 59)
+        )
         let vm = ScheduleReviewViewModel(
             modelContext: modelContext,
             calendarService: calendarService,
@@ -252,5 +260,5 @@ private struct ReplacementPickerSheet: View {
 
 #Preview {
     ScheduleReviewView()
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self], inMemory: true)
 }

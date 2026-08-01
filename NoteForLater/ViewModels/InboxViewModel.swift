@@ -31,7 +31,9 @@ final class InboxViewModel {
             estimatedMinutes: item.estimatedMinutes,
             tags: item.tags,
             priority: item.priority,
-            createdAt: item.createdAt
+            createdAt: item.createdAt,
+            isDivisible: item.isDivisible,
+            minimumSegmentMinutes: item.minimumSegmentMinutes
         )
         modelContext.insert(task)
         modelContext.delete(item)

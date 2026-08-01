@@ -31,10 +31,11 @@ final class ScheduleReviewViewModel {
 
     // MARK: - Generation (the nightly job)
 
-    /// Builds tomorrow's proposed schedule from open to-dos + free calendar
-    /// slots. Called automatically each night (see NoteForLaterApp /
-    /// TODO for BackgroundTasks wiring) and manually via a "Regenerate" button.
-    func generateProposedSchedule(allTasks: [TaskItem]) async {
+    /// Builds tomorrow's proposed schedule from each shelf's SchedulingRules
+    /// + free calendar slots. Called automatically each night (see
+    /// NoteForLaterApp / TODO for BackgroundTasks wiring) and manually via
+    /// a "Regenerate" button.
+    func generateProposedSchedule(shelves: [Shelf]) async {
         isGenerating = true
         errorMessage = nil
         defer { isGenerating = false }
@@ -42,7 +43,7 @@ final class ScheduleReviewViewModel {
         do {
             let freeSlots = try await calendarService.fetchFreeSlots(for: targetDate)
             let proposed = try await schedulingService.generateProposedSchedule(
-                tasks: allTasks,
+                shelves: shelves,
                 freeSlots: freeSlots,
                 date: targetDate
             )
@@ -131,12 +132,12 @@ final class ScheduleReviewViewModel {
 
     /// Tasks eligible to fill an empty/replaced slot: unscheduled, on a schedulable shelf.
     func unscheduledCandidates(from allTasks: [TaskItem], excluding block: ScheduledBlock) -> [TaskItem] {
-        allTasks.filter { ($0.shelf?.isEligibleForScheduling ?? false) && !$0.isScheduled && $0.id != block.task?.id }
+        allTasks.filter { ($0.shelf?.hasEnabledSchedulingRules ?? false) && !$0.isScheduled && $0.id != block.task?.id }
     }
 
     private func nextCandidate(from pool: [TaskItem], excluding outgoing: TaskItem?) -> TaskItem? {
         pool
-            .filter { ($0.shelf?.isEligibleForScheduling ?? false) && !$0.isScheduled && $0.id != outgoing?.id }
+            .filter { ($0.shelf?.hasEnabledSchedulingRules ?? false) && !$0.isScheduled && $0.id != outgoing?.id }
             .sorted { lhs, rhs in
                 if lhs.priority != rhs.priority {
                     return priorityRank(lhs.priority) > priorityRank(rhs.priority)

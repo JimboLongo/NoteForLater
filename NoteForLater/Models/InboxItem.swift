@@ -21,6 +21,8 @@ final class InboxItem {
     var estimatedMinutes: Int = 30
     var tags: [String] = []
     var priorityRaw: String = Priority.medium.rawValue
+    var isDivisible: Bool = false
+    var minimumSegmentMinutes: Int = 15
 
     init(
         text: String,
@@ -30,7 +32,9 @@ final class InboxItem {
         nextStep: String = "",
         estimatedMinutes: Int = 30,
         tags: [String] = [],
-        priority: Priority = .medium
+        priority: Priority = .medium,
+        isDivisible: Bool = false,
+        minimumSegmentMinutes: Int = 15
     ) {
         self.id = UUID()
         self.text = text
@@ -41,6 +45,8 @@ final class InboxItem {
         self.estimatedMinutes = estimatedMinutes
         self.tags = tags
         self.priorityRaw = priority.rawValue
+        self.isDivisible = isDivisible
+        self.minimumSegmentMinutes = minimumSegmentMinutes
     }
 
     var priority: Priority {

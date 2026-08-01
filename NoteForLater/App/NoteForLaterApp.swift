@@ -9,7 +9,8 @@ struct NoteForLaterApp: App {
             TaskItem.self,
             ScheduledBlock.self,
             Shelf.self,
-            CalendarSubscription.self
+            CalendarSubscription.self,
+            SchedulingRule.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
@@ -35,7 +36,7 @@ struct NoteForLaterApp: App {
 //      UNUserNotificationCenter that deep-links into ScheduleReviewView.
 //   2. A BGAppRefreshTask (BackgroundTasks framework) registered in this
 //      App's init, submitted with an 8pm-ish earliest begin date, that calls
-//      ScheduleReviewViewModel.generateProposedSchedule(allTasks:) so the
+//      ScheduleReviewViewModel.generateProposedSchedule(shelves:) so the
 //      schedule is already sitting there waiting when the notification fires.
 //      Requires enabling the "Background Modes > Background fetch" /
 //      "Background processing" capability and registering the task

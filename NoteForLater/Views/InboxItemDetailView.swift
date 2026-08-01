@@ -14,6 +14,7 @@ struct InboxItemDetailView: View {
     @Environment(\.dismiss) private var dismiss
 
     private static let durationOptions = [15, 30, 45, 60, 90, 120, 180, 240]
+    private static let segmentOptions = [5, 10, 15, 20, 30, 45, 60]
 
     init(item: InboxItem, shelves: [Shelf], onRoute: @escaping (Shelf) -> Void) {
         self.item = item
@@ -53,6 +54,14 @@ struct InboxItemDetailView: View {
                 Picker("Estimated duration", selection: $item.estimatedMinutes) {
                     ForEach(Self.durationOptions, id: \.self) { minutes in
                         Text(TaskItem.durationLabel(for: minutes)).tag(minutes)
+                    }
+                }
+                Toggle("Divisible into segments", isOn: $item.isDivisible)
+                if item.isDivisible {
+                    Picker("Smallest segment", selection: $item.minimumSegmentMinutes) {
+                        ForEach(Self.segmentOptions, id: \.self) { minutes in
+                            Text(TaskItem.durationLabel(for: minutes)).tag(minutes)
+                        }
                     }
                 }
             }
@@ -149,5 +158,5 @@ private struct TagChip: View {
     NavigationStack {
         InboxItemDetailView(item: InboxItem(text: "Sample inbox item"), shelves: [], onRoute: { _ in })
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self], inMemory: true)
 }

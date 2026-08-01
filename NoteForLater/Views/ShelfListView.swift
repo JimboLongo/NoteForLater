@@ -55,7 +55,7 @@ struct ShelfListView: View {
                     NavigationLink {
                         TaskDetailView(task: task)
                     } label: {
-                        TaskRow(task: task, showsScheduledBadge: shelf.isEligibleForScheduling)
+                        TaskRow(task: task, showsScheduledBadge: shelf.hasEnabledSchedulingRules)
                     }
                     .swipeActions(edge: .trailing) {
                         Button(role: .destructive) {
@@ -132,7 +132,7 @@ private struct TaskRow: View {
 }
 
 #Preview {
-    let shelf = Shelf(name: "To-Do List", systemImage: "checklist", showsInTabBar: true, isEligibleForScheduling: true)
+    let shelf = Shelf(name: "To-Do List", systemImage: "checklist", showsInTabBar: true)
     return ShelfListView(shelf: shelf)
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self], inMemory: true)
 }

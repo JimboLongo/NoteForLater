@@ -3,7 +3,7 @@ import SwiftData
 
 /// A sorted item living on one of the user's shelves. Inbox items become
 /// TaskItems once the user routes them to a shelf. Only tasks on a shelf
-/// with `isEligibleForScheduling` are candidates for auto-scheduling.
+/// with an enabled SchedulingRule are candidates for auto-scheduling.
 @Model
 final class TaskItem {
     var id: UUID
@@ -16,6 +16,12 @@ final class TaskItem {
     var tags: [String] = []
     var priorityRaw: String = Priority.medium.rawValue
     var isScheduled: Bool = false
+
+    /// Whether the AI Scheduler may split this task across multiple blocks
+    /// (different times/slots the same day) if it doesn't fit in one
+    /// contiguous window. Each piece is at least `minimumSegmentMinutes`.
+    var isDivisible: Bool = false
+    var minimumSegmentMinutes: Int = 15
 
     var shelf: Shelf?
 
@@ -31,7 +37,9 @@ final class TaskItem {
         estimatedMinutes: Int = 30,
         tags: [String] = [],
         priority: Priority = .medium,
-        createdAt: Date = .now
+        createdAt: Date = .now,
+        isDivisible: Bool = false,
+        minimumSegmentMinutes: Int = 15
     ) {
         self.id = UUID()
         self.title = title
@@ -44,6 +52,8 @@ final class TaskItem {
         self.tags = tags
         self.priorityRaw = priority.rawValue
         self.isScheduled = false
+        self.isDivisible = isDivisible
+        self.minimumSegmentMinutes = minimumSegmentMinutes
     }
 
     var priority: Priority {
