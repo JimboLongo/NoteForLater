@@ -53,11 +53,10 @@ struct TaskImportSummary {
 }
 
 /// Bulk-creates tasks from a parsed .csv/.xlsx table. A row whose Shelf
-/// column matches an existing shelf always becomes a full TaskItem there,
-/// preserving every column. Rows that don't match land on `defaultShelf` —
-/// or, if `defaultShelf` is nil (the user picked "Inbox"), as a plain
-/// InboxItem with just the title, same as anything typed into the Inbox by
-/// hand, ready to be sorted later.
+/// column matches an existing shelf becomes a TaskItem there; otherwise it
+/// lands on `defaultShelf`, or — if `defaultShelf` is nil (the user picked
+/// "Inbox") — as an InboxItem instead, ready to be sorted later. Either way
+/// every recognized column is preserved.
 enum TaskImportService {
     static func importTasks(
         from url: URL,
@@ -104,30 +103,41 @@ enum TaskImportService {
             let matchedShelf = values[.shelf]
                 .flatMap { name in allShelves.first { $0.name.caseInsensitiveCompare(name) == .orderedSame } }
 
-            guard let shelf = matchedShelf ?? defaultShelf else {
-                // No column match and the default is "Inbox": a plain
-                // capture entry, same as typing it by hand.
-                let createdAt = values[.dateAdded].flatMap(TaskImportDateParser.parse) ?? .now
-                modelContext.insert(InboxItem(text: title, createdAt: createdAt))
-                summary.importedCount += 1
-                continue
-            }
-
             let tags = (values[.tags] ?? "")
                 .split(whereSeparator: { $0 == "," || $0 == ";" })
                 .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
                 .filter { !$0.isEmpty }
+            let dueDate = values[.dueDate].flatMap(TaskImportDateParser.parse)
+            let priority = values[.priority].flatMap { Priority(rawValue: $0.lowercased()) } ?? .medium
+            let createdAt = values[.dateAdded].flatMap(TaskImportDateParser.parse) ?? .now
+
+            guard let shelf = matchedShelf ?? defaultShelf else {
+                // No column match and the default is "Inbox": a plain
+                // capture entry, same as typing it by hand — but every
+                // column that was present still carries over.
+                modelContext.insert(InboxItem(
+                    text: title,
+                    createdAt: createdAt,
+                    dueDate: dueDate,
+                    nextStep: values[.nextStep] ?? "",
+                    estimatedMinutes: values[.duration].flatMap { Int($0) } ?? 30,
+                    tags: tags,
+                    priority: priority
+                ))
+                summary.importedCount += 1
+                continue
+            }
 
             let task = TaskItem(
                 title: title,
                 notes: values[.notes] ?? "",
                 shelf: shelf,
-                dueDate: values[.dueDate].flatMap(TaskImportDateParser.parse),
+                dueDate: dueDate,
                 nextStep: values[.nextStep] ?? "",
                 estimatedMinutes: values[.duration].flatMap { Int($0) } ?? 30,
                 tags: tags,
-                priority: values[.priority].flatMap { Priority(rawValue: $0.lowercased()) } ?? .medium,
-                createdAt: values[.dateAdded].flatMap(TaskImportDateParser.parse) ?? .now
+                priority: priority,
+                createdAt: createdAt
             )
             modelContext.insert(task)
             summary.importedCount += 1

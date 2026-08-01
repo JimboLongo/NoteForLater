@@ -19,10 +19,20 @@ final class InboxViewModel {
         modelContext.insert(InboxItem(text: trimmed))
     }
 
-    /// Routes an inbox entry onto a shelf, creating a TaskItem and
-    /// removing the original brain-dump entry.
+    /// Routes an inbox entry onto a shelf, creating a TaskItem that carries
+    /// over everything filled in on the inbox item, and removing the
+    /// original brain-dump entry.
     func route(_ item: InboxItem, to shelf: Shelf) {
-        let task = TaskItem(title: item.text, shelf: shelf)
+        let task = TaskItem(
+            title: item.text,
+            shelf: shelf,
+            dueDate: item.dueDate,
+            nextStep: item.nextStep,
+            estimatedMinutes: item.estimatedMinutes,
+            tags: item.tags,
+            priority: item.priority,
+            createdAt: item.createdAt
+        )
         modelContext.insert(task)
         modelContext.delete(item)
     }
