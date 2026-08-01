@@ -11,11 +11,11 @@ final class TaskItem {
     var notes: String
     var createdAt: Date
     var dueDate: Date?
-    var nextStep: String
-    var estimatedMinutes: Int
-    var tags: [String]
-    var priorityRaw: String
-    var isScheduled: Bool
+    var nextStep: String = ""
+    var estimatedMinutes: Int = 30
+    var tags: [String] = []
+    var priorityRaw: String = Priority.medium.rawValue
+    var isScheduled: Bool = false
 
     var shelf: Shelf?
 
