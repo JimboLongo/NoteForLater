@@ -16,6 +16,11 @@ protocol CalendarServiceProtocol: AnyObject {
     /// calendar events and respecting `workingHours`.
     func fetchFreeSlots(for date: Date) async throws -> [TimeSlot]
 
+    /// Returns the existing "busy" ranges on `date` (within `workingHours`)
+    /// from the enabled calendars, so the Schedule tab can show what's
+    /// already blocked off alongside proposed task blocks.
+    func fetchBusyBlocks(for date: Date) async throws -> [TimeSlot]
+
     /// Writes an approved ScheduledBlock to the user's primary Google Calendar
     /// as a real event, so it shows up alongside everything else.
     func createEvent(for block: ScheduledBlock) async throws
@@ -55,18 +60,7 @@ final class GoogleCalendarService: CalendarServiceProtocol {
     }
 
     func fetchFreeSlots(for date: Date) async throws -> [TimeSlot] {
-        let calendar = Calendar.current
-        let dayStart = calendar.date(
-            bySettingHour: workingHours.start.hour ?? 8,
-            minute: workingHours.start.minute ?? 0,
-            second: 0, of: date
-        )!
-        let dayEnd = calendar.date(
-            bySettingHour: workingHours.end.hour ?? 21,
-            minute: workingHours.end.minute ?? 0,
-            second: 0, of: date
-        )!
-
+        let (dayStart, dayEnd) = workingHoursRange(for: date)
         let busy = try await fetchBusyRanges(from: dayStart, to: dayEnd)
 
         var freeSlots: [TimeSlot] = []
@@ -81,6 +75,27 @@ final class GoogleCalendarService: CalendarServiceProtocol {
             freeSlots.append(TimeSlot(start: cursor, end: dayEnd))
         }
         return freeSlots
+    }
+
+    func fetchBusyBlocks(for date: Date) async throws -> [TimeSlot] {
+        let (dayStart, dayEnd) = workingHoursRange(for: date)
+        return try await fetchBusyRanges(from: dayStart, to: dayEnd)
+            .sorted { $0.start < $1.start }
+    }
+
+    private func workingHoursRange(for date: Date) -> (start: Date, end: Date) {
+        let calendar = Calendar.current
+        let dayStart = calendar.date(
+            bySettingHour: workingHours.start.hour ?? 8,
+            minute: workingHours.start.minute ?? 0,
+            second: 0, of: date
+        )!
+        let dayEnd = calendar.date(
+            bySettingHour: workingHours.end.hour ?? 21,
+            minute: workingHours.end.minute ?? 0,
+            second: 0, of: date
+        )!
+        return (dayStart, dayEnd)
     }
 
     func createEvent(for block: ScheduledBlock) async throws {
@@ -193,15 +208,7 @@ final class MockCalendarService: CalendarServiceProtocol {
                                     minute: workingHours.end.minute ?? 0,
                                     second: 0, of: date)!
 
-        let busy = mockBusyRanges.map { range -> TimeSlot in
-            let start = calendar.date(bySettingHour: range.start.hour ?? 0,
-                                       minute: range.start.minute ?? 0,
-                                       second: 0, of: date)!
-            let end = calendar.date(bySettingHour: range.end.hour ?? 0,
-                                     minute: range.end.minute ?? 0,
-                                     second: 0, of: date)!
-            return TimeSlot(start: start, end: end)
-        }.sorted { $0.start < $1.start }
+        let busy = try await fetchBusyBlocks(for: date)
 
         var freeSlots: [TimeSlot] = []
         var cursor = dayStart
@@ -215,6 +222,19 @@ final class MockCalendarService: CalendarServiceProtocol {
             freeSlots.append(TimeSlot(start: cursor, end: dayEnd))
         }
         return freeSlots
+    }
+
+    func fetchBusyBlocks(for date: Date) async throws -> [TimeSlot] {
+        let calendar = Calendar.current
+        return mockBusyRanges.map { range -> TimeSlot in
+            let start = calendar.date(bySettingHour: range.start.hour ?? 0,
+                                       minute: range.start.minute ?? 0,
+                                       second: 0, of: date)!
+            let end = calendar.date(bySettingHour: range.end.hour ?? 0,
+                                     minute: range.end.minute ?? 0,
+                                     second: 0, of: date)!
+            return TimeSlot(start: start, end: end)
+        }.sorted { $0.start < $1.start }
     }
 
     func createEvent(for block: ScheduledBlock) async throws {

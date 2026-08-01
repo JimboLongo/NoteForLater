@@ -12,6 +12,7 @@ final class ScheduleReviewViewModel {
     private let schedulingService: AISchedulingServiceProtocol
 
     private(set) var blocks: [ScheduledBlock] = []
+    private(set) var busyBlocks: [TimeSlot] = []
     var targetDate: Date
     var isGenerating = false
     var errorMessage: String?
@@ -59,6 +60,13 @@ final class ScheduleReviewViewModel {
         blocks = existing
             .filter { Calendar.current.isDate($0.date, inSameDayAs: targetDate) }
             .sorted { $0.startTime < $1.startTime }
+    }
+
+    /// Pulls existing calendar events for the day so the Schedule tab can
+    /// show what's already blocked off, even before a schedule is
+    /// generated. Failure (e.g. not signed in) just leaves this empty.
+    func loadBusyBlocks() async {
+        busyBlocks = (try? await calendarService.fetchBusyBlocks(for: targetDate)) ?? []
     }
 
     // MARK: - Approval

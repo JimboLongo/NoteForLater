@@ -61,44 +61,60 @@ struct ScheduleReviewView: View {
         if viewModel.isGenerating {
             ProgressView("Building tomorrow's schedule...")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if viewModel.blocks.isEmpty {
-            VStack(spacing: 16) {
-                Text("No proposed schedule yet.")
-                    .foregroundStyle(.secondary)
-                Button("Generate Tomorrow's Schedule") {
-                    Task { await viewModel.generateProposedSchedule(allTasks: allTasks) }
-                }
-                .buttonStyle(.borderedProminent)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             List {
-                ForEach(viewModel.blocks) { block in
-                    ScheduleBlockRow(block: block)
-                        .contentShape(Rectangle())
-                        .onLongPressGesture {
-                            pickerTarget = block
-                        }
-                        // Swipe left (revealed from the trailing edge): delete.
-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button(role: .destructive) {
-                                viewModel.deleteBlock(block)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
+                if timelineRows(viewModel: viewModel).isEmpty {
+                    Text("Nothing on the calendar yet.")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(timelineRows(viewModel: viewModel)) { row in
+                    switch row {
+                    case .busy(let slot):
+                        BusyBlockRow(slot: slot)
+                    case .proposed(let block):
+                        ScheduleBlockRow(block: block)
+                            .contentShape(Rectangle())
+                            .onLongPressGesture {
+                                pickerTarget = block
                             }
-                        }
-                        // Swipe right (revealed from the leading edge): auto-replace.
-                        .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                            Button {
-                                viewModel.autoReplace(block, candidatePool: allTasks)
-                            } label: {
-                                Label("Replace", systemImage: "arrow.triangle.2.circlepath")
+                            // Swipe left (revealed from the trailing edge): delete.
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    viewModel.deleteBlock(block)
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
                             }
-                            .tint(.orange)
+                            // Swipe right (revealed from the leading edge): auto-replace.
+                            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                                Button {
+                                    viewModel.autoReplace(block, candidatePool: allTasks)
+                                } label: {
+                                    Label("Replace", systemImage: "arrow.triangle.2.circlepath")
+                                }
+                                .tint(.orange)
+                            }
+                    }
+                }
+
+                if viewModel.blocks.isEmpty {
+                    Section {
+                        Button("Generate Tomorrow's Schedule") {
+                            Task { await viewModel.generateProposedSchedule(allTasks: allTasks) }
                         }
+                        .buttonStyle(.borderedProminent)
+                        .frame(maxWidth: .infinity)
+                    }
+                    .listRowBackground(Color.clear)
                 }
             }
         }
+    }
+
+    private func timelineRows(viewModel: ScheduleReviewViewModel) -> [DayTimelineRow] {
+        let busyRows = viewModel.busyBlocks.map(DayTimelineRow.busy)
+        let proposedRows = viewModel.blocks.map(DayTimelineRow.proposed)
+        return (busyRows + proposedRows).sorted { $0.startTime < $1.startTime }
     }
 
     private func setupIfNeeded() {
@@ -112,6 +128,7 @@ struct ScheduleReviewView: View {
         )
         vm.loadExistingBlocks(allBlocks)
         viewModel = vm
+        Task { await vm.loadBusyBlocks() }
     }
 
     private var tomorrowTitle: String {
@@ -119,6 +136,54 @@ struct ScheduleReviewView: View {
         formatter.dateFormat = "EEEE, MMM d"
         let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: .now) ?? .now
         return formatter.string(from: tomorrow)
+    }
+}
+
+/// A single row in the day's merged timeline: either an existing calendar
+/// event pulled in as "busy" (read-only) or a proposed/approved task block.
+private enum DayTimelineRow: Identifiable {
+    case busy(TimeSlot)
+    case proposed(ScheduledBlock)
+
+    var id: String {
+        switch self {
+        case .busy(let slot): return "busy-\(slot.id)"
+        case .proposed(let block): return "block-\(block.id)"
+        }
+    }
+
+    var startTime: Date {
+        switch self {
+        case .busy(let slot): return slot.start
+        case .proposed(let block): return block.startTime
+        }
+    }
+}
+
+private struct BusyBlockRow: View {
+    let slot: TimeSlot
+
+    var body: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading) {
+                Text(timeRangeText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Busy")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "lock.fill")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var timeRangeText: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "h:mm a"
+        return "\(formatter.string(from: slot.start)) - \(formatter.string(from: slot.end))"
     }
 }
 
