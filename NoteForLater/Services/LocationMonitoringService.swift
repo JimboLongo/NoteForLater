@@ -1,0 +1,76 @@
+import Foundation
+import CoreLocation
+import UserNotifications
+import SwiftData
+
+/// Geofences every LocationTag and fires a local notification listing
+/// what's tagged there when you come within its radius. iOS caps monitored
+/// regions at 20 per app, so only the first 20 LocationTags are watched.
+@Observable
+final class LocationMonitoringService: NSObject {
+    static let shared = LocationMonitoringService()
+
+    private let locationManager = CLLocationManager()
+    private(set) var authorizationStatus: CLAuthorizationStatus = .notDetermined
+
+    /// Set once at launch (see NoteForLaterApp) so region-entry callbacks
+    /// can look up which tasks/inbox items carry the triggered tag.
+    var modelContainer: ModelContainer?
+
+    private override init() {
+        super.init()
+        locationManager.delegate = self
+        authorizationStatus = locationManager.authorizationStatus
+    }
+
+    /// Requests both "Always" location access (region monitoring needs it
+    /// to fire reliably when the app isn't running) and notification
+    /// permission, so proximity reminders can actually be delivered.
+    func requestAuthorization() {
+        locationManager.requestAlwaysAuthorization()
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    /// Re-syncs monitored regions to match `locationTags` — stops
+    /// monitoring anything removed/changed, starts monitoring the rest.
+    func syncRegions(with locationTags: [LocationTag]) {
+        for region in locationManager.monitoredRegions {
+            locationManager.stopMonitoring(for: region)
+        }
+        for tag in locationTags.prefix(20) {
+            let region = CLCircularRegion(center: tag.coordinate, radius: tag.radiusMeters, identifier: tag.name)
+            region.notifyOnEntry = true
+            region.notifyOnExit = false
+            locationManager.startMonitoring(for: region)
+        }
+    }
+}
+
+extension LocationMonitoringService: CLLocationManagerDelegate {
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        authorizationStatus = manager.authorizationStatus
+    }
+
+    func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
+        notifyForTag(named: region.identifier)
+    }
+
+    private func notifyForTag(named tagName: String) {
+        guard let modelContainer else { return }
+        let context = ModelContext(modelContainer)
+        guard let tasks = try? context.fetch(FetchDescriptor<TaskItem>()) else { return }
+
+        let matching = tasks.filter { !$0.isScheduled && $0.tags.contains(tagName) }
+        guard !matching.isEmpty else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Near \(tagName.capitalized)"
+        content.body = matching.count == 1
+            ? matching[0].title
+            : "\(matching.count) tasks: \(matching.prefix(3).map(\.title).joined(separator: ", "))"
+        content.sound = .default
+
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+}
