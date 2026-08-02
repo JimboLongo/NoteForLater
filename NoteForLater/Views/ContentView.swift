@@ -1,33 +1,58 @@
 import SwiftUI
 import SwiftData
 
+enum AppTab: Hashable {
+    case inbox
+    case shelf(UUID)
+    case schedule
+    case shelves
+    case more
+}
+
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Shelf.sortOrder) private var shelves: [Shelf]
-    @Query private var locationTags: [LocationTag]
+    @Query private var tags: [Tag]
+
+    @State private var selectedTab: AppTab = .inbox
+    @State private var quickAction = QuickActionService.shared
 
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             InboxView()
                 .tabItem { Label("Inbox", systemImage: "tray") }
+                .tag(AppTab.inbox)
 
             ForEach(pinnedShelves) { shelf in
                 ShelfListView(shelf: shelf)
                     .tabItem { Label(shelf.name, systemImage: shelf.systemImage) }
+                    .tag(AppTab.shelf(shelf.id))
             }
 
             ScheduleReviewView()
                 .tabItem { Label("Schedule", systemImage: "calendar") }
+                .tag(AppTab.schedule)
 
             ShelvesView()
                 .tabItem { Label("Shelves", systemImage: "square.stack.3d.up") }
+                .tag(AppTab.shelves)
 
             MoreView()
                 .tabItem { Label("More", systemImage: "ellipsis.circle") }
+                .tag(AppTab.more)
         }
         .onAppear {
             seedDefaultShelvesIfNeeded()
-            LocationMonitoringService.shared.syncRegions(with: locationTags)
+            LocationMonitoringService.shared.syncRegions(with: tags)
+        }
+        .onChange(of: tags) { _, newValue in
+            LocationMonitoringService.shared.syncRegions(with: newValue)
+        }
+        .onChange(of: shelves) { _, _ in
+            seedDefaultShelvesIfNeeded()
+        }
+        .onChange(of: quickAction.pendingQuickAdd) { _, isPending in
+            if isPending { selectedTab = .inbox }
         }
     }
 
@@ -55,6 +80,11 @@ struct MoreView: View {
                     Label("Manage Shelves", systemImage: "square.stack.3d.up")
                 }
                 NavigationLink {
+                    TagsListView()
+                } label: {
+                    Label("Manage Tags", systemImage: "tag")
+                }
+                NavigationLink {
                     SettingsView()
                 } label: {
                     Label("Settings", systemImage: "gearshape")
@@ -67,5 +97,5 @@ struct MoreView: View {
 
 #Preview {
     ContentView()
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
 }

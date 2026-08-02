@@ -190,5 +190,5 @@ private struct DayToggleChip: View {
     NavigationStack {
         SchedulingRuleEditView(rule: SchedulingRule(shelf: Shelf(name: "Work")))
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
 }

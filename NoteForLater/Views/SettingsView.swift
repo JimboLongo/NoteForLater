@@ -11,7 +11,11 @@ struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var subscriptions: [CalendarSubscription]
     @Query(sort: \EligibleHoursWindow.sortOrder) private var eligibleHoursWindows: [EligibleHoursWindow]
-    @Query(sort: \LocationTag.name) private var locationTags: [LocationTag]
+    @Query private var allInboxItems: [InboxItem]
+    @Query private var allTasks: [TaskItem]
+    @Query private var allScheduledBlocks: [ScheduledBlock]
+    @Query private var allShelves: [Shelf]
+    @Query private var allTags: [Tag]
 
     private var accountService: GoogleAccountService { GoogleAccountService.shared }
     private var locationService: LocationMonitoringService { LocationMonitoringService.shared }
@@ -19,6 +23,7 @@ struct SettingsView: View {
     @State private var isSigningIn = false
     @State private var isSyncingCalendars = false
     @State private var errorMessage: String?
+    @State private var isShowingClearAllConfirmation = false
 
     var body: some View {
         Form {
@@ -125,28 +130,25 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                if locationTags.isEmpty {
-                    Text("No location tags yet. Tap the pin on a tag in any task to attach a place.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(locationTags) { tag in
-                        NavigationLink {
-                            LocationTagPickerView(tagName: tag.name)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(tag.name.capitalized)
-                                Text(tag.addressLabel.isEmpty ? tag.radiusDescription : "\(tag.addressLabel) · \(tag.radiusDescription)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    .onDelete(perform: deleteLocationTags)
+                NavigationLink {
+                    TagsListView()
+                } label: {
+                    Label("Manage Tags", systemImage: "tag")
                 }
             } header: {
                 Text("Location Reminders")
             } footer: {
-                Text("You'll get a notification listing tagged tasks whenever you come within range of one of these places.")
+                Text("Attach a place to any tag in the tag box and you'll get a notification listing tagged tasks whenever you come within range.")
+            }
+
+            Section {
+                Button("Clear All Data", role: .destructive) {
+                    isShowingClearAllConfirmation = true
+                }
+            } header: {
+                Text("Danger Zone")
+            } footer: {
+                Text("Permanently deletes every inbox item, task, shelf, scheduled block, and tag on this device, and disconnects your Google account. This can't be undone.")
             }
 
             if let errorMessage {
@@ -161,8 +163,15 @@ struct SettingsView: View {
                 syncCalendars()
             }
         }
-        .onChange(of: locationTags) { _, newValue in
-            locationService.syncRegions(with: newValue)
+        .confirmationDialog(
+            "Clear all saved data?",
+            isPresented: $isShowingClearAllConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Clear All Data", role: .destructive, action: clearAllData)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently deletes everything in NoteForLater on this device. This can't be undone.")
         }
     }
 
@@ -229,10 +238,16 @@ struct SettingsView: View {
         }
     }
 
-    private func deleteLocationTags(at offsets: IndexSet) {
-        for index in offsets {
-            modelContext.delete(locationTags[index])
-        }
+    private func clearAllData() {
+        for item in allInboxItems { modelContext.delete(item) }
+        for task in allTasks { modelContext.delete(task) }
+        for block in allScheduledBlocks { modelContext.delete(block) }
+        for shelf in allShelves { modelContext.delete(shelf) }
+        for tag in allTags { modelContext.delete(tag) }
+        for window in eligibleHoursWindows { modelContext.delete(window) }
+        for subscription in subscriptions { modelContext.delete(subscription) }
+        accountService.signOut()
+        locationService.syncRegions(with: [])
     }
 }
 
@@ -240,5 +255,5 @@ struct SettingsView: View {
     NavigationStack {
         SettingsView()
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
 }

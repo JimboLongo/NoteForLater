@@ -5,11 +5,13 @@ import SwiftData
 /// and searchable tags. Reached by tapping a task in any holding pen list.
 struct TaskDetailView: View {
     @Bindable var task: TaskItem
-    @Query private var locationTags: [LocationTag]
+    @Query(sort: \Tag.name) private var allTags: [Tag]
 
     @State private var hasDueDate: Bool
     @State private var newTag: String = ""
     @State private var locationTagTarget: TagLocationTarget?
+    @State private var isShowingNewTagSheet = false
+    @State private var pendingNewTagName = ""
 
     private static let durationOptions = [15, 30, 45, 60, 90, 120, 180, 240]
     private static let segmentOptions = [5, 10, 15, 20, 30, 45, 60]
@@ -79,7 +81,7 @@ struct TaskDetailView: View {
                             ForEach(task.tags, id: \.self) { tag in
                                 TagChip(
                                     text: tag,
-                                    hasLocation: locationTagNames.contains(tag),
+                                    hasLocation: hasLocation(for: tag),
                                     onTapLocation: { locationTagTarget = TagLocationTarget(name: tag) },
                                     onDelete: { task.tags.removeAll { $0 == tag } }
                                 )
@@ -93,6 +95,20 @@ struct TaskDetailView: View {
                         .onSubmit(addTag)
                     Button("Add", action: addTag)
                         .disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                if !tagSuggestions.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack {
+                            ForEach(tagSuggestions) { tag in
+                                Button(tag.name) {
+                                    task.tags.append(tag.name)
+                                    newTag = ""
+                                }
+                                .font(.caption)
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                    }
                 }
             } header: {
                 Text("Tags")
@@ -109,10 +125,22 @@ struct TaskDetailView: View {
         .sheet(item: $locationTagTarget) { target in
             LocationTagPickerView(tagName: target.name)
         }
+        .sheet(isPresented: $isShowingNewTagSheet) {
+            NewTagSheet(prefilledName: pendingNewTagName) { name in
+                task.tags.append(name)
+                newTag = ""
+            }
+        }
     }
 
-    private var locationTagNames: Set<String> {
-        Set(locationTags.map(\.name))
+    private func hasLocation(for tagName: String) -> Bool {
+        allTags.first { $0.name == tagName }?.hasLocation ?? false
+    }
+
+    private var tagSuggestions: [Tag] {
+        let query = newTag.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return [] }
+        return allTags.filter { $0.name.hasPrefix(query) && !task.tags.contains($0.name) }
     }
 
     private func addTag() {
@@ -121,8 +149,13 @@ struct TaskDetailView: View {
             newTag = ""
             return
         }
-        task.tags.append(trimmed)
-        newTag = ""
+        if let existing = allTags.first(where: { $0.name == trimmed }) {
+            task.tags.append(existing.name)
+            newTag = ""
+        } else {
+            pendingNewTagName = trimmed
+            isShowingNewTagSheet = true
+        }
     }
 }
 
@@ -165,5 +198,5 @@ struct TagChip: View {
     return NavigationStack {
         TaskDetailView(task: TaskItem(title: "Sample task", shelf: shelf))
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
 }

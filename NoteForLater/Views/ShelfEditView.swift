@@ -19,6 +19,7 @@ struct ShelfEditView: View {
     private let columns = [GridItem(.adaptive(minimum: 44))]
 
     @State private var showingIconPicker = false
+    @State private var showingColorPicker = false
 
     init(shelf: Shelf) {
         self.shelf = shelf
@@ -51,6 +52,27 @@ struct ShelfEditView: View {
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                     }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.primary)
+            }
+
+            Section("Color") {
+                Button {
+                    showingColorPicker = true
+                } label: {
+                    HStack {
+                        Circle()
+                            .fill(shelf.color)
+                            .frame(width: 28, height: 28)
+                        Text("Choose Color")
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.primary)
@@ -129,6 +151,41 @@ struct ShelfEditView: View {
             }
             .presentationDetents([.medium])
         }
+        .sheet(isPresented: $showingColorPicker) {
+            NavigationStack {
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 12) {
+                        ForEach(Shelf.colorPalette, id: \.name) { option in
+                            Button {
+                                shelf.colorName = option.name
+                                showingColorPicker = false
+                            } label: {
+                                Circle()
+                                    .fill(option.color)
+                                    .frame(width: 44, height: 44)
+                                    .overlay {
+                                        if option.name == shelf.colorName {
+                                            Image(systemName: "checkmark")
+                                                .font(.headline)
+                                                .foregroundStyle(.white)
+                                        }
+                                    }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding()
+                }
+                .navigationTitle("Choose Color")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { showingColorPicker = false }
+                    }
+                }
+            }
+            .presentationDetents([.medium])
+        }
     }
 
     private func addRule() {
@@ -147,5 +204,5 @@ struct ShelfEditView: View {
     NavigationStack {
         ShelfEditView(shelf: Shelf(name: "To-Do List", systemImage: "checklist", showsInTabBar: true))
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
 }

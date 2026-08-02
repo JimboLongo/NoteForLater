@@ -66,7 +66,15 @@ struct ShelfListView: View {
                     }
                 }
             }
-            .navigationTitle(shelf.name)
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Text(shelf.name)
+                        .font(.headline)
+                        .foregroundStyle(shelf.color)
+                }
+            }
             .searchable(text: $searchText, prompt: "Search title or tags")
         }
     }
@@ -134,5 +142,5 @@ private struct TaskRow: View {
 #Preview {
     let shelf = Shelf(name: "To-Do List", systemImage: "checklist", showsInTabBar: true)
     return ShelfListView(shelf: shelf)
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
 }

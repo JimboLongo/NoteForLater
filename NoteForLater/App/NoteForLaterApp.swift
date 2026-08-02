@@ -3,6 +3,8 @@ import SwiftData
 
 @main
 struct NoteForLaterApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
             InboxItem.self,
@@ -12,7 +14,7 @@ struct NoteForLaterApp: App {
             CalendarSubscription.self,
             SchedulingRule.self,
             EligibleHoursWindow.self,
-            LocationTag.self
+            Tag.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {

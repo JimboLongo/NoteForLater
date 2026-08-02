@@ -3,9 +3,10 @@ import CoreLocation
 import UserNotifications
 import SwiftData
 
-/// Geofences every LocationTag and fires a local notification listing
-/// what's tagged there when you come within its radius. iOS caps monitored
-/// regions at 20 per app, so only the first 20 LocationTags are watched.
+/// Geofences every Tag that has a location attached and fires a local
+/// notification listing what's tagged there when you come within its
+/// radius. iOS caps monitored regions at 20 per app, so only the first 20
+/// located tags are watched.
 @Observable
 final class LocationMonitoringService: NSObject {
     static let shared = LocationMonitoringService()
@@ -31,13 +32,14 @@ final class LocationMonitoringService: NSObject {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    /// Re-syncs monitored regions to match `locationTags` — stops
-    /// monitoring anything removed/changed, starts monitoring the rest.
-    func syncRegions(with locationTags: [LocationTag]) {
+    /// Re-syncs monitored regions to match `tags` — stops monitoring
+    /// anything removed/changed, starts monitoring the rest. Pass only tags
+    /// with `hasLocation == true`.
+    func syncRegions(with tags: [Tag]) {
         for region in locationManager.monitoredRegions {
             locationManager.stopMonitoring(for: region)
         }
-        for tag in locationTags.prefix(20) {
+        for tag in tags.filter(\.hasLocation).prefix(20) {
             let region = CLCircularRegion(center: tag.coordinate, radius: tag.radiusMeters, identifier: tag.name)
             region.notifyOnEntry = true
             region.notifyOnExit = false

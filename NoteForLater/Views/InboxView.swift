@@ -14,6 +14,8 @@ struct InboxView: View {
     @State private var draftText: String = ""
     @State private var isShowingImporter = false
     @State private var speechCapture = SpeechCaptureService()
+    @State private var quickAction = QuickActionService.shared
+    @FocusState private var isCaptureFocused: Bool
 
     /// Per-row shelf picked on the slider but not yet submitted, keyed by
     /// InboxItem.id. Nothing here is routed until "Submit" is tapped.
@@ -22,30 +24,6 @@ struct InboxView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section {
-                    HStack {
-                        TextField("What's on your mind?", text: $draftText, axis: .vertical)
-                            .submitLabel(.done)
-                            .onSubmit(addDraft)
-                        Button {
-                            speechCapture.toggle()
-                        } label: {
-                            Image(systemName: speechCapture.isRecording ? "mic.fill" : "mic")
-                                .foregroundStyle(speechCapture.isRecording ? .red : .accentColor)
-                                .symbolEffect(.pulse, isActive: speechCapture.isRecording)
-                        }
-                        Button(action: addDraft) {
-                            Image(systemName: "plus.circle.fill")
-                        }
-                        .disabled(draftText.trimmingCharacters(in: .whitespaces).isEmpty)
-                    }
-                    if let errorMessage = speechCapture.errorMessage {
-                        Text(errorMessage)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-                }
-
                 Section("Unsorted (\(items.count))") {
                     if items.isEmpty {
                         Text("Inbox zero. Nice.")
@@ -70,6 +48,7 @@ struct InboxView: View {
                             Spacer()
                             ShelfSlider(shelves: shelves, selectedShelf: binding(for: item))
                         }
+                        .listRowBackground((pendingShelfSelections[item.id]?.color ?? Color.clear).opacity(0.2))
                         .swipeActions(edge: .trailing) {
                             Button(role: .destructive) {
                                 viewModel?.discard(item)
@@ -82,6 +61,9 @@ struct InboxView: View {
                 }
             }
             .safeAreaInset(edge: .top) {
+                captureBar
+            }
+            .safeAreaInset(edge: .bottom) {
                 if !pendingShelfSelections.isEmpty {
                     Button {
                         submitPendingRoutes()
@@ -96,6 +78,7 @@ struct InboxView: View {
                 }
             }
             .navigationTitle("Note for Later")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -111,12 +94,54 @@ struct InboxView: View {
             .onChange(of: speechCapture.transcript) { _, newValue in
                 draftText = newValue
             }
+            .onChange(of: quickAction.pendingQuickAdd) { _, isPending in
+                guard isPending else { return }
+                isCaptureFocused = true
+                quickAction.pendingQuickAdd = false
+            }
             .onAppear {
                 if viewModel == nil {
                     viewModel = InboxViewModel(modelContext: modelContext)
                 }
             }
         }
+    }
+
+    private var captureBar: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                TextField("What's on your mind?", text: $draftText, axis: .vertical)
+                    .submitLabel(.done)
+                    .onSubmit(addDraft)
+                    .focused($isCaptureFocused)
+                    .onChange(of: draftText) { _, newValue in
+                        // axis: .vertical sometimes inserts a newline on the
+                        // Done key instead of firing onSubmit — catch that here.
+                        guard newValue.hasSuffix("\n") else { return }
+                        draftText = String(newValue.dropLast())
+                        addDraft()
+                    }
+                Button {
+                    speechCapture.toggle()
+                } label: {
+                    Image(systemName: speechCapture.isRecording ? "mic.fill" : "mic")
+                        .foregroundStyle(speechCapture.isRecording ? .red : .accentColor)
+                        .symbolEffect(.pulse, isActive: speechCapture.isRecording)
+                }
+                Button(action: addDraft) {
+                    Image(systemName: "plus.circle.fill")
+                }
+                .disabled(draftText.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            if let errorMessage = speechCapture.errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(.bar)
     }
 
     private func addDraft() {
@@ -165,7 +190,7 @@ private struct ShelfSlider: View {
     @State private var removalEdge: Edge = .leading
 
     private static let width: CGFloat = 150
-    private static let height: CGFloat = 32
+    private static let height: CGFloat = 48
 
     /// index 0 is always "Skip" (nil); shelves follow in order.
     private var items: [Shelf?] { [nil] + shelves.map { $0 } }
@@ -187,7 +212,7 @@ private struct ShelfSlider: View {
                 insertion: .move(edge: insertionEdge).combined(with: .opacity),
                 removal: .move(edge: removalEdge).combined(with: .opacity)
             ))
-            .background(Color.secondary.opacity(0.12))
+            .background((items[currentIndex]?.color ?? Color.secondary).opacity(0.25))
             .clipShape(Capsule())
             .contentShape(Capsule())
             .clipped()
@@ -216,5 +241,5 @@ private struct ShelfSlider: View {
 
 #Preview {
     InboxView()
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
 }

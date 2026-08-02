@@ -8,11 +8,13 @@ struct InboxItemDetailView: View {
     @Bindable var item: InboxItem
     let shelves: [Shelf]
     let onRoute: (Shelf) -> Void
-    @Query private var locationTags: [LocationTag]
+    @Query(sort: \Tag.name) private var allTags: [Tag]
 
     @State private var hasDueDate: Bool
     @State private var newTag: String = ""
     @State private var locationTagTarget: TagLocationTarget?
+    @State private var isShowingNewTagSheet = false
+    @State private var pendingNewTagName = ""
     @Environment(\.dismiss) private var dismiss
 
     private static let durationOptions = [15, 30, 45, 60, 90, 120, 180, 240]
@@ -84,7 +86,7 @@ struct InboxItemDetailView: View {
                             ForEach(item.tags, id: \.self) { tag in
                                 TagChip(
                                     text: tag,
-                                    hasLocation: locationTagNames.contains(tag),
+                                    hasLocation: hasLocation(for: tag),
                                     onTapLocation: { locationTagTarget = TagLocationTarget(name: tag) },
                                     onDelete: { item.tags.removeAll { $0 == tag } }
                                 )
@@ -98,6 +100,20 @@ struct InboxItemDetailView: View {
                         .onSubmit(addTag)
                     Button("Add", action: addTag)
                         .disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                if !tagSuggestions.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack {
+                            ForEach(tagSuggestions) { tag in
+                                Button(tag.name) {
+                                    item.tags.append(tag.name)
+                                    newTag = ""
+                                }
+                                .font(.caption)
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                    }
                 }
             } header: {
                 Text("Tags")
@@ -133,10 +149,22 @@ struct InboxItemDetailView: View {
         .sheet(item: $locationTagTarget) { target in
             LocationTagPickerView(tagName: target.name)
         }
+        .sheet(isPresented: $isShowingNewTagSheet) {
+            NewTagSheet(prefilledName: pendingNewTagName) { name in
+                item.tags.append(name)
+                newTag = ""
+            }
+        }
     }
 
-    private var locationTagNames: Set<String> {
-        Set(locationTags.map(\.name))
+    private func hasLocation(for tagName: String) -> Bool {
+        allTags.first { $0.name == tagName }?.hasLocation ?? false
+    }
+
+    private var tagSuggestions: [Tag] {
+        let query = newTag.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return [] }
+        return allTags.filter { $0.name.hasPrefix(query) && !item.tags.contains($0.name) }
     }
 
     private func addTag() {
@@ -145,8 +173,13 @@ struct InboxItemDetailView: View {
             newTag = ""
             return
         }
-        item.tags.append(trimmed)
-        newTag = ""
+        if let existing = allTags.first(where: { $0.name == trimmed }) {
+            item.tags.append(existing.name)
+            newTag = ""
+        } else {
+            pendingNewTagName = trimmed
+            isShowingNewTagSheet = true
+        }
     }
 }
 
@@ -154,5 +187,5 @@ struct InboxItemDetailView: View {
     NavigationStack {
         InboxItemDetailView(item: InboxItem(text: "Sample inbox item"), shelves: [], onRoute: { _ in })
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
 }

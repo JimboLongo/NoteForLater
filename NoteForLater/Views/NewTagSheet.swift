@@ -2,15 +2,16 @@ import SwiftUI
 import MapKit
 import SwiftData
 
-/// Pick (or move) the real-world place a tag points to: search for it or
-/// tap the map, adjust the notification radius, save. Any task/inbox item
-/// carrying this tag becomes part of the proximity reminder for this spot.
-struct LocationTagPickerView: View {
-    let tagName: String
+/// Create a brand-new entry in the tag box, optionally attaching a
+/// real-world location up front. `onSave` hands back the saved tag's
+/// canonical name so a caller (e.g. a task's tag field) can attach it.
+struct NewTagSheet: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
-    @Query private var existingTags: [Tag]
+    @Query(sort: \Tag.name) private var existingTags: [Tag]
 
+    @State private var name: String
+    @State private var isAddingLocation = false
     @State private var position: MapCameraPosition = .region(
         MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 37.3349, longitude: -122.0090), latitudinalMeters: 4000, longitudinalMeters: 4000)
     )
@@ -19,31 +20,31 @@ struct LocationTagPickerView: View {
     @State private var searchResults: [MKMapItem] = []
     @State private var addressLabel = ""
     @State private var radiusMeters: Double = 400
+    @State private var errorMessage: String?
 
-    init(tagName: String) {
-        self.tagName = tagName
-        _existingTags = Query(filter: #Predicate<Tag> { $0.name == tagName })
+    let onSave: (String) -> Void
+
+    init(prefilledName: String = "", onSave: @escaping (String) -> Void) {
+        _name = State(initialValue: prefilledName)
+        self.onSave = onSave
     }
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                MapReader { proxy in
-                    Map(position: $position) {
-                        if let selectedCoordinate {
-                            Marker(addressLabel.isEmpty ? tagName : addressLabel, coordinate: selectedCoordinate)
-                        }
-                    }
-                    .onTapGesture { screenPoint in
-                        guard let coordinate = proxy.convert(screenPoint, from: .local) else { return }
-                        selectedCoordinate = coordinate
-                        addressLabel = ""
-                        searchResults = []
-                    }
+            Form {
+                Section("Tag") {
+                    TextField("Tag name", text: $name)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
                 }
-                .frame(height: 260)
 
-                Form {
+                Section {
+                    Toggle("Attach a location", isOn: $isAddingLocation.animation())
+                } footer: {
+                    Text("You'll get a notification listing tagged tasks whenever you come within range.")
+                }
+
+                if isAddingLocation {
                     Section("Search") {
                         TextField("Search for a place", text: $searchText)
                             .onSubmit(search)
@@ -63,36 +64,44 @@ struct LocationTagPickerView: View {
                         }
                     }
 
+                    MapReader { proxy in
+                        Map(position: $position) {
+                            if let selectedCoordinate {
+                                Marker(addressLabel.isEmpty ? name : addressLabel, coordinate: selectedCoordinate)
+                            }
+                        }
+                        .onTapGesture { screenPoint in
+                            guard let coordinate = proxy.convert(screenPoint, from: .local) else { return }
+                            selectedCoordinate = coordinate
+                            addressLabel = ""
+                            searchResults = []
+                        }
+                    }
+                    .frame(height: 220)
+                    .listRowInsets(EdgeInsets())
+
                     if selectedCoordinate != nil {
                         Section("Notify Within") {
                             Stepper(radiusDescription, value: $radiusMeters, in: 50...2000, step: 50)
                         }
                     }
+                }
 
-                    if existingTags.first?.hasLocation == true {
-                        Section {
-                            Button("Remove Location", role: .destructive, action: removeLocation)
-                        }
+                if let errorMessage {
+                    Section {
+                        Text(errorMessage).foregroundStyle(.red)
                     }
                 }
             }
-            .navigationTitle("Tag Location: \(tagName)")
+            .navigationTitle("New Tag")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button("Save") { save() }
-                        .disabled(selectedCoordinate == nil)
-                }
-            }
-            .onAppear {
-                if let existing = existingTags.first, existing.hasLocation {
-                    selectedCoordinate = existing.coordinate
-                    addressLabel = existing.addressLabel
-                    radiusMeters = existing.radiusMeters
-                    position = .region(MKCoordinateRegion(center: existing.coordinate, latitudinalMeters: 1000, longitudinalMeters: 1000))
+                    Button("Save", action: save)
+                        .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
         }
@@ -125,35 +134,38 @@ struct LocationTagPickerView: View {
     }
 
     private func save() {
-        guard let coordinate = selectedCoordinate else { return }
-        if let existing = existingTags.first {
-            existing.hasLocation = true
-            existing.latitude = coordinate.latitude
-            existing.longitude = coordinate.longitude
-            existing.radiusMeters = radiusMeters
-            existing.addressLabel = addressLabel
-        } else {
-            modelContext.insert(Tag(
-                name: tagName,
-                hasLocation: true,
-                latitude: coordinate.latitude,
-                longitude: coordinate.longitude,
-                radiusMeters: radiusMeters,
-                addressLabel: addressLabel
-            ))
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else {
+            errorMessage = "Name a tag first."
+            return
         }
-        dismiss()
-    }
 
-    private func removeLocation() {
-        if let existing = existingTags.first {
-            existing.hasLocation = false
+        let hasLocation = isAddingLocation && selectedCoordinate != nil
+
+        if let existing = existingTags.first(where: { $0.name == trimmed }) {
+            if hasLocation, let coordinate = selectedCoordinate {
+                existing.hasLocation = true
+                existing.latitude = coordinate.latitude
+                existing.longitude = coordinate.longitude
+                existing.radiusMeters = radiusMeters
+                existing.addressLabel = addressLabel
+            }
+            onSave(existing.name)
+        } else {
+            let tag: Tag
+            if hasLocation, let coordinate = selectedCoordinate {
+                tag = Tag(name: trimmed, hasLocation: true, latitude: coordinate.latitude, longitude: coordinate.longitude, radiusMeters: radiusMeters, addressLabel: addressLabel)
+            } else {
+                tag = Tag(name: trimmed)
+            }
+            modelContext.insert(tag)
+            onSave(tag.name)
         }
         dismiss()
     }
 }
 
 #Preview {
-    LocationTagPickerView(tagName: "costco")
+    NewTagSheet { _ in }
         .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
 }
