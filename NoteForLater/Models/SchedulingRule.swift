@@ -90,14 +90,29 @@ final class SchedulingRule {
 
     /// e.g. "Mon–Fri 9:00 AM–5:00 PM · Fill to Fit"
     var summary: String {
-        let days = Self.dayLabels.filter { daysOfWeek.contains($0.weekday) }.map(\.short)
-        let dayText = Self.compactDayRanges(days)
-        let timeFormatter = DateFormatter()
-        timeFormatter.dateFormat = "h:mm a"
-        let calendar = Calendar.current
-        let start = calendar.date(bySettingHour: startHour, minute: startMinute, second: 0, of: .now) ?? .now
-        let end = calendar.date(bySettingHour: endHour, minute: endMinute, second: 0, of: .now) ?? .now
-        let timeText = "\(timeFormatter.string(from: start))–\(timeFormatter.string(from: end))"
+        Self.summaryText(
+            daysOfWeek: daysOfWeek,
+            startHour: startHour, startMinute: startMinute,
+            endHour: endHour, endMinute: endMinute,
+            fillStrategy: fillStrategy,
+            maxTotalMinutes: maxTotalMinutes,
+            maxTaskCount: maxTaskCount,
+            maxMinutesPerTask: maxMinutesPerTask
+        )
+    }
+
+    /// Same formatting as `summary`, but callable against a draft that
+    /// hasn't been saved to the model yet (see SchedulingRuleEditView).
+    static func summaryText(
+        daysOfWeek: [Int],
+        startHour: Int, startMinute: Int,
+        endHour: Int, endMinute: Int,
+        fillStrategy: FillStrategy,
+        maxTotalMinutes: Int,
+        maxTaskCount: Int,
+        maxMinutesPerTask: Int
+    ) -> String {
+        let dayTimeText = dayAndTimeText(daysOfWeek: daysOfWeek, startHour: startHour, startMinute: startMinute, endHour: endHour, endMinute: endMinute)
 
         let strategyText: String
         switch fillStrategy {
@@ -105,7 +120,20 @@ final class SchedulingRule {
         case .maxDuration: strategyText = "Up to \(TaskItem.durationLabel(for: maxTotalMinutes))"
         case .maxTaskCount: strategyText = "Up to \(maxTaskCount) task\(maxTaskCount == 1 ? "" : "s"), ≤\(maxMinutesPerTask) min each"
         }
-        return "\(dayText) \(timeText) · \(strategyText)"
+        return "\(dayTimeText) · \(strategyText)"
+    }
+
+    /// "Mon–Fri 9:00 AM–5:00 PM", shared with EligibleHoursWindow.
+    static func dayAndTimeText(daysOfWeek: [Int], startHour: Int, startMinute: Int, endHour: Int, endMinute: Int) -> String {
+        let days = dayLabels.filter { daysOfWeek.contains($0.weekday) }.map(\.short)
+        let dayText = compactDayRanges(days)
+        let timeFormatter = DateFormatter()
+        timeFormatter.dateFormat = "h:mm a"
+        let calendar = Calendar.current
+        let start = calendar.date(bySettingHour: startHour, minute: startMinute, second: 0, of: .now) ?? .now
+        let end = calendar.date(bySettingHour: endHour, minute: endMinute, second: 0, of: .now) ?? .now
+        let timeText = "\(timeFormatter.string(from: start))–\(timeFormatter.string(from: end))"
+        return "\(dayText) \(timeText)"
     }
 
     private static func compactDayRanges(_ shortLabels: [String]) -> String {

@@ -4,6 +4,7 @@ import SwiftData
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Shelf.sortOrder) private var shelves: [Shelf]
+    @Query private var locationTags: [LocationTag]
 
     var body: some View {
         TabView {
@@ -24,7 +25,10 @@ struct ContentView: View {
             MoreView()
                 .tabItem { Label("More", systemImage: "ellipsis.circle") }
         }
-        .onAppear(perform: seedDefaultShelvesIfNeeded)
+        .onAppear {
+            seedDefaultShelvesIfNeeded()
+            LocationMonitoringService.shared.syncRegions(with: locationTags)
+        }
     }
 
     private var pinnedShelves: [Shelf] {
@@ -63,5 +67,5 @@ struct MoreView: View {
 
 #Preview {
     ContentView()
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
 }

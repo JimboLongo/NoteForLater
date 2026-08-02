@@ -13,6 +13,7 @@ struct InboxView: View {
     @State private var viewModel: InboxViewModel?
     @State private var draftText: String = ""
     @State private var isShowingImporter = false
+    @State private var speechCapture = SpeechCaptureService()
 
     /// Per-row shelf picked on the slider but not yet submitted, keyed by
     /// InboxItem.id. Nothing here is routed until "Submit" is tapped.
@@ -26,24 +27,23 @@ struct InboxView: View {
                         TextField("What's on your mind?", text: $draftText, axis: .vertical)
                             .submitLabel(.done)
                             .onSubmit(addDraft)
+                        Button {
+                            speechCapture.toggle()
+                        } label: {
+                            Image(systemName: speechCapture.isRecording ? "mic.fill" : "mic")
+                                .foregroundStyle(speechCapture.isRecording ? .red : .accentColor)
+                                .symbolEffect(.pulse, isActive: speechCapture.isRecording)
+                        }
                         Button(action: addDraft) {
                             Image(systemName: "plus.circle.fill")
                         }
                         .disabled(draftText.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
-                }
-
-                if !pendingShelfSelections.isEmpty {
-                    Section {
-                        Button {
-                            submitPendingRoutes()
-                        } label: {
-                            Label("Submit \(pendingShelfSelections.count) to Shelves", systemImage: "checkmark.circle.fill")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
+                    if let errorMessage = speechCapture.errorMessage {
+                        Text(errorMessage)
+                            .font(.caption)
+                            .foregroundStyle(.red)
                     }
-                    .listRowBackground(Color.clear)
                 }
 
                 Section("Unsorted (\(items.count))") {
@@ -81,6 +81,20 @@ struct InboxView: View {
                     }
                 }
             }
+            .safeAreaInset(edge: .top) {
+                if !pendingShelfSelections.isEmpty {
+                    Button {
+                        submitPendingRoutes()
+                    } label: {
+                        Label("Sort \(pendingShelfSelections.count) Tasks to Shelves", systemImage: "checkmark.circle.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .background(.bar)
+                }
+            }
             .navigationTitle("Note for Later")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -93,6 +107,9 @@ struct InboxView: View {
             }
             .sheet(isPresented: $isShowingImporter) {
                 ImportView()
+            }
+            .onChange(of: speechCapture.transcript) { _, newValue in
+                draftText = newValue
             }
             .onAppear {
                 if viewModel == nil {
@@ -199,5 +216,5 @@ private struct ShelfSlider: View {
 
 #Preview {
     InboxView()
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
 }

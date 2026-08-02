@@ -20,6 +20,7 @@ struct ScheduleReviewView: View {
     @Query(sort: \Shelf.sortOrder) private var allShelves: [Shelf]
     @Query private var allBlocks: [ScheduledBlock]
     @Query private var calendarSubscriptions: [CalendarSubscription]
+    @Query private var eligibleHoursWindows: [EligibleHoursWindow]
 
     @State private var viewModel: ScheduleReviewViewModel?
     @State private var pickerTarget: ScheduledBlock?
@@ -141,7 +142,7 @@ struct ScheduleReviewView: View {
                 if viewModel.blocks.isEmpty {
                     Section {
                         Button("Generate Schedule") {
-                            Task { await viewModel.generateProposedSchedule(shelves: allShelves) }
+                            Task { await viewModel.generateProposedSchedule(shelves: allShelves, eligibleHoursWindows: eligibleHoursWindows) }
                         }
                         .buttonStyle(.borderedProminent)
                         .frame(maxWidth: .infinity)
@@ -369,5 +370,5 @@ private struct ReplacementPickerSheet: View {
 
 #Preview {
     ScheduleReviewView()
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
 }

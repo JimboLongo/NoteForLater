@@ -8,9 +8,11 @@ struct InboxItemDetailView: View {
     @Bindable var item: InboxItem
     let shelves: [Shelf]
     let onRoute: (Shelf) -> Void
+    @Query private var locationTags: [LocationTag]
 
     @State private var hasDueDate: Bool
     @State private var newTag: String = ""
+    @State private var locationTagTarget: TagLocationTarget?
     @Environment(\.dismiss) private var dismiss
 
     private static let durationOptions = [15, 30, 45, 60, 90, 120, 180, 240]
@@ -75,14 +77,17 @@ struct InboxItemDetailView: View {
                 .pickerStyle(.segmented)
             }
 
-            Section("Tags") {
+            Section {
                 if !item.tags.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack {
                             ForEach(item.tags, id: \.self) { tag in
-                                TagChip(text: tag) {
-                                    item.tags.removeAll { $0 == tag }
-                                }
+                                TagChip(
+                                    text: tag,
+                                    hasLocation: locationTagNames.contains(tag),
+                                    onTapLocation: { locationTagTarget = TagLocationTarget(name: tag) },
+                                    onDelete: { item.tags.removeAll { $0 == tag } }
+                                )
                             }
                         }
                     }
@@ -94,6 +99,10 @@ struct InboxItemDetailView: View {
                     Button("Add", action: addTag)
                         .disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
+            } header: {
+                Text("Tags")
+            } footer: {
+                Text("Tap the pin on a tag to attach a real-world location — you'll get a notification when you're nearby.")
             }
 
             Section {
@@ -121,6 +130,13 @@ struct InboxItemDetailView: View {
         }
         .navigationTitle(item.text.isEmpty ? "Inbox Item" : item.text)
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $locationTagTarget) { target in
+            LocationTagPickerView(tagName: target.name)
+        }
+    }
+
+    private var locationTagNames: Set<String> {
+        Set(locationTags.map(\.name))
     }
 
     private func addTag() {
@@ -134,29 +150,9 @@ struct InboxItemDetailView: View {
     }
 }
 
-private struct TagChip: View {
-    let text: String
-    let onDelete: () -> Void
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Text(text)
-                .font(.caption)
-            Button(action: onDelete) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.caption2)
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(Color.accentColor.opacity(0.15))
-        .clipShape(Capsule())
-    }
-}
-
 #Preview {
     NavigationStack {
         InboxItemDetailView(item: InboxItem(text: "Sample inbox item"), shelves: [], onRoute: { _ in })
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
 }

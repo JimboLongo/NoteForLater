@@ -5,9 +5,11 @@ import SwiftData
 /// and searchable tags. Reached by tapping a task in any holding pen list.
 struct TaskDetailView: View {
     @Bindable var task: TaskItem
+    @Query private var locationTags: [LocationTag]
 
     @State private var hasDueDate: Bool
     @State private var newTag: String = ""
+    @State private var locationTagTarget: TagLocationTarget?
 
     private static let durationOptions = [15, 30, 45, 60, 90, 120, 180, 240]
     private static let segmentOptions = [5, 10, 15, 20, 30, 45, 60]
@@ -70,14 +72,17 @@ struct TaskDetailView: View {
                 .pickerStyle(.segmented)
             }
 
-            Section("Tags") {
+            Section {
                 if !task.tags.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack {
                             ForEach(task.tags, id: \.self) { tag in
-                                TagChip(text: tag) {
-                                    task.tags.removeAll { $0 == tag }
-                                }
+                                TagChip(
+                                    text: tag,
+                                    hasLocation: locationTagNames.contains(tag),
+                                    onTapLocation: { locationTagTarget = TagLocationTarget(name: tag) },
+                                    onDelete: { task.tags.removeAll { $0 == tag } }
+                                )
                             }
                         }
                     }
@@ -89,6 +94,10 @@ struct TaskDetailView: View {
                     Button("Add", action: addTag)
                         .disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
+            } header: {
+                Text("Tags")
+            } footer: {
+                Text("Tap the pin on a tag to attach a real-world location — you'll get a notification when you're nearby.")
             }
 
             Section {
@@ -97,6 +106,13 @@ struct TaskDetailView: View {
         }
         .navigationTitle(task.title.isEmpty ? "Task" : task.title)
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $locationTagTarget) { target in
+            LocationTagPickerView(tagName: target.name)
+        }
+    }
+
+    private var locationTagNames: Set<String> {
+        Set(locationTags.map(\.name))
     }
 
     private func addTag() {
@@ -110,12 +126,26 @@ struct TaskDetailView: View {
     }
 }
 
-private struct TagChip: View {
+/// Identifies which tag's location is being edited — plain String isn't
+/// Identifiable, and this is shared by TaskDetailView and InboxItemDetailView.
+struct TagLocationTarget: Identifiable {
+    let name: String
+    var id: String { name }
+}
+
+struct TagChip: View {
     let text: String
+    let hasLocation: Bool
+    let onTapLocation: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
         HStack(spacing: 4) {
+            Button(action: onTapLocation) {
+                Image(systemName: hasLocation ? "mappin.circle.fill" : "mappin.circle")
+                    .font(.caption2)
+            }
+            .buttonStyle(.plain)
             Text(text)
                 .font(.caption)
             Button(action: onDelete) {
@@ -135,5 +165,5 @@ private struct TagChip: View {
     return NavigationStack {
         TaskDetailView(task: TaskItem(title: "Sample task", shelf: shelf))
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
 }

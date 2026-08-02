@@ -10,6 +10,7 @@ protocol AISchedulingServiceProtocol: AnyObject {
     func generateProposedSchedule(
         shelves: [Shelf],
         freeSlots: [TimeSlot],
+        eligibleHoursWindows: [EligibleHoursWindow],
         date: Date
     ) async throws -> [ScheduledBlock]
 }
@@ -25,6 +26,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
     func generateProposedSchedule(
         shelves: [Shelf],
         freeSlots: [TimeSlot],
+        eligibleHoursWindows: [EligibleHoursWindow],
         date: Date
     ) async throws -> [ScheduledBlock] {
         let calendar = Calendar.current
@@ -37,6 +39,26 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             .sorted { $0.rule.sortOrder < $1.rule.sortOrder }
 
         var remainingFree = freeSlots.sorted { $0.start < $1.start }
+
+        // Global guardrail: clip the day's whole free pool down to whatever
+        // falls inside the enabled eligible-hours windows for this weekday,
+        // before any shelf rule gets a turn. No windows configured = no
+        // restriction, so this is a no-op by default.
+        let eligibleToday = eligibleHoursWindows.filter { $0.isEnabled && $0.daysOfWeek.contains(weekday) }
+        if !eligibleToday.isEmpty {
+            let eligibleRanges = eligibleToday.compactMap { window -> TimeSlot? in
+                guard
+                    let start = calendar.date(bySettingHour: window.startHour, minute: window.startMinute, second: 0, of: date),
+                    let end = calendar.date(bySettingHour: window.endHour, minute: window.endMinute, second: 0, of: date),
+                    start < end
+                else { return nil }
+                return TimeSlot(start: start, end: end)
+            }
+            remainingFree = eligibleRanges
+                .flatMap { intersect(remainingFree, with: $0) }
+                .sorted { $0.start < $1.start }
+        }
+
         var scheduledTaskIDs = Set<UUID>()
         var blocks: [ScheduledBlock] = []
 
@@ -73,13 +95,12 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
     /// Greedily places candidates into `slots` per the rule's fill
     /// strategy, returning what got placed and whatever slot time is left.
     ///
-    /// Simplification: a task that only partly fits a maxTaskCount rule's
-    /// per-task cap (and is divisible) gets exactly that capped segment and
-    /// is still marked fully scheduled — there's no "remaining work" tracking
-    /// yet. That's fine for a single time-boxed session on a task, but will
-    /// need revisiting once completion tracking (mark-done/push-to-another-
-    /// day) exists, since right now the rest of that task's time just isn't
-    /// accounted for anywhere.
+    /// When a divisible task only gets part of its time placed (truncated
+    /// by a maxDuration budget or a maxTaskCount per-task cap), its
+    /// `estimatedMinutes` is reduced by exactly what got scheduled and it's
+    /// left unscheduled — the remainder stays on the shelf, eligible to be
+    /// picked up again by another rule or a future night. Only a task whose
+    /// *entire* remaining time gets placed is marked scheduled.
     private func pack(
         candidates: [TaskItem],
         into slots: [TimeSlot],
@@ -133,6 +154,12 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             slots = updatedSlots(after: placement, in: slots)
             totalMinutesUsed += minutesNeeded
             taskCount += 1
+
+            if minutesNeeded >= task.estimatedMinutes {
+                task.isScheduled = true
+            } else {
+                task.estimatedMinutes -= minutesNeeded
+            }
         }
 
         return (results, slots)

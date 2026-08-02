@@ -256,6 +256,10 @@
 				DEVELOPMENT_TEAM = QJ4HB93XZ8;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "Used to notify you when you're near a location tagged on a task.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Used to notify you when you're near a location tagged on a task.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Used to capture voice notes in the Inbox.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Used to transcribe voice notes in the Inbox.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -288,6 +292,10 @@
 				DEVELOPMENT_TEAM = QJ4HB93XZ8;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "Used to notify you when you're near a location tagged on a task.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Used to notify you when you're near a location tagged on a task.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Used to capture voice notes in the Inbox.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Used to transcribe voice notes in the Inbox.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

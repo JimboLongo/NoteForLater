@@ -134,5 +134,5 @@ private struct TaskRow: View {
 #Preview {
     let shelf = Shelf(name: "To-Do List", systemImage: "checklist", showsInTabBar: true)
     return ShelfListView(shelf: shelf)
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
 }

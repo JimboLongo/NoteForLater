@@ -10,7 +10,9 @@ struct NoteForLaterApp: App {
             ScheduledBlock.self,
             Shelf.self,
             CalendarSubscription.self,
-            SchedulingRule.self
+            SchedulingRule.self,
+            EligibleHoursWindow.self,
+            LocationTag.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
@@ -19,6 +21,12 @@ struct NoteForLaterApp: App {
             fatalError("Could not create ModelContainer: \(error)")
         }
     }()
+
+    init() {
+        // Region-entry callbacks fire outside any view's environment, so the
+        // monitoring service needs its own direct handle on the container.
+        LocationMonitoringService.shared.modelContainer = sharedModelContainer
+    }
 
     var body: some Scene {
         WindowGroup {

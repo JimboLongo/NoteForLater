@@ -18,6 +18,8 @@ struct ShelfEditView: View {
 
     private let columns = [GridItem(.adaptive(minimum: 44))]
 
+    @State private var showingIconPicker = false
+
     init(shelf: Shelf) {
         self.shelf = shelf
         let shelfID = shelf.id
@@ -34,21 +36,24 @@ struct ShelfEditView: View {
             }
 
             Section("Icon") {
-                LazyVGrid(columns: columns, spacing: 12) {
-                    ForEach(Self.iconOptions, id: \.self) { icon in
-                        Button {
-                            shelf.systemImage = icon
-                        } label: {
-                            Image(systemName: icon)
-                                .font(.title2)
-                                .frame(width: 44, height: 44)
-                                .background(icon == shelf.systemImage ? Color.accentColor.opacity(0.2) : Color.clear)
-                                .clipShape(RoundedRectangle(cornerRadius: 10))
-                        }
-                        .buttonStyle(.plain)
+                Button {
+                    showingIconPicker = true
+                } label: {
+                    HStack {
+                        Image(systemName: shelf.systemImage)
+                            .font(.title2)
+                            .frame(width: 36, height: 36)
+                            .background(Color.accentColor.opacity(0.15))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        Text("Choose Icon")
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
                     }
                 }
-                .padding(.vertical, 4)
+                .buttonStyle(.plain)
+                .foregroundStyle(.primary)
             }
 
             Section {
@@ -94,6 +99,36 @@ struct ShelfEditView: View {
         }
         .navigationTitle(shelf.name.isEmpty ? "Shelf" : shelf.name)
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showingIconPicker) {
+            NavigationStack {
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 12) {
+                        ForEach(Self.iconOptions, id: \.self) { icon in
+                            Button {
+                                shelf.systemImage = icon
+                                showingIconPicker = false
+                            } label: {
+                                Image(systemName: icon)
+                                    .font(.title2)
+                                    .frame(width: 44, height: 44)
+                                    .background(icon == shelf.systemImage ? Color.accentColor.opacity(0.2) : Color.clear)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding()
+                }
+                .navigationTitle("Choose Icon")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { showingIconPicker = false }
+                    }
+                }
+            }
+            .presentationDetents([.medium])
+        }
     }
 
     private func addRule() {
@@ -112,5 +147,5 @@ struct ShelfEditView: View {
     NavigationStack {
         ShelfEditView(shelf: Shelf(name: "To-Do List", systemImage: "checklist", showsInTabBar: true))
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
 }

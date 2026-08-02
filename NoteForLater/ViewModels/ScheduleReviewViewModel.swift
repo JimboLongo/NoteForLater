@@ -37,7 +37,7 @@ final class ScheduleReviewViewModel {
     /// + free calendar slots. Called automatically each night (see
     /// NoteForLaterApp / TODO for BackgroundTasks wiring) and manually via
     /// a "Regenerate" button.
-    func generateProposedSchedule(shelves: [Shelf]) async {
+    func generateProposedSchedule(shelves: [Shelf], eligibleHoursWindows: [EligibleHoursWindow]) async {
         isGenerating = true
         errorMessage = nil
         defer { isGenerating = false }
@@ -47,10 +47,13 @@ final class ScheduleReviewViewModel {
             let proposed = try await schedulingService.generateProposedSchedule(
                 shelves: shelves,
                 freeSlots: freeSlots,
+                eligibleHoursWindows: eligibleHoursWindows,
                 date: targetDate
             )
+            // The scheduler itself decides per-task whether to mark it fully
+            // scheduled or just trim its remaining time (divisible tasks
+            // that only got part of their time placed stay unscheduled).
             for block in proposed {
-                block.task?.isScheduled = true
                 modelContext.insert(block)
             }
             blocks = proposed.sorted { $0.startTime < $1.startTime }

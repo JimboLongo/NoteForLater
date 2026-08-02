@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import CoreLocation
 
 /// App-wide settings. Currently just the Scheduler section: link a Google
 /// account and choose which of its calendars count as "busy" so the AI
@@ -9,8 +10,11 @@ import SwiftData
 struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var subscriptions: [CalendarSubscription]
+    @Query(sort: \EligibleHoursWindow.sortOrder) private var eligibleHoursWindows: [EligibleHoursWindow]
+    @Query(sort: \LocationTag.name) private var locationTags: [LocationTag]
 
     private var accountService: GoogleAccountService { GoogleAccountService.shared }
+    private var locationService: LocationMonitoringService { LocationMonitoringService.shared }
 
     @State private var isSigningIn = false
     @State private var isSyncingCalendars = false
@@ -75,6 +79,76 @@ struct SettingsView: View {
                 }
             }
 
+            Section {
+                if eligibleHoursWindows.isEmpty {
+                    Text("No restriction — the AI Scheduler can assign any hour a shelf's own rule allows.")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(eligibleHoursWindows) { window in
+                    NavigationLink {
+                        EligibleHoursEditView(window: window)
+                    } label: {
+                        HStack {
+                            Text(window.summary)
+                            if !window.isEnabled {
+                                Spacer()
+                                Text("Disabled")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                    }
+                }
+                .onDelete(perform: deleteEligibleHours)
+
+                Button {
+                    addEligibleHoursWindow()
+                } label: {
+                    Label("Add Eligible Hours", systemImage: "plus.circle.fill")
+                }
+            } header: {
+                Text("Scheduling Hours")
+            } footer: {
+                Text("A global guardrail on top of each shelf's own pull windows — e.g. \"never assign anything before 7am or after 10pm.\" Leave empty for no restriction.")
+            }
+
+            Section {
+                if locationService.authorizationStatus == .notDetermined {
+                    Button {
+                        locationService.requestAuthorization()
+                    } label: {
+                        Label("Enable Location Reminders", systemImage: "location.circle.fill")
+                    }
+                } else if locationService.authorizationStatus == .denied || locationService.authorizationStatus == .restricted {
+                    Text("Location access is off. Enable it for NoteForLater in Settings to get proximity reminders.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if locationTags.isEmpty {
+                    Text("No location tags yet. Tap the pin on a tag in any task to attach a place.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(locationTags) { tag in
+                        NavigationLink {
+                            LocationTagPickerView(tagName: tag.name)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(tag.name.capitalized)
+                                Text(tag.addressLabel.isEmpty ? tag.radiusDescription : "\(tag.addressLabel) · \(tag.radiusDescription)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .onDelete(perform: deleteLocationTags)
+                }
+            } header: {
+                Text("Location Reminders")
+            } footer: {
+                Text("You'll get a notification listing tagged tasks whenever you come within range of one of these places.")
+            }
+
             if let errorMessage {
                 Section {
                     Text(errorMessage).foregroundStyle(.red)
@@ -86,6 +160,9 @@ struct SettingsView: View {
             if accountService.currentAccount != nil, subscriptions.isEmpty {
                 syncCalendars()
             }
+        }
+        .onChange(of: locationTags) { _, newValue in
+            locationService.syncRegions(with: newValue)
         }
     }
 
@@ -140,11 +217,28 @@ struct SettingsView: View {
             modelContext.delete(subscription)
         }
     }
+
+    private func addEligibleHoursWindow() {
+        let nextOrder = (eligibleHoursWindows.map(\.sortOrder).max() ?? -1) + 1
+        modelContext.insert(EligibleHoursWindow(sortOrder: nextOrder))
+    }
+
+    private func deleteEligibleHours(at offsets: IndexSet) {
+        for index in offsets {
+            modelContext.delete(eligibleHoursWindows[index])
+        }
+    }
+
+    private func deleteLocationTags(at offsets: IndexSet) {
+        for index in offsets {
+            modelContext.delete(locationTags[index])
+        }
+    }
 }
 
 #Preview {
     NavigationStack {
         SettingsView()
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, LocationTag.self], inMemory: true)
 }
