@@ -60,6 +60,7 @@ struct InboxView: View {
                     }
                 }
             }
+            .scrollDismissesKeyboard(.interactively)
             .safeAreaInset(edge: .top) {
                 captureBar
             }
@@ -110,10 +111,11 @@ struct InboxView: View {
     private var captureBar: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                TextField("What's on your mind?", text: $draftText, axis: .vertical)
+                TextField("Dump that thought for later", text: $draftText, axis: .vertical)
                     .submitLabel(.done)
                     .onSubmit(addDraft)
                     .focused($isCaptureFocused)
+                    .frame(minHeight: 42)
                     .onChange(of: draftText) { _, newValue in
                         // axis: .vertical sometimes inserts a newline on the
                         // Done key instead of firing onSubmit — catch that here.
@@ -147,6 +149,7 @@ struct InboxView: View {
     private func addDraft() {
         viewModel?.addItem(draftText)
         draftText = ""
+        isCaptureFocused = false
     }
 
     private func binding(for item: InboxItem) -> Binding<Shelf?> {

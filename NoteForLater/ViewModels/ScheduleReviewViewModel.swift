@@ -42,6 +42,11 @@ final class ScheduleReviewViewModel {
         errorMessage = nil
         defer { isGenerating = false }
 
+        // Resync against the calendar first so generation (and the events
+        // shown alongside it) reflect anything added/changed since this
+        // screen last loaded, rather than possibly-stale free/busy data.
+        await loadCalendarEvents()
+
         do {
             let freeSlots = try await calendarService.fetchFreeSlots(for: targetDate)
             let proposed = try await schedulingService.generateProposedSchedule(
