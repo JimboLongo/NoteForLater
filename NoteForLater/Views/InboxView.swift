@@ -134,34 +134,66 @@ struct InboxView: View {
     }
 }
 
-/// Compact swipeable picker: skip, or swipe to land on a shelf. Nothing
-/// happens until the item is submitted from the top of the Inbox.
+/// Swipeable picker: skip, or swipe through shelves to land on one.
+/// Circular — swiping past the last shelf wraps back to Skip, and swiping
+/// backward from Skip wraps to the last shelf. Each swipe is a discrete
+/// flick to the next/previous option (not a finger-tracked drag), so it
+/// reads as a swipe rather than a slow slide. Nothing happens until the
+/// item is submitted from the top of the Inbox.
 private struct ShelfSlider: View {
     let shelves: [Shelf]
     @Binding var selectedShelf: Shelf?
 
+    @State private var insertionEdge: Edge = .trailing
+    @State private var removalEdge: Edge = .leading
+
+    private static let width: CGFloat = 150
+    private static let height: CGFloat = 32
+
+    /// index 0 is always "Skip" (nil); shelves follow in order.
+    private var items: [Shelf?] { [nil] + shelves.map { $0 } }
+
+    private var currentIndex: Int {
+        items.firstIndex { $0?.id == selectedShelf?.id } ?? 0
+    }
+
     var body: some View {
-        TabView(selection: Binding(
-            get: { selectedShelf?.id },
-            set: { newID in selectedShelf = shelves.first { $0.id == newID } }
-        )) {
-            Text("Skip")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .tag(nil as UUID?)
-            ForEach(shelves) { shelf in
-                Text(shelf.name)
-                    .font(.caption2)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                    .padding(.horizontal, 4)
-                    .tag(shelf.id as UUID?)
-            }
+        Text(items[currentIndex]?.name ?? "Skip")
+            .id(currentIndex)
+            .font(.caption)
+            .fontWeight(.medium)
+            .lineLimit(1)
+            .minimumScaleFactor(0.6)
+            .padding(.horizontal, 12)
+            .frame(width: Self.width, height: Self.height)
+            .transition(.asymmetric(
+                insertion: .move(edge: insertionEdge).combined(with: .opacity),
+                removal: .move(edge: removalEdge).combined(with: .opacity)
+            ))
+            .background(Color.secondary.opacity(0.12))
+            .clipShape(Capsule())
+            .contentShape(Capsule())
+            .clipped()
+            .gesture(
+                DragGesture(minimumDistance: 16)
+                    .onEnded { value in
+                        if value.translation.width < 0 {
+                            step(by: 1)
+                        } else if value.translation.width > 0 {
+                            step(by: -1)
+                        }
+                    }
+            )
+    }
+
+    private func step(by delta: Int) {
+        let count = items.count
+        let newIndex = ((currentIndex + delta) % count + count) % count
+        insertionEdge = delta > 0 ? .trailing : .leading
+        removalEdge = delta > 0 ? .leading : .trailing
+        withAnimation(.easeInOut(duration: 0.2)) {
+            selectedShelf = items[newIndex]
         }
-        .tabViewStyle(.page(indexDisplayMode: .never))
-        .frame(width: 92, height: 28)
-        .background(Color.secondary.opacity(0.12))
-        .clipShape(Capsule())
     }
 }
 
