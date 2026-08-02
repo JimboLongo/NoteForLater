@@ -2,9 +2,11 @@ import Foundation
 import SwiftData
 import Observation
 
-/// Drives the nightly "preview tomorrow's schedule" review screen and all
-/// three interactions the user has with a proposed block: delete (swipe
-/// left), auto-replace (swipe right), and manual replace (long-press).
+/// Drives the schedule review screen for a single day (default: tomorrow,
+/// but navigable to any day) and every interaction the user has with a
+/// block: delete (swipe left), auto-replace (swipe right), long-press to
+/// manually replace, and — on today specifically — mark complete or push
+/// to another day.
 @Observable
 final class ScheduleReviewViewModel {
     private let modelContext: ModelContext
@@ -12,7 +14,7 @@ final class ScheduleReviewViewModel {
     private let schedulingService: AISchedulingServiceProtocol
 
     private(set) var blocks: [ScheduledBlock] = []
-    private(set) var busyBlocks: [TimeSlot] = []
+    private(set) var calendarEvents: [CalendarEventSummary] = []
     var targetDate: Date
     var isGenerating = false
     var errorMessage: String?
@@ -63,35 +65,58 @@ final class ScheduleReviewViewModel {
             .sorted { $0.startTime < $1.startTime }
     }
 
-    /// Pulls existing calendar events for the day so the Schedule tab can
-    /// show what's already blocked off, even before a schedule is
-    /// generated. Failure (e.g. not signed in) just leaves this empty.
-    func loadBusyBlocks() async {
-        busyBlocks = (try? await calendarService.fetchBusyBlocks(for: targetDate)) ?? []
+    /// Pulls existing calendar events for the day (with real titles) so the
+    /// Schedule tab can show what's already blocked off, even before a
+    /// schedule is generated. Failure (e.g. not signed in) just leaves this
+    /// empty.
+    func loadCalendarEvents() async {
+        calendarEvents = (try? await calendarService.fetchEvents(for: targetDate)) ?? []
+    }
+
+    /// Switches which day is being reviewed and reloads both the stored
+    /// blocks for that day and its calendar events.
+    func changeTargetDate(to newDate: Date, existingBlocks: [ScheduledBlock]) async {
+        targetDate = newDate
+        loadExistingBlocks(existingBlocks)
+        await loadCalendarEvents()
     }
 
     // MARK: - Approval
 
+    /// Approves every block and pushes each to Google Calendar — creating
+    /// a new event if it's never been pushed, or updating the same event
+    /// in place if it has (so re-approving after an edit overwrites what's
+    /// already there instead of duplicating it).
     func approveAll() {
         for block in blocks { block.approvalStatus = .approved }
         Task {
             for block in blocks {
-                try? await calendarService.createEvent(for: block)
+                if let eventID = try? await calendarService.pushEvent(for: block) {
+                    block.googleEventID = eventID
+                }
             }
         }
     }
 
     func approve(_ block: ScheduledBlock) {
         block.approvalStatus = .approved
-        Task { try? await calendarService.createEvent(for: block) }
+        Task {
+            if let eventID = try? await calendarService.pushEvent(for: block) {
+                block.googleEventID = eventID
+            }
+        }
     }
 
     // MARK: - Swipe left: delete, leave the slot open
 
     /// Removes the block entirely. The underlying task goes back to being
-    /// unscheduled so it can be picked up on a future night.
+    /// unscheduled so it can be picked up on a future night. If it had
+    /// already been pushed to the calendar, that event gets removed too.
     func deleteBlock(_ block: ScheduledBlock) {
         block.task?.isScheduled = false
+        if let eventID = block.googleEventID {
+            Task { try? await calendarService.deleteEvent(eventID: eventID) }
+        }
         modelContext.delete(block)
         blocks.removeAll { $0.id == block.id }
     }
@@ -100,7 +125,9 @@ final class ScheduleReviewViewModel {
 
     /// Swaps the block's task for the next-best unscheduled to-do (by
     /// priority, then due date), keeping the same time slot. The bumped task
-    /// goes back into the unscheduled queue.
+    /// goes back into the unscheduled queue. If the block was already
+    /// approved, it drops back to "proposed" so it's clear this needs
+    /// re-approval (and re-pushing) before it matches the calendar again.
     func autoReplace(_ block: ScheduledBlock, candidatePool: [TaskItem]) {
         let outgoing = block.task
         let replacement = nextCandidate(from: candidatePool, excluding: outgoing)
@@ -108,6 +135,7 @@ final class ScheduleReviewViewModel {
         outgoing?.isScheduled = false
         block.task = replacement
         replacement?.isScheduled = true
+        needsReapproval(block)
 
         if let idx = blocks.firstIndex(where: { $0.id == block.id }) {
             blocks[idx] = block
@@ -124,10 +152,30 @@ final class ScheduleReviewViewModel {
 
         block.task = newTask
         newTask.isScheduled = true
+        needsReapproval(block)
 
         if let idx = blocks.firstIndex(where: { $0.id == block.id }) {
             blocks[idx] = block
         }
+    }
+
+    private func needsReapproval(_ block: ScheduledBlock) {
+        if block.approvalStatus == .approved {
+            block.approvalStatus = .proposed
+        }
+    }
+
+    // MARK: - Today: complete / push to another day
+
+    func markComplete(_ block: ScheduledBlock) {
+        block.isCompleted = true
+    }
+
+    /// "I didn't get to this" — same as deleting it: unschedules the task
+    /// (and removes the pushed calendar event, if any) so it's picked up
+    /// again by a future night's generation.
+    func pushToAnotherDay(_ block: ScheduledBlock) {
+        deleteBlock(block)
     }
 
     /// Tasks eligible to fill an empty/replaced slot: unscheduled, on a schedulable shelf.

@@ -1,14 +1,19 @@
 import SwiftUI
 import SwiftData
 
-/// Nightly review screen: shows tomorrow's AI-proposed schedule.
+/// Review screen for a single day's schedule, navigable to any day via the
+/// chevrons (default: tomorrow).
 ///
-///   - Swipe LEFT on a block  -> delete it, slot goes back to open (task
-///     requeued for a future date).
-///   - Swipe RIGHT on a block -> auto-replace the task with the next-best
-///     queued to-do, keeping the same time slot.
-///   - Long-press on a block  -> pick a specific replacement from the
-///     unscheduled queue; the bumped task goes back into the queue.
+///   - On today: swipe LEFT to mark complete, swipe RIGHT to push to
+///     another day (unschedules it for a future night to pick up).
+///   - On any other day:
+///     - Swipe LEFT  -> delete it, slot goes back to open (task requeued).
+///     - Swipe RIGHT -> auto-replace with the next-best queued to-do.
+///     - Long-press  -> pick a specific replacement from the unscheduled
+///       queue; the bumped task goes back into the queue.
+///   - Editing an already-approved block (either swipe action, on a
+///     non-today day) drops it back to "proposed" — re-tapping Approve All
+///     pushes the change to the same calendar event instead of a new one.
 struct ScheduleReviewView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \TaskItem.createdAt) private var allTasks: [TaskItem]
@@ -34,13 +39,28 @@ struct ScheduleReviewView: View {
                     ProgressView()
                 }
             }
-            .navigationTitle(tomorrowTitle)
+            .navigationTitle(dayTitle)
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        Task { await changeDate(by: -1) }
+                    } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button("Approve All") {
                         viewModel?.approveAll()
                     }
                     .disabled((viewModel?.blocks.isEmpty) ?? true)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        Task { await changeDate(by: 1) }
+                    } label: {
+                        Image(systemName: "chevron.right")
+                    }
                 }
             }
             .onAppear(perform: setupIfNeeded)
@@ -60,7 +80,7 @@ struct ScheduleReviewView: View {
     @ViewBuilder
     private func content(viewModel: ScheduleReviewViewModel) -> some View {
         if viewModel.isGenerating {
-            ProgressView("Building tomorrow's schedule...")
+            ProgressView("Building schedule...")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             List {
@@ -70,37 +90,57 @@ struct ScheduleReviewView: View {
                 }
                 ForEach(timelineRows(viewModel: viewModel)) { row in
                     switch row {
-                    case .busy(let slot):
-                        BusyBlockRow(slot: slot)
+                    case .event(let event):
+                        CalendarEventRow(event: event)
                     case .proposed(let block):
-                        ScheduleBlockRow(block: block)
-                            .contentShape(Rectangle())
-                            .onLongPressGesture {
-                                pickerTarget = block
-                            }
-                            // Swipe left (revealed from the trailing edge): delete.
-                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                Button(role: .destructive) {
-                                    viewModel.deleteBlock(block)
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
+                        if isToday {
+                            TodayBlockRow(block: block)
+                                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                                    Button {
+                                        viewModel.markComplete(block)
+                                    } label: {
+                                        Label("Complete", systemImage: "checkmark.circle.fill")
+                                    }
+                                    .tint(.green)
                                 }
-                            }
-                            // Swipe right (revealed from the leading edge): auto-replace.
-                            .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                                Button {
-                                    viewModel.autoReplace(block, candidatePool: allTasks)
-                                } label: {
-                                    Label("Replace", systemImage: "arrow.triangle.2.circlepath")
+                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                    Button {
+                                        viewModel.pushToAnotherDay(block)
+                                    } label: {
+                                        Label("Push", systemImage: "arrow.uturn.forward.circle.fill")
+                                    }
+                                    .tint(.blue)
                                 }
-                                .tint(.orange)
-                            }
+                        } else {
+                            ScheduleBlockRow(block: block)
+                                .contentShape(Rectangle())
+                                .onLongPressGesture {
+                                    pickerTarget = block
+                                }
+                                // Swipe left (revealed from the trailing edge): delete.
+                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                    Button(role: .destructive) {
+                                        viewModel.deleteBlock(block)
+                                    } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                }
+                                // Swipe right (revealed from the leading edge): auto-replace.
+                                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                                    Button {
+                                        viewModel.autoReplace(block, candidatePool: allTasks)
+                                    } label: {
+                                        Label("Replace", systemImage: "arrow.triangle.2.circlepath")
+                                    }
+                                    .tint(.orange)
+                                }
+                        }
                     }
                 }
 
                 if viewModel.blocks.isEmpty {
                     Section {
-                        Button("Generate Tomorrow's Schedule") {
+                        Button("Generate Schedule") {
                             Task { await viewModel.generateProposedSchedule(shelves: allShelves) }
                         }
                         .buttonStyle(.borderedProminent)
@@ -113,13 +153,29 @@ struct ScheduleReviewView: View {
     }
 
     private func timelineRows(viewModel: ScheduleReviewViewModel) -> [DayTimelineRow] {
-        let busyRows = viewModel.busyBlocks.map(DayTimelineRow.busy)
+        let eventRows = viewModel.calendarEvents.map(DayTimelineRow.event)
         let proposedRows = viewModel.blocks.map(DayTimelineRow.proposed)
-        return (busyRows + proposedRows).sorted { $0.startTime < $1.startTime }
+        return (eventRows + proposedRows).sorted { $0.startTime < $1.startTime }
+    }
+
+    private var isToday: Bool {
+        Calendar.current.isDateInToday(viewModel?.targetDate ?? .now)
     }
 
     private func setupIfNeeded() {
         guard viewModel == nil else { return }
+        configureCalendarService()
+        let vm = ScheduleReviewViewModel(
+            modelContext: modelContext,
+            calendarService: calendarService,
+            schedulingService: schedulingService
+        )
+        vm.loadExistingBlocks(allBlocks)
+        viewModel = vm
+        Task { await vm.loadCalendarEvents() }
+    }
+
+    private func configureCalendarService() {
         let enabledIDs = calendarSubscriptions.filter(\.isEnabled).map(\.calendarID)
         calendarService.enabledCalendarIDs = enabledIDs.isEmpty ? ["primary"] : enabledIDs
         // Full day, not a fixed 8am-9pm business-hours window — individual
@@ -129,47 +185,49 @@ struct ScheduleReviewView: View {
             DateComponents(hour: 0, minute: 0),
             DateComponents(hour: 23, minute: 59)
         )
-        let vm = ScheduleReviewViewModel(
-            modelContext: modelContext,
-            calendarService: calendarService,
-            schedulingService: schedulingService
-        )
-        vm.loadExistingBlocks(allBlocks)
-        viewModel = vm
-        Task { await vm.loadBusyBlocks() }
     }
 
-    private var tomorrowTitle: String {
+    private func changeDate(by days: Int) async {
+        guard let viewModel else { return }
+        let newDate = Calendar.current.date(byAdding: .day, value: days, to: viewModel.targetDate) ?? viewModel.targetDate
+        await viewModel.changeTargetDate(to: newDate, existingBlocks: allBlocks)
+    }
+
+    private var dayTitle: String {
         let formatter = DateFormatter()
-        formatter.dateFormat = "EEEE, MMM d"
-        let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: .now) ?? .now
-        return formatter.string(from: tomorrow)
+        formatter.dateFormat = "EEE, MMM d"
+        let date = viewModel?.targetDate ?? Calendar.current.date(byAdding: .day, value: 1, to: .now) ?? .now
+        let dateText = formatter.string(from: date)
+        return isToday ? "Today · \(dateText)" : dateText
     }
 }
 
 /// A single row in the day's merged timeline: either an existing calendar
-/// event pulled in as "busy" (read-only) or a proposed/approved task block.
+/// event (read-only) or a proposed/approved task block.
 private enum DayTimelineRow: Identifiable {
-    case busy(TimeSlot)
+    case event(CalendarEventSummary)
     case proposed(ScheduledBlock)
 
     var id: String {
         switch self {
-        case .busy(let slot): return "busy-\(slot.id)"
+        case .event(let event): return "event-\(event.id)"
         case .proposed(let block): return "block-\(block.id)"
         }
     }
 
     var startTime: Date {
         switch self {
-        case .busy(let slot): return slot.start
+        case .event(let event): return event.start
         case .proposed(let block): return block.startTime
         }
     }
 }
 
-private struct BusyBlockRow: View {
-    let slot: TimeSlot
+/// Existing calendar event, shown with its real title; tap for the full
+/// details (time, description) Google has for it.
+private struct CalendarEventRow: View {
+    let event: CalendarEventSummary
+    @State private var showingDetail = false
 
     var body: some View {
         HStack(alignment: .top) {
@@ -177,7 +235,7 @@ private struct BusyBlockRow: View {
                 Text(timeRangeText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("Busy")
+                Text(event.title)
                     .font(.body)
                     .foregroundStyle(.secondary)
             }
@@ -186,12 +244,32 @@ private struct BusyBlockRow: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+        .contentShape(Rectangle())
+        .onTapGesture { showingDetail = true }
+        .sheet(isPresented: $showingDetail) {
+            NavigationStack {
+                Form {
+                    Section("Title") { Text(event.title) }
+                    Section("Time") { Text(timeRangeText) }
+                    if let notes = event.notes, !notes.isEmpty {
+                        Section("Details") { Text(notes) }
+                    }
+                }
+                .navigationTitle("Event")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { showingDetail = false }
+                    }
+                }
+            }
+        }
     }
 
     private var timeRangeText: String {
         let formatter = DateFormatter()
         formatter.dateFormat = "h:mm a"
-        return "\(formatter.string(from: slot.start)) - \(formatter.string(from: slot.end))"
+        return "\(formatter.string(from: event.start)) - \(formatter.string(from: event.end))"
     }
 }
 
@@ -209,6 +287,37 @@ private struct ScheduleBlockRow: View {
             }
             Spacer()
             if block.approvalStatus == .approved {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            }
+        }
+    }
+
+    private var timeRangeText: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "h:mm a"
+        return "\(formatter.string(from: block.startTime)) - \(formatter.string(from: block.endTime))"
+    }
+}
+
+/// Today's row: shows completed state instead of approval state, since by
+/// today a block is either already approved or about to be pushed anyway.
+private struct TodayBlockRow: View {
+    let block: ScheduledBlock
+
+    var body: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading) {
+                Text(timeRangeText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(block.task?.title ?? "Open slot")
+                    .font(.body)
+                    .strikethrough(block.isCompleted)
+                    .foregroundStyle(block.isCompleted ? .secondary : .primary)
+            }
+            Spacer()
+            if block.isCompleted {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
             }

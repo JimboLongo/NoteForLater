@@ -12,6 +12,12 @@ final class ScheduledBlock {
     var endTime: Date
     var approvalStatusRaw: String
 
+    /// The Google Calendar event this block was pushed to, if it has been
+    /// approved at least once. Re-approving after an edit updates this same
+    /// event instead of creating a duplicate.
+    var googleEventID: String?
+    var isCompleted: Bool = false
+
     var task: TaskItem?
 
     init(date: Date, startTime: Date, endTime: Date, task: TaskItem?, approvalStatus: ApprovalStatus = .proposed) {
