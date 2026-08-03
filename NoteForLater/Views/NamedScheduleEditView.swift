@@ -1,40 +1,49 @@
 import SwiftUI
 import SwiftData
 
-/// Configures one global "the AI Scheduler is allowed to run here" window —
-/// days + time range, no fill strategy (that's per-shelf). Edits a local
-/// draft; nothing is written back until Save is tapped.
-struct EligibleHoursEditView: View {
-    let window: EligibleHoursWindow
+/// Edits one reusable day/time window (e.g. "Work" Mon–Fri 9–5). Draft-and-
+/// Save like the other schedule editors — nothing writes back to the model
+/// until Save is tapped.
+struct NamedScheduleEditView: View {
+    let schedule: NamedSchedule
+    /// True when this editor was opened straight from "Add Schedule" — puts
+    /// the cursor in the Name field immediately so you can start typing.
+    var focusNameOnAppear = false
     @Environment(\.dismiss) private var dismiss
+    @FocusState private var isNameFocused: Bool
 
-    @State private var isEnabled: Bool
+    @State private var name: String
     @State private var daysOfWeek: [Int]
     @State private var startHour: Int
     @State private var startMinute: Int
     @State private var endHour: Int
     @State private var endMinute: Int
 
-    init(window: EligibleHoursWindow) {
-        self.window = window
-        _isEnabled = State(initialValue: window.isEnabled)
-        _daysOfWeek = State(initialValue: window.daysOfWeek)
-        _startHour = State(initialValue: window.startHour)
-        _startMinute = State(initialValue: window.startMinute)
-        _endHour = State(initialValue: window.endHour)
-        _endMinute = State(initialValue: window.endMinute)
+    init(schedule: NamedSchedule, focusNameOnAppear: Bool = false) {
+        self.schedule = schedule
+        self.focusNameOnAppear = focusNameOnAppear
+        _name = State(initialValue: schedule.name)
+        _daysOfWeek = State(initialValue: schedule.daysOfWeek)
+        _startHour = State(initialValue: schedule.startHour)
+        _startMinute = State(initialValue: schedule.startMinute)
+        _endHour = State(initialValue: schedule.endHour)
+        _endMinute = State(initialValue: schedule.endMinute)
     }
 
     var body: some View {
         Form {
-            Section {
-                Toggle("Enabled", isOn: $isEnabled)
+            Section("Name") {
+                TextField("Schedule name", text: $name)
+                    .focused($isNameFocused)
             }
 
             Section("Days") {
                 HStack(spacing: 8) {
                     ForEach(SchedulingRule.dayLabels, id: \.weekday) { day in
-                        DayChip(label: day.short, isOn: daysOfWeek.contains(day.weekday)) {
+                        DayToggleChip(
+                            label: day.short,
+                            isOn: daysOfWeek.contains(day.weekday)
+                        ) {
                             toggleDay(day.weekday)
                         }
                     }
@@ -48,32 +57,41 @@ struct EligibleHoursEditView: View {
             }
 
             Section {
-                Text(previewSummary)
+                Text(previewText)
                     .foregroundStyle(.secondary)
             } header: {
                 Text("Preview")
+            } footer: {
+                Text("Any shelf's pull schedule can reference this window from the \"Schedule\" picker.")
             }
         }
-        .navigationTitle("Eligible Hours")
+        .navigationTitle(name.isEmpty ? "Schedule" : name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button("Save") { save() }
+                Button("Save", action: save)
             }
+        }
+        .onAppear {
+            if focusNameOnAppear { isNameFocused = true }
         }
     }
 
-    private var previewSummary: String {
-        SchedulingRule.dayAndTimeText(daysOfWeek: daysOfWeek, startHour: startHour, startMinute: startMinute, endHour: endHour, endMinute: endMinute)
+    private var previewText: String {
+        SchedulingRule.dayAndTimeText(
+            daysOfWeek: daysOfWeek,
+            startHour: startHour, startMinute: startMinute,
+            endHour: endHour, endMinute: endMinute
+        )
     }
 
     private func save() {
-        window.isEnabled = isEnabled
-        window.daysOfWeek = daysOfWeek
-        window.startHour = startHour
-        window.startMinute = startMinute
-        window.endHour = endHour
-        window.endMinute = endMinute
+        schedule.name = name
+        schedule.daysOfWeek = daysOfWeek
+        schedule.startHour = startHour
+        schedule.startMinute = startMinute
+        schedule.endHour = endHour
+        schedule.endMinute = endMinute
         dismiss()
     }
 
@@ -108,29 +126,9 @@ struct EligibleHoursEditView: View {
     }
 }
 
-private struct DayChip: View {
-    let label: String
-    let isOn: Bool
-    let onTap: () -> Void
-
-    var body: some View {
-        Button(action: onTap) {
-            Text(label)
-                .font(.caption)
-                .fontWeight(isOn ? .semibold : .regular)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .background(isOn ? Color.accentColor : Color.secondary.opacity(0.15))
-                .foregroundStyle(isOn ? Color.white : Color.primary)
-                .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
 #Preview {
     NavigationStack {
-        EligibleHoursEditView(window: EligibleHoursWindow())
+        NamedScheduleEditView(schedule: NamedSchedule(name: "Work"))
     }
     .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }

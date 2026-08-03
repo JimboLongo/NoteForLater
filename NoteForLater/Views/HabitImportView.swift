@@ -2,21 +2,18 @@ import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
 
-/// Bulk-import tasks from a .csv or .xlsx file. Recognized columns: Task
-/// (required), Notes, Shelf, Due Date, Next Step, Duration, Tags, Priority,
-/// Date Added — matched case-insensitively, see ImportedTaskField for the
-/// accepted aliases. Rows whose Shelf doesn't match an existing shelf land
-/// on the chosen default — a real shelf, or Inbox (the default) for plain
-/// capture-and-sort-later entries.
-struct ImportView: View {
+/// Bulk-import habits from a .csv or .xlsx file. Recognized columns: Name
+/// (required), Start Date, Times Per Day, Days, Reminder Times — matched
+/// case-insensitively, see ImportedHabitField for the accepted aliases.
+/// Anything not recognized falls back to the same defaults a new habit
+/// starts with in HabitEditView.
+struct HabitImportView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
-    @Query(sort: \Shelf.sortOrder) private var shelves: [Shelf]
+    @Query(sort: \Habit.sortOrder) private var habits: [Habit]
 
-    /// nil means "Inbox" — the default.
-    @State private var defaultShelf: Shelf?
     @State private var isShowingFilePicker = false
-    @State private var summary: TaskImportSummary?
+    @State private var summary: HabitImportSummary?
     @State private var errorMessage: String?
     @State private var isImporting = false
 
@@ -29,28 +26,13 @@ struct ImportView: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("Task (required), Notes, Shelf, Due Date, Next Step, Duration, Tags, Priority, Date Added")
+                    Text("Name (required), Start Date, Times Per Day, Days, Reminder Times")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } header: {
                     Text("Recognized Columns")
                 } footer: {
-                    Text("Tags can be separated by commas or semicolons. Rows whose Shelf doesn't match an existing shelf use the default below.")
-                }
-
-                Section {
-                    Picker("Default Shelf", selection: $defaultShelf) {
-                        Text("Inbox").tag(nil as Shelf?)
-                        ForEach(shelves) { shelf in
-                            Text(shelf.name).tag(shelf as Shelf?)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.inline)
-                } header: {
-                    Text("Default Shelf")
-                } footer: {
-                    Text("Inbox keeps just the title for sorting later; a shelf keeps every column.")
+                    Text("Days accepts names like \"Mon, Wed, Fri\" or the words Daily/Weekdays/Weekends. Reminder Times accepts a comma-separated list like \"8:00 AM, 6:00 PM\" — missing or extra reminders are padded or trimmed to match Times Per Day.")
                 }
 
                 Section {
@@ -68,7 +50,7 @@ struct ImportView: View {
 
                 if let summary {
                     Section("Result") {
-                        Text("Imported \(summary.importedCount) task\(summary.importedCount == 1 ? "" : "s").")
+                        Text("Imported \(summary.importedCount) habit\(summary.importedCount == 1 ? "" : "s").")
                         ForEach(summary.errors, id: \.self) { error in
                             Text(error)
                                 .font(.caption)
@@ -84,7 +66,7 @@ struct ImportView: View {
                     }
                 }
             }
-            .navigationTitle("Import Tasks")
+            .navigationTitle("Import Habits")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -110,11 +92,11 @@ struct ImportView: View {
             defer { if accessed { url.stopAccessingSecurityScopedResource() } }
 
             do {
-                summary = try TaskImportService.importTasks(
+                let nextOrder = (habits.map(\.sortOrder).max() ?? -1) + 1
+                summary = try HabitImportService.importHabits(
                     from: url,
-                    defaultShelf: defaultShelf,
-                    allShelves: shelves,
-                    modelContext: modelContext
+                    modelContext: modelContext,
+                    startingSortOrder: nextOrder
                 )
             } catch {
                 errorMessage = error.localizedDescription
@@ -125,6 +107,6 @@ struct ImportView: View {
 }
 
 #Preview {
-    ImportView()
+    HabitImportView()
         .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }

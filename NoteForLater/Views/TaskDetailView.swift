@@ -74,6 +74,24 @@ struct TaskDetailView: View {
                 .pickerStyle(.segmented)
             }
 
+            if let rules = task.shelf?.schedulingRules, !rules.isEmpty {
+                Section {
+                    ForEach(rules.sorted { $0.sortOrder < $1.sortOrder }) { rule in
+                        Toggle(
+                            rule.displayName.isEmpty ? rule.summary : rule.displayName,
+                            isOn: Binding(
+                                get: { task.isEligible(for: rule) },
+                                set: { task.setEligible($0, for: rule) }
+                            )
+                        )
+                    }
+                } header: {
+                    Text("Eligible Schedules")
+                } footer: {
+                    Text("Which of this shelf's pull schedules can pick this task up. All are checked by default — uncheck any this task shouldn't be pulled by.")
+                }
+            }
+
             Section {
                 if !task.tags.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -194,9 +212,9 @@ struct TagChip: View {
 }
 
 #Preview {
-    let shelf = Shelf(name: "To-Do List", systemImage: "checklist", showsInTabBar: true)
+    let shelf = Shelf(name: "To-Do List", systemImage: "checklist")
     return NavigationStack {
         TaskDetailView(task: TaskItem(title: "Sample task", shelf: shelf))
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }

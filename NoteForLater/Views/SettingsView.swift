@@ -16,6 +16,7 @@ struct SettingsView: View {
     @Query private var allScheduledBlocks: [ScheduledBlock]
     @Query private var allShelves: [Shelf]
     @Query private var allTags: [Tag]
+    @Query private var allHabits: [Habit]
 
     private var accountService: GoogleAccountService { GoogleAccountService.shared }
     private var locationService: LocationMonitoringService { LocationMonitoringService.shared }
@@ -24,6 +25,7 @@ struct SettingsView: View {
     @State private var isSyncingCalendars = false
     @State private var errorMessage: String?
     @State private var isShowingClearAllConfirmation = false
+    @State private var isShowingClearHabitsConfirmation = false
 
     var body: some View {
         Form {
@@ -129,26 +131,23 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-
-                NavigationLink {
-                    TagsListView()
-                } label: {
-                    Label("Manage Tags", systemImage: "tag")
-                }
             } header: {
                 Text("Location Reminders")
             } footer: {
-                Text("Attach a place to any tag in the tag box and you'll get a notification listing tagged tasks whenever you come within range.")
+                Text("Attach a place to any tag from the Tags tab and you'll get a notification listing tagged tasks whenever you come within range.")
             }
 
             Section {
+                Button("Delete All Habits", role: .destructive) {
+                    isShowingClearHabitsConfirmation = true
+                }
                 Button("Clear All Data", role: .destructive) {
                     isShowingClearAllConfirmation = true
                 }
             } header: {
                 Text("Danger Zone")
             } footer: {
-                Text("Permanently deletes every inbox item, task, shelf, scheduled block, and tag on this device, and disconnects your Google account. This can't be undone.")
+                Text("\"Delete All Habits\" removes every habit and its tracked days (and cancels their reminders). \"Clear All Data\" additionally deletes every inbox item, task, shelf, scheduled block, and tag on this device, and disconnects your Google account. Neither can be undone.")
             }
 
             if let errorMessage {
@@ -162,6 +161,16 @@ struct SettingsView: View {
             if accountService.currentAccount != nil, subscriptions.isEmpty {
                 syncCalendars()
             }
+        }
+        .confirmationDialog(
+            "Delete all habits?",
+            isPresented: $isShowingClearHabitsConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete All Habits", role: .destructive, action: clearAllHabits)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently deletes every habit and its tracked days on this device. This can't be undone.")
         }
         .confirmationDialog(
             "Clear all saved data?",
@@ -238,6 +247,13 @@ struct SettingsView: View {
         }
     }
 
+    private func clearAllHabits() {
+        for habit in allHabits {
+            HabitNotificationService.shared.cancelAll(for: habit)
+            modelContext.delete(habit)
+        }
+    }
+
     private func clearAllData() {
         for item in allInboxItems { modelContext.delete(item) }
         for task in allTasks { modelContext.delete(task) }
@@ -246,6 +262,7 @@ struct SettingsView: View {
         for tag in allTags { modelContext.delete(tag) }
         for window in eligibleHoursWindows { modelContext.delete(window) }
         for subscription in subscriptions { modelContext.delete(subscription) }
+        clearAllHabits()
         accountService.signOut()
         locationService.syncRegions(with: [])
     }
@@ -255,5 +272,5 @@ struct SettingsView: View {
     NavigationStack {
         SettingsView()
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }

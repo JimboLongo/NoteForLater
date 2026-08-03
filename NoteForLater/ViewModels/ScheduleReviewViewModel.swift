@@ -67,6 +67,85 @@ final class ScheduleReviewViewModel {
         }
     }
 
+    // MARK: - Drag to reorder
+
+    /// A movable row in the day's timeline: either a proposed block or an
+    /// unlocked calendar event. Locked events are never passed in here —
+    /// they're excluded entirely, keeping both their order and their time.
+    enum TimelineEntryRef: Hashable {
+        case block(UUID)
+        case event(String)
+    }
+
+    /// Reorders the day's proposed blocks and unlocked calendar events to
+    /// match `newOrder`, then repacks their times back-to-back in that new
+    /// order, starting from the earliest slot in the group — each entry
+    /// keeps its own duration, but later ones shift to close any gap the
+    /// move opened up, and earlier ones get pushed later to make room.
+    /// Locked events are excluded, so the group reshuffles only among
+    /// itself rather than routing around fixed anchors. Any calendar event
+    /// whose time actually changes gets pushed back to Google.
+    func reorderTimeline(newOrder: [TimelineEntryRef]) {
+        let blockLookup = Dictionary(uniqueKeysWithValues: blocks.map { ($0.id, $0) })
+        let eventLookup = Dictionary(uniqueKeysWithValues: calendarEvents.map { ($0.id, $0) })
+
+        let startTimes: [Date] = newOrder.compactMap { ref in
+            switch ref {
+            case .block(let id): return blockLookup[id]?.startTime
+            case .event(let id): return eventLookup[id]?.start
+            }
+        }
+        guard let anchor = startTimes.min() else { return }
+
+        var cursor = anchor
+        var updatedEvents: [CalendarEventSummary] = []
+
+        for ref in newOrder {
+            switch ref {
+            case .block(let id):
+                guard let block = blockLookup[id] else { continue }
+                let duration = block.endTime.timeIntervalSince(block.startTime)
+                if block.startTime != cursor {
+                    block.startTime = cursor
+                    block.endTime = cursor.addingTimeInterval(duration)
+                    needsReapproval(block)
+                }
+                cursor = cursor.addingTimeInterval(duration)
+            case .event(let id):
+                guard let event = eventLookup[id] else { continue }
+                let duration = event.end.timeIntervalSince(event.start)
+                if event.start != cursor {
+                    updatedEvents.append(CalendarEventSummary(id: event.id, title: event.title, start: cursor, end: cursor.addingTimeInterval(duration), notes: event.notes))
+                }
+                cursor = cursor.addingTimeInterval(duration)
+            }
+        }
+
+        blocks = blocks.sorted { $0.startTime < $1.startTime }
+        for updated in updatedEvents {
+            if let idx = calendarEvents.firstIndex(where: { $0.id == updated.id }) {
+                calendarEvents[idx] = updated
+            }
+        }
+        guard !updatedEvents.isEmpty else { return }
+        Task {
+            for updated in updatedEvents {
+                try? await calendarService.updateEvent(eventID: updated.id, title: updated.title, start: updated.start, end: updated.end, notes: updated.notes)
+            }
+        }
+    }
+
+    /// Saves a manual edit (title/time/notes) to a synced calendar event and
+    /// pushes it back to Google.
+    func saveEventEdit(_ updated: CalendarEventSummary) {
+        if let idx = calendarEvents.firstIndex(where: { $0.id == updated.id }) {
+            calendarEvents[idx] = updated
+        }
+        Task {
+            try? await calendarService.updateEvent(eventID: updated.id, title: updated.title, start: updated.start, end: updated.end, notes: updated.notes)
+        }
+    }
+
     func loadExistingBlocks(_ existing: [ScheduledBlock]) {
         blocks = existing
             .filter { Calendar.current.isDate($0.date, inSameDayAs: targetDate) }

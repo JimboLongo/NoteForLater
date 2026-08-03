@@ -34,6 +34,10 @@ protocol CalendarServiceProtocol: AnyObject {
 
     /// Removes a previously-pushed event (e.g. its block was deleted).
     func deleteEvent(eventID: String) async throws
+
+    /// Edits a synced calendar event in place (title/time/notes) and pushes
+    /// the change back to Google.
+    func updateEvent(eventID: String, title: String, start: Date, end: Date, notes: String?) async throws
 }
 
 struct GoogleCalendarSummary: Identifiable {
@@ -174,6 +178,27 @@ final class GoogleCalendarService: CalendarServiceProtocol {
         let (_, response) = try await URLSession.shared.data(for: request)
         // 410 Gone means it's already not there — fine, that's the goal anyway.
         if let http = response as? HTTPURLResponse, http.statusCode == 410 { return }
+        try Self.checkOK(response)
+    }
+
+    func updateEvent(eventID: String, title: String, start: Date, end: Date, notes: String?) async throws {
+        let token = try await accountService.accessToken()
+        let formatter = ISO8601DateFormatter()
+        var body: [String: Any] = [
+            "summary": title,
+            "start": ["dateTime": formatter.string(from: start)],
+            "end": ["dateTime": formatter.string(from: end)]
+        ]
+        if let notes { body["description"] = notes }
+
+        let encodedID = eventID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? eventID
+        var request = URLRequest(url: URL(string: "https://www.googleapis.com/calendar/v3/calendars/primary/events/\(encodedID)")!)
+        request.httpMethod = "PATCH"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (_, response) = try await URLSession.shared.data(for: request)
         try Self.checkOK(response)
     }
 
@@ -358,5 +383,9 @@ final class MockCalendarService: CalendarServiceProtocol {
 
     func deleteEvent(eventID: String) async throws {
         print("[MockCalendarService] would delete event \(eventID)")
+    }
+
+    func updateEvent(eventID: String, title: String, start: Date, end: Date, notes: String?) async throws {
+        print("[MockCalendarService] would update event \(eventID) to \(title) at \(start)")
     }
 }

@@ -35,7 +35,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
         let applicableRules: [(rule: SchedulingRule, shelf: Shelf)] = shelves
             .sorted { $0.sortOrder < $1.sortOrder }
             .flatMap { shelf in (shelf.schedulingRules ?? []).map { (rule: $0, shelf: shelf) } }
-            .filter { $0.rule.isEnabled && $0.rule.daysOfWeek.contains(weekday) }
+            .filter { $0.rule.isEnabled && $0.rule.effectiveDaysOfWeek.contains(weekday) }
             .sorted { $0.rule.sortOrder < $1.rule.sortOrder }
 
         var remainingFree = freeSlots.sorted { $0.start < $1.start }
@@ -64,8 +64,8 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
 
         for (rule, shelf) in applicableRules {
             guard
-                let windowStart = calendar.date(bySettingHour: rule.startHour, minute: rule.startMinute, second: 0, of: date),
-                let windowEnd = calendar.date(bySettingHour: rule.endHour, minute: rule.endMinute, second: 0, of: date),
+                let windowStart = calendar.date(bySettingHour: rule.effectiveStartHour, minute: rule.effectiveStartMinute, second: 0, of: date),
+                let windowEnd = calendar.date(bySettingHour: rule.effectiveEndHour, minute: rule.effectiveEndMinute, second: 0, of: date),
                 windowStart < windowEnd
             else { continue }
 
@@ -74,7 +74,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             guard !availableInWindow.isEmpty else { continue }
 
             let candidates = (shelf.tasks ?? [])
-                .filter { !$0.isScheduled && !scheduledTaskIDs.contains($0.id) }
+                .filter { !$0.isScheduled && !scheduledTaskIDs.contains($0.id) && $0.isEligible(for: rule) }
                 .sorted(by: taskOrdering)
 
             let (placed, leftoverInWindow) = pack(candidates: candidates, into: availableInWindow, rule: rule)

@@ -24,6 +24,7 @@ struct ScheduleReviewView: View {
 
     @State private var viewModel: ScheduleReviewViewModel?
     @State private var pickerTarget: ScheduledBlock?
+    @State private var lockedStore = LockedEventsStore.shared
 
     // AI scheduling itself is still mocked (that's a separate TODO: swap in
     // a real Claude API call). The calendar side is real — it hits Google
@@ -55,6 +56,9 @@ struct ScheduleReviewView: View {
                         viewModel?.approveAll()
                     }
                     .disabled((viewModel?.blocks.isEmpty) ?? true)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    EditButton()
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -92,10 +96,17 @@ struct ScheduleReviewView: View {
                 ForEach(timelineRows(viewModel: viewModel)) { row in
                     switch row {
                     case .event(let event):
-                        CalendarEventRow(event: event)
+                        CalendarEventRow(
+                            event: event,
+                            isLocked: lockedStore.isLocked(event.id),
+                            onToggleLock: { lockedStore.toggle(event.id) },
+                            onSave: { updated in viewModel.saveEventEdit(updated) }
+                        )
+                        .moveDisabled(lockedStore.isLocked(event.id))
                     case .proposed(let block):
                         if isToday {
                             TodayBlockRow(block: block)
+                                .listRowBackground((block.task?.shelf?.color ?? Color.clear).opacity(0.2))
                                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
                                     Button {
                                         viewModel.markComplete(block)
@@ -118,6 +129,7 @@ struct ScheduleReviewView: View {
                                 .onLongPressGesture {
                                     pickerTarget = block
                                 }
+                                .listRowBackground((block.task?.shelf?.color ?? Color.clear).opacity(0.2))
                                 // Swipe left (revealed from the trailing edge): delete.
                                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                     Button(role: .destructive) {
@@ -138,6 +150,9 @@ struct ScheduleReviewView: View {
                         }
                     }
                 }
+                .onMove { source, destination in
+                    handleMove(source: source, destination: destination, timeline: timelineRows(viewModel: viewModel), viewModel: viewModel)
+                }
 
                 if viewModel.blocks.isEmpty {
                     Section {
@@ -153,8 +168,44 @@ struct ScheduleReviewView: View {
         }
     }
 
+    /// Locked calendar events can't be dragged (see `.moveDisabled` above),
+    /// but they can still occupy positions between draggable rows, so the
+    /// move is simulated on the full merged timeline first; only the
+    /// resulting order of the *unlocked* rows (blocks + unlocked events) is
+    /// handed to the view model, which repacks their times to match.
+    private func handleMove(source: IndexSet, destination: Int, timeline: [DayTimelineRow], viewModel: ScheduleReviewViewModel) {
+        var reordered = timeline
+        reordered.move(fromOffsets: source, toOffset: destination)
+        let newOrder: [ScheduleReviewViewModel.TimelineEntryRef] = reordered.compactMap { row in
+            switch row {
+            case .proposed(let block):
+                return .block(block.id)
+            case .event(let event):
+                return lockedStore.isLocked(event.id) ? nil : .event(event.id)
+            }
+        }
+        viewModel.reorderTimeline(newOrder: newOrder)
+    }
+
+    /// A pushed-and-approved block's task shows up both as a proposed row
+    /// (locally) and, once Google has it, as a synced calendar event — same
+    /// task, two rows. An event whose ID matches a block's googleEventID, or
+    /// whose title matches (as a fallback, e.g. if the ID round-trip didn't
+    /// happen yet), is still considered app-originated — not a genuinely
+    /// external synced event — so it's skipped here and represented only by
+    /// its proposed-block row. Everything left in `eventRows` is therefore
+    /// genuinely external and defaults to locked (see CalendarEventRow).
     private func timelineRows(viewModel: ScheduleReviewViewModel) -> [DayTimelineRow] {
-        let eventRows = viewModel.calendarEvents.map(DayTimelineRow.event)
+        let blockTitles = Set(viewModel.blocks.compactMap {
+            $0.task?.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        })
+        let blockEventIDs = Set(viewModel.blocks.compactMap(\.googleEventID))
+        let eventRows = viewModel.calendarEvents
+            .filter { event in
+                !blockEventIDs.contains(event.id)
+                    && !blockTitles.contains(event.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+            }
+            .map(DayTimelineRow.event)
         let proposedRows = viewModel.blocks.map(DayTimelineRow.proposed)
         return (eventRows + proposedRows).sorted { $0.startTime < $1.startTime }
     }
@@ -224,11 +275,20 @@ private enum DayTimelineRow: Identifiable {
     }
 }
 
-/// Existing calendar event, shown with its real title; tap for the full
-/// details (time, description) Google has for it.
+/// Existing calendar event, shown with its real title; tap to edit it —
+/// changes push back to Google. The lock button (top right of the editor)
+/// pins it in place so it's excluded from drag-to-reorder.
 private struct CalendarEventRow: View {
     let event: CalendarEventSummary
+    let isLocked: Bool
+    let onToggleLock: () -> Void
+    let onSave: (CalendarEventSummary) -> Void
+
     @State private var showingDetail = false
+    @State private var title = ""
+    @State private var start = Date()
+    @State private var end = Date()
+    @State private var notes = ""
 
     var body: some View {
         HStack(alignment: .top) {
@@ -241,30 +301,60 @@ private struct CalendarEventRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Image(systemName: "lock.fill")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Button(action: onToggleLock) {
+                Image(systemName: isLocked ? "lock.fill" : "lock.open")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
         }
         .contentShape(Rectangle())
-        .onTapGesture { showingDetail = true }
+        .onTapGesture { presentEditor() }
         .sheet(isPresented: $showingDetail) {
             NavigationStack {
                 Form {
-                    Section("Title") { Text(event.title) }
-                    Section("Time") { Text(timeRangeText) }
-                    if let notes = event.notes, !notes.isEmpty {
-                        Section("Details") { Text(notes) }
+                    Section("Title") {
+                        TextField("Title", text: $title)
+                    }
+                    Section("Time") {
+                        DatePicker("Start", selection: $start, displayedComponents: [.date, .hourAndMinute])
+                        DatePicker("End", selection: $end, displayedComponents: [.date, .hourAndMinute])
+                    }
+                    Section("Details") {
+                        TextField("Notes", text: $notes, axis: .vertical)
                     }
                 }
                 .navigationTitle("Event")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Done") { showingDetail = false }
+                        Button("Cancel") { showingDetail = false }
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(action: onToggleLock) {
+                            Image(systemName: isLocked ? "lock.fill" : "lock.open")
+                        }
+                    }
+                    ToolbarItem(placement: .primaryAction) {
+                        Button("Save", action: save)
+                            .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
                 }
             }
         }
+    }
+
+    private func presentEditor() {
+        title = event.title
+        start = event.start
+        end = event.end
+        notes = event.notes ?? ""
+        showingDetail = true
+    }
+
+    private func save() {
+        onSave(CalendarEventSummary(id: event.id, title: title, start: start, end: end, notes: notes.isEmpty ? nil : notes))
+        showingDetail = false
     }
 
     private var timeRangeText: String {
@@ -370,5 +460,5 @@ private struct ReplacementPickerSheet: View {
 
 #Preview {
     ScheduleReviewView()
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }

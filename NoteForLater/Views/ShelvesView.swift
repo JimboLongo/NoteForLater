@@ -2,9 +2,9 @@ import SwiftUI
 import SwiftData
 
 /// Dedicated screen for managing shelves: add new ones, tap in to edit a
-/// shelf's name/icon, reorder them, and delete ones you no longer need.
-/// Whether a shelf shows up in the bottom tab bar and whether it's eligible
-/// for the AI Scheduler are configured per-shelf in ShelfEditView.
+/// shelf's name/icon/color, reorder them, and delete ones you no longer
+/// need. Whether a shelf is eligible for the AI Scheduler is configured
+/// per-shelf in ShelfEditView.
 struct ShelvesView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Shelf.sortOrder) private var shelves: [Shelf]
@@ -19,15 +19,7 @@ struct ShelvesView: View {
                         NavigationLink {
                             ShelfEditView(shelf: shelf)
                         } label: {
-                            HStack {
-                                Label(shelf.name, systemImage: shelf.systemImage)
-                                Spacer()
-                                if shelf.showsInTabBar {
-                                    Text("In Tab Bar")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
+                            Label(shelf.name, systemImage: shelf.systemImage)
                         }
                     }
                     .onDelete(perform: deleteShelves)
@@ -39,7 +31,7 @@ struct ShelvesView: View {
                         Label("Add Shelf", systemImage: "plus.circle.fill")
                     }
                 } footer: {
-                    Text("Tap a shelf to rename it, change its icon, pin it to the tab bar, or make it eligible for the AI Scheduler.")
+                    Text("Tap a shelf to rename it, change its icon or color, or make it eligible for the AI Scheduler.")
                 }
             }
             .navigationTitle("Shelves")
@@ -80,5 +72,5 @@ struct ShelvesView: View {
 
 #Preview {
     ShelvesView()
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }

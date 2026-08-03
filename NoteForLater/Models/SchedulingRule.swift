@@ -34,6 +34,12 @@ final class SchedulingRule {
     var sortOrder: Int = 0
     var isEnabled: Bool = true
 
+    /// Optional reference to a reusable day/time window (see NamedSchedule)
+    /// managed from the Schedules tab. When set, it supplies the effective
+    /// window below instead of this rule's own `daysOfWeek`/hour fields —
+    /// those stay around as the storage for a one-off "Custom" window.
+    @Relationship(deleteRule: .nullify) var namedSchedule: NamedSchedule?
+
     /// Calendar weekday numbering: 1 = Sunday ... 7 = Saturday, matching
     /// `Calendar.component(.weekday, from:)`.
     var daysOfWeek: [Int] = [2, 3, 4, 5, 6]
@@ -84,6 +90,20 @@ final class SchedulingRule {
         set { fillStrategyRaw = newValue.rawValue }
     }
 
+    /// The window actually used for scheduling: a linked NamedSchedule's
+    /// window if there is one, otherwise this rule's own stored fields.
+    var effectiveDaysOfWeek: [Int] { namedSchedule?.daysOfWeek ?? daysOfWeek }
+    var effectiveStartHour: Int { namedSchedule?.startHour ?? startHour }
+    var effectiveStartMinute: Int { namedSchedule?.startMinute ?? startMinute }
+    var effectiveEndHour: Int { namedSchedule?.endHour ?? endHour }
+    var effectiveEndMinute: Int { namedSchedule?.endMinute ?? endMinute }
+
+    /// This rule's custom name if it has one, otherwise the linked
+    /// NamedSchedule's name — used anywhere a single label is needed.
+    var displayName: String {
+        name.isEmpty ? (namedSchedule?.name ?? "") : name
+    }
+
     static let dayLabels: [(weekday: Int, short: String)] = [
         (2, "Mon"), (3, "Tue"), (4, "Wed"), (5, "Thu"), (6, "Fri"), (7, "Sat"), (1, "Sun")
     ]
@@ -91,9 +111,9 @@ final class SchedulingRule {
     /// e.g. "Mon–Fri 9:00 AM–5:00 PM · Fill to Fit"
     var summary: String {
         Self.summaryText(
-            daysOfWeek: daysOfWeek,
-            startHour: startHour, startMinute: startMinute,
-            endHour: endHour, endMinute: endMinute,
+            daysOfWeek: effectiveDaysOfWeek,
+            startHour: effectiveStartHour, startMinute: effectiveStartMinute,
+            endHour: effectiveEndHour, endMinute: effectiveEndMinute,
             fillStrategy: fillStrategy,
             maxTotalMinutes: maxTotalMinutes,
             maxTaskCount: maxTaskCount,
@@ -136,7 +156,7 @@ final class SchedulingRule {
         return "\(dayText) \(timeText)"
     }
 
-    private static func compactDayRanges(_ shortLabels: [String]) -> String {
+    static func compactDayRanges(_ shortLabels: [String]) -> String {
         guard !shortLabels.isEmpty else { return "No days" }
         if shortLabels.count == 7 { return "Every day" }
         if shortLabels == ["Mon", "Tue", "Wed", "Thu", "Fri"] { return "Mon–Fri" }

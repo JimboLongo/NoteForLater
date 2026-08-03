@@ -23,6 +23,13 @@ final class TaskItem {
     var isDivisible: Bool = false
     var minimumSegmentMinutes: Int = 15
 
+    /// SchedulingRule IDs (from this task's shelf) that this task should
+    /// NOT be pulled by — everything else is eligible. Empty (the default)
+    /// means eligible for every rule on the shelf, matching "all checked"
+    /// in the UI; a rule added to the shelf later is automatically eligible
+    /// too, since nothing has excluded it yet.
+    var excludedSchedulingRuleIDs: [UUID] = []
+
     var shelf: Shelf?
 
     @Relationship(deleteRule: .nullify, inverse: \ScheduledBlock.task)
@@ -59,6 +66,18 @@ final class TaskItem {
     var priority: Priority {
         get { Priority(rawValue: priorityRaw) ?? .medium }
         set { priorityRaw = newValue.rawValue }
+    }
+
+    func isEligible(for rule: SchedulingRule) -> Bool {
+        !excludedSchedulingRuleIDs.contains(rule.id)
+    }
+
+    func setEligible(_ eligible: Bool, for rule: SchedulingRule) {
+        if eligible {
+            excludedSchedulingRuleIDs.removeAll { $0 == rule.id }
+        } else if !excludedSchedulingRuleIDs.contains(rule.id) {
+            excludedSchedulingRuleIDs.append(rule.id)
+        }
     }
 
     static func durationLabel(for minutes: Int) -> String {

@@ -14,7 +14,10 @@ struct NoteForLaterApp: App {
             CalendarSubscription.self,
             SchedulingRule.self,
             EligibleHoursWindow.self,
-            Tag.self
+            Tag.self,
+            NamedSchedule.self,
+            Habit.self,
+            HabitLog.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {

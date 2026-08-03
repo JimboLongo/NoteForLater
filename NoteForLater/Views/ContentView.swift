@@ -2,9 +2,9 @@ import SwiftUI
 import SwiftData
 
 enum AppTab: Hashable {
+    case habits
     case inbox
-    case shelf(UUID)
-    case schedule
+    case calendar
     case shelves
     case more
 }
@@ -16,28 +16,27 @@ struct ContentView: View {
 
     @State private var selectedTab: AppTab = .inbox
     @State private var quickAction = QuickActionService.shared
+    @State private var moreNavigationPath = NavigationPath()
 
     var body: some View {
-        TabView(selection: $selectedTab) {
+        TabView(selection: selectedTabBinding) {
+            HabitsView()
+                .tabItem { Label("Habits", systemImage: "checkmark.seal") }
+                .tag(AppTab.habits)
+
             InboxView()
                 .tabItem { Label("Inbox", systemImage: "tray") }
                 .tag(AppTab.inbox)
 
-            ForEach(pinnedShelves) { shelf in
-                ShelfListView(shelf: shelf)
-                    .tabItem { Label(shelf.name, systemImage: shelf.systemImage) }
-                    .tag(AppTab.shelf(shelf.id))
-            }
-
             ScheduleReviewView()
-                .tabItem { Label("Schedule", systemImage: "calendar") }
-                .tag(AppTab.schedule)
+                .tabItem { Label("Calendar", systemImage: "calendar") }
+                .tag(AppTab.calendar)
 
             ShelvesView()
                 .tabItem { Label("Shelves", systemImage: "square.stack.3d.up") }
                 .tag(AppTab.shelves)
 
-            MoreView()
+            MoreView(navigationPath: $moreNavigationPath)
                 .tabItem { Label("More", systemImage: "ellipsis.circle") }
                 .tag(AppTab.more)
         }
@@ -56,8 +55,23 @@ struct ContentView: View {
         }
     }
 
-    private var pinnedShelves: [Shelf] {
-        shelves.filter(\.showsInTabBar)
+    /// A plain `.onChange(of: selectedTab)` only fires when the value
+    /// actually changes, so re-tapping the More tab while already on it
+    /// (the exact case that needs resetting) wouldn't trigger anything.
+    /// TabView invokes this binding's setter on every tap regardless of
+    /// whether the tag is already selected, so resetting here — any time
+    /// More is (re-)selected — covers both arriving at it and tapping it
+    /// again while already there.
+    private var selectedTabBinding: Binding<AppTab> {
+        Binding(
+            get: { selectedTab },
+            set: { newValue in
+                if newValue == .more {
+                    moreNavigationPath = NavigationPath()
+                }
+                selectedTab = newValue
+            }
+        )
     }
 
     private func seedDefaultShelvesIfNeeded() {
@@ -68,21 +82,22 @@ struct ContentView: View {
     }
 }
 
-/// Just two doors: shelf management (including per-shelf settings) and
-/// app-wide Settings.
+/// Tags, Schedules, and Settings — everything not among the 5 fixed tabs.
 struct MoreView: View {
+    @Binding var navigationPath: NavigationPath
+
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             List {
-                NavigationLink {
-                    ShelvesView()
-                } label: {
-                    Label("Manage Shelves", systemImage: "square.stack.3d.up")
-                }
                 NavigationLink {
                     TagsListView()
                 } label: {
-                    Label("Manage Tags", systemImage: "tag")
+                    Label("Tags", systemImage: "tag")
+                }
+                NavigationLink {
+                    SchedulesListView()
+                } label: {
+                    Label("Schedules", systemImage: "clock.arrow.2.circlepath")
                 }
                 NavigationLink {
                     SettingsView()
@@ -97,5 +112,5 @@ struct MoreView: View {
 
 #Preview {
     ContentView()
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }

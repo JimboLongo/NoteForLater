@@ -1,10 +1,9 @@
 import SwiftUI
 import SwiftData
 
-/// Per-shelf configuration: display name, icon, whether it's pinned to the
-/// bottom tab bar, and the SchedulingRules that pull tasks from this shelf
-/// onto the calendar. A shelf with no enabled rules is never touched by
-/// the AI Scheduler.
+/// Per-shelf configuration: display name, icon, color, and the
+/// SchedulingRules that pull tasks from this shelf onto the calendar. A
+/// shelf with no enabled rules is never touched by the AI Scheduler.
 struct ShelfEditView: View {
     @Bindable var shelf: Shelf
     @Environment(\.modelContext) private var modelContext
@@ -79,10 +78,6 @@ struct ShelfEditView: View {
             }
 
             Section {
-                Toggle("Show in Tab Bar", isOn: $shelf.showsInTabBar)
-            }
-
-            Section {
                 if rules.isEmpty {
                     Text("No pull schedule yet — this shelf won't be touched by the AI Scheduler until you add one.")
                         .foregroundStyle(.secondary)
@@ -92,12 +87,12 @@ struct ShelfEditView: View {
                         SchedulingRuleEditView(rule: rule)
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
-                            if !rule.name.isEmpty {
-                                Text(rule.name)
+                            if !rule.displayName.isEmpty {
+                                Text(rule.displayName)
                             }
                             Text(rule.summary)
-                                .font(rule.name.isEmpty ? .body : .caption)
-                                .foregroundStyle(rule.name.isEmpty ? .primary : .secondary)
+                                .font(rule.displayName.isEmpty ? .body : .caption)
+                                .foregroundStyle(rule.displayName.isEmpty ? .primary : .secondary)
                             if !rule.isEnabled {
                                 Text("Disabled")
                                     .font(.caption2)
@@ -202,7 +197,7 @@ struct ShelfEditView: View {
 
 #Preview {
     NavigationStack {
-        ShelfEditView(shelf: Shelf(name: "To-Do List", systemImage: "checklist", showsInTabBar: true))
+        ShelfEditView(shelf: Shelf(name: "To-Do List", systemImage: "checklist"))
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
+    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }

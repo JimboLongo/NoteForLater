@@ -140,7 +140,7 @@ private struct TaskRow: View {
 }
 
 #Preview {
-    let shelf = Shelf(name: "To-Do List", systemImage: "checklist", showsInTabBar: true)
+    let shelf = Shelf(name: "To-Do List", systemImage: "checklist")
     return ShelfListView(shelf: shelf)
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self], inMemory: true)
+        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }
