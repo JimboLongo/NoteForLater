@@ -55,8 +55,8 @@ struct TaskImportSummary {
 /// Bulk-creates tasks from a parsed .csv/.xlsx table. A row whose Shelf
 /// column matches an existing shelf becomes a TaskItem there; otherwise it
 /// lands on `defaultShelf`, or — if `defaultShelf` is nil (the user picked
-/// "Inbox") — as an InboxItem instead, ready to be sorted later. Either way
-/// every recognized column is preserved.
+/// "Inbox") — as an unsorted TaskItem (`shelf == nil`) instead, ready to
+/// be sorted later. Either way every recognized column is preserved.
 enum TaskImportService {
     static func importTasks(
         from url: URL,
@@ -115,14 +115,15 @@ enum TaskImportService {
                 // No column match and the default is "Inbox": a plain
                 // capture entry, same as typing it by hand — but every
                 // column that was present still carries over.
-                modelContext.insert(InboxItem(
-                    text: title,
-                    createdAt: createdAt,
+                modelContext.insert(TaskItem(
+                    title: title,
+                    shelf: nil,
                     dueDate: dueDate,
                     nextStep: values[.nextStep] ?? "",
                     estimatedMinutes: values[.duration].flatMap { Int($0) } ?? 30,
                     tags: tags,
-                    priority: priority
+                    priority: priority,
+                    createdAt: createdAt
                 ))
                 summary.importedCount += 1
                 continue

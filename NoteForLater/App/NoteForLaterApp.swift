@@ -6,6 +6,10 @@ struct NoteForLaterApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var sharedModelContainer: ModelContainer = {
+        // InboxItem stays in the schema (see its doc comment) purely so this
+        // container can still open a pre-existing store — the store predates
+        // any SwiftData version tracking, so there's no supported staged
+        // migration path to drop an entity from it outright.
         let schema = Schema([
             InboxItem.self,
             TaskItem.self,
@@ -17,7 +21,9 @@ struct NoteForLaterApp: App {
             Tag.self,
             NamedSchedule.self,
             Habit.self,
-            HabitLog.self
+            HabitLog.self,
+            TaskCompletionRecord.self,
+            TagLink.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
@@ -31,6 +37,51 @@ struct NoteForLaterApp: App {
         // Region-entry callbacks fire outside any view's environment, so the
         // monitoring service needs its own direct handle on the container.
         LocationMonitoringService.shared.modelContainer = sharedModelContainer
+        // Same reason AddInboxItemIntent (Shortcuts/Siri/Back Tap) needs it —
+        // App Intents run with no SwiftUI environment to pull a context from.
+        SharedModelContainer.current = sharedModelContainer
+        Self.migrateLegacyInboxItemsIfNeeded(container: sharedModelContainer)
+    }
+
+    /// One-time launch migration: converts every pre-existing InboxItem row
+    /// into a shelf-less TaskItem (`shelf == nil` is now what "unsorted"
+    /// means) and deletes the InboxItem, so the app never has to touch that
+    /// entity again after the first launch on a given device.
+    private static func migrateLegacyInboxItemsIfNeeded(container: ModelContainer) {
+        let flagKey = "didMigrateInboxItemsToTaskItems.v1"
+        guard !UserDefaults.standard.bool(forKey: flagKey) else { return }
+
+        let context = ModelContext(container)
+        guard let legacyItems = try? context.fetch(FetchDescriptor<InboxItem>()) else {
+            return
+        }
+        for item in legacyItems {
+            let task = TaskItem(
+                title: item.text,
+                shelf: nil,
+                sourceGmailMessageID: item.sourceGmailMessageID,
+                dueDate: item.dueDate,
+                nextStep: item.nextStep,
+                estimatedMinutes: item.estimatedMinutes,
+                tags: item.tags,
+                priority: item.priority,
+                createdAt: item.createdAt,
+                isDivisible: item.isDivisible,
+                minimumSegmentMinutes: item.minimumSegmentMinutes
+            )
+            task.includedSchedulingRuleIDs = item.includedSchedulingRuleIDs
+            task.dueDateDecided = item.dueDateDecided
+            task.durationDecided = item.durationDecided
+            context.insert(task)
+            context.delete(item)
+        }
+        do {
+            try context.save()
+            UserDefaults.standard.set(true, forKey: flagKey)
+        } catch {
+            // Leave the flag unset so this retries next launch instead of
+            // silently losing whatever didn't convert.
+        }
     }
 
     var body: some Scene {

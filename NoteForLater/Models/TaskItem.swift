@@ -1,57 +1,116 @@
 import Foundation
 import SwiftData
 
-/// A sorted item living on one of the user's shelves. Inbox items become
-/// TaskItems once the user routes them to a shelf. Only tasks on a shelf
-/// with an enabled SchedulingRule are candidates for auto-scheduling.
+/// A task, sorted or not. `shelf == nil` means it's sitting unsorted in
+/// the Inbox; everything else about it — attributes, tags, scheduling
+/// eligibility — works identically either way. Only tasks on a shelf with
+/// an enabled SchedulingRule are candidates for auto-scheduling.
 @Model
 final class TaskItem {
     var id: UUID
     var title: String
     var notes: String
     var createdAt: Date
+
+    /// Set when this task came from a Gmail sync rather than manual
+    /// typing, so re-syncing doesn't create duplicates for mail already
+    /// imported — checked across every task, not just unsorted ones,
+    /// since a synced item stays tagged after it's routed to a shelf.
+    var sourceGmailMessageID: String?
+
     var dueDate: Date?
+    /// Whether "Has due date" has actually been answered (either way) —
+    /// `dueDate == nil` alone can't tell "never asked" apart from
+    /// "explicitly no due date," so this tracks the answer separately.
+    /// See `YesNoToggle`.
+    var dueDateDecided: Bool = false
+    /// True once a real date has actually been picked, for the "Yes" case
+    /// only — `dueDate` gets auto-filled to `.now` the moment "Has due
+    /// date" flips to Yes (so the picker has something sensible to show),
+    /// which would otherwise look complete despite nobody having chosen a
+    /// date yet. Irrelevant when the answer is "No" (`dueDate == nil`
+    /// already says everything there).
+    var dueDatePicked: Bool = false
     var nextStep: String = ""
-    var estimatedMinutes: Int = 30
+    /// 0 means "no duration set" — see `durationLabel(for:)`.
+    var estimatedMinutes: Int = 0
+    /// Same idea as `dueDateDecided`, for "Has duration."
+    var durationDecided: Bool = false
+    /// Which pill "Has duration" landed on, independent of
+    /// `estimatedMinutes` — needed because Yes can be selected before a
+    /// real value's been picked (dropdown starts at 0/"Not Selected"),
+    /// and No resets `estimatedMinutes` to that same 0. Without this,
+    /// "Yes selected" and "No selected" would both collapse to
+    /// `estimatedMinutes == 0`, making it impossible to tell them apart —
+    /// switching from No to Yes would look like nothing happened. Only
+    /// meaningful when `durationDecided` is true.
+    var durationAnsweredYes: Bool = false
     var tags: [String] = []
-    var priorityRaw: String = Priority.medium.rawValue
+    var priorityRaw: String = Priority.unset.rawValue
     var isScheduled: Bool = false
+    var isCompleted: Bool = false
+    /// How many times a scheduled block for this task has been deleted off
+    /// the calendar (swipe-to-delete, the Delete action, or "Assume Not
+    /// Completed" sweeping it up) — a running count of how often this task
+    /// gets bumped rather than actually done, not reset by rescheduling.
+    var pushedCount: Int = 0
+    /// Opts this task out of Task Attribute Review and Nightly Review's
+    /// attribute-cleanup step, even while `isMissingAttributes` is true —
+    /// an escape hatch for a task you've decided not to fully fill in.
+    var attributeReviewExcluded: Bool = false
 
     /// Whether the AI Scheduler may split this task across multiple blocks
     /// (different times/slots the same day) if it doesn't fit in one
     /// contiguous window. Each piece is at least `minimumSegmentMinutes`.
     var isDivisible: Bool = false
-    var minimumSegmentMinutes: Int = 15
+    /// 0 is the "Not Selected" sentinel, same convention as
+    /// `estimatedMinutes` — a real minimum has to be actively chosen once
+    /// Divisible is Yes.
+    var minimumSegmentMinutes: Int = 0
+    /// Same idea as `durationDecided` — whether "Divisible" has actually
+    /// been answered either way, so the Yes/No pills start unanswered
+    /// instead of "No" reading as already picked.
+    var isDivisibleDecided: Bool = false
 
-    /// SchedulingRule IDs (from this task's shelf) that this task should
-    /// NOT be pulled by — everything else is eligible. Empty (the default)
-    /// means eligible for every rule on the shelf, matching "all checked"
-    /// in the UI; a rule added to the shelf later is automatically eligible
-    /// too, since nothing has excluded it yet.
-    var excludedSchedulingRuleIDs: [UUID] = []
+    /// SchedulingRule IDs (from this task's shelf) that this task IS
+    /// eligible to be pulled by — opt-in, not opt-out: empty (the default)
+    /// means eligible for none of the shelf's rules until the user
+    /// explicitly checks one, matching every other attribute starting
+    /// unselected. A rule added to the shelf later is NOT automatically
+    /// eligible — it has to be checked too.
+    var includedSchedulingRuleIDs: [UUID] = []
 
     var shelf: Shelf?
 
+    /// To-many, not to-one — a divisible task can legitimately have more
+    /// than one block at once (its segments, possibly on different days),
+    /// so a single task holding one fixed `scheduledBlock` was the root
+    /// cause of a real crash: once a divisible task's leftover minutes got
+    /// a second block on a later day, SwiftData's to-one inverse rejected
+    /// the second block outright ("This relationship already has a value
+    /// but it's not the target").
     @Relationship(deleteRule: .nullify, inverse: \ScheduledBlock.task)
-    var scheduledBlock: ScheduledBlock?
+    var scheduledBlocks: [ScheduledBlock]? = []
 
     init(
         title: String,
         notes: String = "",
-        shelf: Shelf,
+        shelf: Shelf? = nil,
+        sourceGmailMessageID: String? = nil,
         dueDate: Date? = nil,
         nextStep: String = "",
-        estimatedMinutes: Int = 30,
+        estimatedMinutes: Int = 0,
         tags: [String] = [],
-        priority: Priority = .medium,
+        priority: Priority = .unset,
         createdAt: Date = .now,
         isDivisible: Bool = false,
-        minimumSegmentMinutes: Int = 15
+        minimumSegmentMinutes: Int = 0
     ) {
         self.id = UUID()
         self.title = title
         self.notes = notes
         self.shelf = shelf
+        self.sourceGmailMessageID = sourceGmailMessageID
         self.createdAt = createdAt
         self.dueDate = dueDate
         self.nextStep = nextStep
@@ -64,23 +123,83 @@ final class TaskItem {
     }
 
     var priority: Priority {
-        get { Priority(rawValue: priorityRaw) ?? .medium }
+        get { Priority(rawValue: priorityRaw) ?? .unset }
         set { priorityRaw = newValue.rawValue }
     }
 
     func isEligible(for rule: SchedulingRule) -> Bool {
-        !excludedSchedulingRuleIDs.contains(rule.id)
+        includedSchedulingRuleIDs.contains(rule.id)
     }
 
     func setEligible(_ eligible: Bool, for rule: SchedulingRule) {
         if eligible {
-            excludedSchedulingRuleIDs.removeAll { $0 == rule.id }
-        } else if !excludedSchedulingRuleIDs.contains(rule.id) {
-            excludedSchedulingRuleIDs.append(rule.id)
+            if !includedSchedulingRuleIDs.contains(rule.id) {
+                includedSchedulingRuleIDs.append(rule.id)
+            }
+        } else {
+            includedSchedulingRuleIDs.removeAll { $0 == rule.id }
         }
     }
 
+    /// Marks this task complete with the exact same effects as checking
+    /// it off on the calendar (see `ScheduleReviewViewModel.toggleComplete`)
+    /// — every active scheduled block behind it is marked complete too,
+    /// and its Task Stats contribution is recorded. Shared so every "Mark
+    /// Complete" entry point (a task card's button, Task Attribute
+    /// Review, the calendar itself) stays consistent.
+    func markComplete(in modelContext: ModelContext) {
+        setCompleted(true, in: modelContext)
+    }
+
+    /// Shared by every "mark complete" entry point (the calendar's
+    /// tap-to-complete circle, a task card's Mark Complete button, Task
+    /// Attribute Review's) — and, going the other way, by that same Mark
+    /// Complete button tapped again on an already-completed task, which
+    /// un-marks it everywhere at once: the task itself, every one of its
+    /// scheduled blocks (so the calendar's own circle un-checks too), and
+    /// its `TaskCompletionRecord` stats snapshot.
+    func setCompleted(_ completed: Bool, in modelContext: ModelContext) {
+        isCompleted = completed
+        for block in scheduledBlocks ?? [] {
+            block.isCompleted = completed
+        }
+        if completed {
+            TaskCompletionRecord.upsert(for: self, in: modelContext)
+        } else {
+            TaskCompletionRecord.remove(for: self, in: modelContext)
+        }
+    }
+
+    /// Keeps an already-scheduled block's calendar time in sync with this
+    /// task's own `estimatedMinutes` — same `startTime`, `endTime`
+    /// stretched or shrunk to match whatever the duration currently is.
+    /// Only when there's exactly one active (incomplete) block: a
+    /// divisible task mid-split across several blocks has no single
+    /// well-defined block to resize, so those are left alone. Dropped
+    /// back to "proposed" if the block was already approved, so the next
+    /// Approve All actually pushes the corrected time to Google Calendar
+    /// instead of leaving the stale one live. Called both when a
+    /// duration edit is made (`TaskReviewCard`'s Duration picker) and
+    /// when one's rolled back (`TaskEditSnapshot.restore`, on Cancel) —
+    /// either way, the calendar should always reflect whatever
+    /// `estimatedMinutes` currently says.
+    func syncScheduledBlockDuration() {
+        let activeBlocks = (scheduledBlocks ?? []).filter { !$0.isCompleted }
+        guard activeBlocks.count == 1, let block = activeBlocks.first, estimatedMinutes > 0 else { return }
+        block.endTime = block.startTime.addingTimeInterval(TimeInterval(estimatedMinutes * 60))
+        block.isEstimatedDuration = false
+        if block.approvalStatus == .approved {
+            block.approvalStatus = .proposed
+        }
+    }
+
+    /// 0 is the "no duration" sentinel — used by shelves with duration
+    /// tracking off (see `Shelf.hasDefaultDuration`) — rather than making
+    /// `estimatedMinutes` optional and rippling `?? `s through every call
+    /// site. It also already means "never scheduled": AISchedulingService's
+    /// packer skips anything with `minutesNeeded <= 0`.
     static func durationLabel(for minutes: Int) -> String {
+        guard minutes > 0 else { return "Not Selected" }
         if minutes < 60 { return "\(minutes) min" }
         let hours = minutes / 60
         let remainder = minutes % 60
@@ -88,4 +207,89 @@ final class TaskItem {
     }
 
     var durationLabel: String { Self.durationLabel(for: estimatedMinutes) }
+
+    /// True if "Has due date" is Yes but no real date has been chosen yet
+    /// — just the `.now` auto-fill sitting there unconfirmed. False (not
+    /// missing) once a date's actually picked, once the answer is an
+    /// explicit "No" (`dueDate == nil`), or once `shelf` doesn't track due
+    /// dates at all — matching where the Due Date row itself is shown.
+    /// Takes an explicit shelf (rather than always reading `self.shelf`) so
+    /// `TaskReviewCard` can ask "what would still be missing on the shelf
+    /// I'm previewing" before a move actually commits.
+    private func dueDateMissing(on shelf: Shelf?) -> Bool {
+        guard shelf?.effectiveTracksDueDates ?? true else { return false }
+        return !dueDateDecided || (dueDate != nil && !dueDatePicked)
+    }
+
+    /// True if Next Step is blank, unless `shelf` doesn't track it at all —
+    /// matching where the Next Step field is shown/hidden.
+    private func nextStepMissing(on shelf: Shelf?) -> Bool {
+        guard shelf?.effectiveTracksNextStep ?? true else { return false }
+        return nextStep.isEmpty
+    }
+
+    /// True if Priority is unset, unless `shelf` doesn't track it at all —
+    /// matching where the Priority section is shown/faded.
+    private func priorityMissing(on shelf: Shelf?) -> Bool {
+        guard shelf?.effectiveTracksPriority ?? true else { return false }
+        return priority == .unset
+    }
+
+    /// True if "Has duration" is Yes but nothing's been picked from the
+    /// dropdown yet (still sitting on "Not Selected"). False (not missing)
+    /// once a real duration's chosen, or once the answer is an explicit
+    /// "No" (`durationAnsweredYes == false`).
+    private func durationMissing(on shelf: Shelf?) -> Bool {
+        guard shelf?.effectiveTracksDuration ?? true else { return false }
+        return !durationDecided || (durationAnsweredYes && estimatedMinutes == 0)
+    }
+
+    /// True if `shelf` has scheduling rules to weigh in on and nothing's
+    /// been picked yet. Unlike due date/duration, there's no separate
+    /// "decided" flag here — an empty selection always means incomplete,
+    /// since "eligible for none of these" isn't a real answer a task can
+    /// land on.
+    private func eligibleSchedulesMissing(on shelf: Shelf?) -> Bool {
+        !(shelf?.schedulingRules ?? []).isEmpty && includedSchedulingRuleIDs.isEmpty
+    }
+
+    /// Same shape as `durationMissing` — "Divisible" is Yes but the
+    /// minimum-segment dropdown is still on "Not Selected." Only tracked
+    /// on shelves that track duration at all, matching where the
+    /// Divisible row itself is shown.
+    private func divisibleMissing(on shelf: Shelf?) -> Bool {
+        guard shelf?.effectiveTracksDuration ?? true else { return false }
+        return !isDivisibleDecided || (isDivisible && minimumSegmentMinutes == 0)
+    }
+
+    /// Flagged for the Nightly Review's attribute-cleanup pass — true if
+    /// ANY of next step, due date, priority, duration, divisible (when the
+    /// shelf actually tracks duration), or eligible schedules (when the
+    /// shelf actually has any) is still incomplete. Tags don't count
+    /// either way.
+    var isMissingAttributes: Bool {
+        !missingAttributeNames(consideringShelf: shelf).isEmpty
+    }
+
+    /// Same criteria as `isMissingAttributes`, spelled out by name — so a
+    /// "remaining attributes" reminder can say exactly what's left instead
+    /// of just that something is. Defaults to this task's actual shelf;
+    /// `TaskReviewCard`'s "Remaining Attributes" summary passes the
+    /// currently-previewed shelf instead, so tapping a shelf that doesn't
+    /// track (say) Next Step immediately drops it from the list, without
+    /// waiting for the move to actually commit.
+    var missingAttributeNames: [String] {
+        missingAttributeNames(consideringShelf: shelf)
+    }
+
+    func missingAttributeNames(consideringShelf shelf: Shelf?) -> [String] {
+        var missing: [String] = []
+        if nextStepMissing(on: shelf) { missing.append("Next Step") }
+        if dueDateMissing(on: shelf) { missing.append("Due Date") }
+        if priorityMissing(on: shelf) { missing.append("Priority") }
+        if durationMissing(on: shelf) { missing.append("Duration") }
+        if divisibleMissing(on: shelf) { missing.append("Divisible") }
+        if eligibleSchedulesMissing(on: shelf) { missing.append("Eligible Schedules") }
+        return missing
+    }
 }

@@ -11,21 +11,25 @@ struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var subscriptions: [CalendarSubscription]
     @Query(sort: \EligibleHoursWindow.sortOrder) private var eligibleHoursWindows: [EligibleHoursWindow]
-    @Query private var allInboxItems: [InboxItem]
     @Query private var allTasks: [TaskItem]
     @Query private var allScheduledBlocks: [ScheduledBlock]
     @Query private var allShelves: [Shelf]
     @Query private var allTags: [Tag]
     @Query private var allHabits: [Habit]
+    @Query private var allTaskCompletionRecords: [TaskCompletionRecord]
 
     private var accountService: GoogleAccountService { GoogleAccountService.shared }
     private var locationService: LocationMonitoringService { LocationMonitoringService.shared }
+    private var nightlyReviewSettings: NightlyReviewSettings { NightlyReviewSettings.shared }
+    private var upcomingReminderSettings: UpcomingReminderSettings { UpcomingReminderSettings.shared }
 
     @State private var isSigningIn = false
     @State private var isSyncingCalendars = false
     @State private var errorMessage: String?
     @State private var isShowingClearAllConfirmation = false
     @State private var isShowingClearHabitsConfirmation = false
+    @State private var isShowingResetTaskStatsConfirmation = false
+    @State private var isShowingCannotDisableMealPlanningAlert = false
 
     var body: some View {
         Form {
@@ -138,6 +142,41 @@ struct SettingsView: View {
             }
 
             Section {
+                Toggle("Meal Planning", isOn: mealPlanningBinding)
+            } footer: {
+                Text("Adds a Pantry shelf for tracking ingredients on hand. Pantry is never a destination for Inbox items — add to it directly, or import from a grocery receipt photo.")
+            }
+
+            Section {
+                Toggle("Nightly Review", isOn: nightlyReviewEnabledBinding)
+                if nightlyReviewSettings.isEnabled {
+                    DatePicker("Time", selection: nightlyReviewTimeBinding, displayedComponents: [.hourAndMinute])
+                }
+            } header: {
+                Text("Nightly Review")
+            } footer: {
+                Text("Each night at this time, you'll get a reminder to mark today's schedule complete or not, sort what's landed in your Inbox, and generate and approve tomorrow's schedule. Start one any time from the bottom of the More tab.")
+            }
+
+            Section {
+                Toggle("Remind Me Before Events", isOn: upcomingReminderEnabledBinding)
+                if upcomingReminderSettings.isEnabled {
+                    Picker("Notice", selection: upcomingReminderLeadBinding) {
+                        ForEach(UpcomingReminderSettings.leadOptions, id: \.self) { minutes in
+                            Text(UpcomingReminderSettings.leadLabel(for: minutes)).tag(minutes)
+                        }
+                    }
+                }
+            } header: {
+                Text("Upcoming Reminders")
+            } footer: {
+                Text("Get a push notification this far before each approved task or habit on your calendar is about to start.")
+            }
+
+            Section {
+                Button("Reset Task Stats", role: .destructive) {
+                    isShowingResetTaskStatsConfirmation = true
+                }
                 Button("Delete All Habits", role: .destructive) {
                     isShowingClearHabitsConfirmation = true
                 }
@@ -147,7 +186,7 @@ struct SettingsView: View {
             } header: {
                 Text("Danger Zone")
             } footer: {
-                Text("\"Delete All Habits\" removes every habit and its tracked days (and cancels their reminders). \"Clear All Data\" additionally deletes every inbox item, task, shelf, scheduled block, and tag on this device, and disconnects your Google account. Neither can be undone.")
+                Text("\"Reset Task Stats\" clears every completion snapshot behind the Task Stats page — completed tasks and habits themselves are untouched. \"Delete All Habits\" removes every habit and its tracked days (and cancels their reminders). \"Clear All Data\" additionally deletes every inbox item, task, shelf, scheduled block, and tag on this device, and disconnects your Google account. None of this can be undone.")
             }
 
             if let errorMessage {
@@ -161,6 +200,16 @@ struct SettingsView: View {
             if accountService.currentAccount != nil, subscriptions.isEmpty {
                 syncCalendars()
             }
+        }
+        .confirmationDialog(
+            "Reset Task Stats?",
+            isPresented: $isShowingResetTaskStatsConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Reset Task Stats", role: .destructive, action: resetTaskStats)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently deletes every completion snapshot behind the Task Stats page. This can't be undone.")
         }
         .confirmationDialog(
             "Delete all habits?",
@@ -181,6 +230,11 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This permanently deletes everything in NoteForLater on this device. This can't be undone.")
+        }
+        .alert("Can't Turn Off Meal Planning", isPresented: $isShowingCannotDisableMealPlanningAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Delete the items on your Pantry shelf first.")
         }
     }
 
@@ -247,6 +301,93 @@ struct SettingsView: View {
         }
     }
 
+    /// Reads/writes Meal Planning as pure derived state — "on" means a
+    /// Pantry shelf exists, "off" means it doesn't — rather than a separate
+    /// flag that could drift out of sync with the shelf actually being
+    /// there. Mirrors ShelvesView's own add/delete-shelf pattern.
+    private var mealPlanningBinding: Binding<Bool> {
+        Binding(
+            get: { allShelves.contains { $0.isPantry } },
+            set: { isOn in
+                if isOn {
+                    enableMealPlanning()
+                } else {
+                    disableMealPlanning()
+                }
+            }
+        )
+    }
+
+    private func enableMealPlanning() {
+        guard !allShelves.contains(where: { $0.isPantry }) else { return }
+        let nextOrder = (allShelves.map(\.sortOrder).max() ?? -1) + 1
+        let pantry = Shelf(name: "Pantry", systemImage: "refrigerator", sortOrder: nextOrder)
+        pantry.isPantry = true
+        pantry.tracksDuration = false
+        pantry.hasDueDates = false
+        pantry.hasNextStep = false
+        pantry.hasPriority = false
+        modelContext.insert(pantry)
+    }
+
+    /// Same guard ShelvesView uses for manual shelf deletion — don't
+    /// silently drop a shelf's contents; make the user clear it first.
+    private func disableMealPlanning() {
+        guard let pantry = allShelves.first(where: { $0.isPantry }) else { return }
+        if let tasks = pantry.tasks, !tasks.isEmpty {
+            isShowingCannotDisableMealPlanningAlert = true
+            return
+        }
+        modelContext.delete(pantry)
+    }
+
+    private var nightlyReviewEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { nightlyReviewSettings.isEnabled },
+            set: { isOn in
+                nightlyReviewSettings.isEnabled = isOn
+                if isOn { NightlyReviewNotificationService.shared.requestAuthorization() }
+            }
+        )
+    }
+
+    private var nightlyReviewTimeBinding: Binding<Date> {
+        Binding(
+            get: { nightlyReviewSettings.time },
+            set: { nightlyReviewSettings.time = $0 }
+        )
+    }
+
+    private var upcomingReminderEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { upcomingReminderSettings.isEnabled },
+            set: { isOn in
+                upcomingReminderSettings.isEnabled = isOn
+                if isOn { UpcomingBlockNotificationService.shared.requestAuthorization() }
+            }
+        )
+    }
+
+    private var upcomingReminderLeadBinding: Binding<Int> {
+        Binding(
+            get: { upcomingReminderSettings.leadMinutes },
+            set: { upcomingReminderSettings.leadMinutes = $0 }
+        )
+    }
+
+    private func resetTaskStats() {
+        for record in allTaskCompletionRecords {
+            modelContext.delete(record)
+        }
+        // Most Pushed Task (and every other pushed-count stat) is read
+        // straight off TaskItem/TaskCompletionRecord.pushedCount, not its
+        // own record — a reset that only cleared completion snapshots
+        // would leave old push counts sitting on still-active shelf tasks.
+        for task in allTasks {
+            task.pushedCount = 0
+        }
+    }
+
     private func clearAllHabits() {
         for habit in allHabits {
             HabitNotificationService.shared.cancelAll(for: habit)
@@ -255,7 +396,6 @@ struct SettingsView: View {
     }
 
     private func clearAllData() {
-        for item in allInboxItems { modelContext.delete(item) }
         for task in allTasks { modelContext.delete(task) }
         for block in allScheduledBlocks { modelContext.delete(block) }
         for shelf in allShelves { modelContext.delete(shelf) }
@@ -272,5 +412,5 @@ struct SettingsView: View {
     NavigationStack {
         SettingsView()
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
+    .modelContainer(for: [TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self, TaskCompletionRecord.self], inMemory: true)
 }

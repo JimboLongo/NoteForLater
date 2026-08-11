@@ -33,13 +33,15 @@ final class LocationMonitoringService: NSObject {
     }
 
     /// Re-syncs monitored regions to match `tags` — stops monitoring
-    /// anything removed/changed, starts monitoring the rest. Pass only tags
-    /// with `hasLocation == true`.
+    /// anything removed/changed, starts monitoring the rest. Only tags
+    /// with `hasLocation == true` *and* `notifyWhenNear == true` end up
+    /// actually monitored — a location can be kept on a tag with proximity
+    /// notifications switched off.
     func syncRegions(with tags: [Tag]) {
         for region in locationManager.monitoredRegions {
             locationManager.stopMonitoring(for: region)
         }
-        for tag in tags.filter(\.hasLocation).prefix(20) {
+        for tag in tags.filter({ $0.hasLocation && $0.notifyWhenNear }).prefix(20) {
             let region = CLCircularRegion(center: tag.coordinate, radius: tag.radiusMeters, identifier: tag.name)
             region.notifyOnEntry = true
             region.notifyOnExit = false
@@ -66,7 +68,7 @@ extension LocationMonitoringService: CLLocationManagerDelegate {
         guard !matching.isEmpty else { return }
 
         let content = UNMutableNotificationContent()
-        content.title = "Near \(tagName.capitalized)"
+        content.title = "Near \(tagName)"
         content.body = matching.count == 1
             ? matching[0].title
             : "\(matching.count) tasks: \(matching.prefix(3).map(\.title).joined(separator: ", "))"

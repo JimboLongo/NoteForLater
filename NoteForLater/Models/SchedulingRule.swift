@@ -104,6 +104,26 @@ final class SchedulingRule {
         name.isEmpty ? (namedSchedule?.name ?? "") : name
     }
 
+    /// Whether this rule could ever place something needing `minutesNeeded`
+    /// at all, given its divisibility and this rule's fill-strategy cap —
+    /// independent of the per-task "Eligible Schedules" checkbox. A
+    /// non-divisible item longer than what the rule could ever hand it
+    /// (a single-task cap, or the rule's whole budget) can never actually
+    /// be pulled by this rule no matter how that checkbox is set. Takes
+    /// plain values rather than a TaskItem so it also works for an
+    /// unsorted task that hasn't been routed to a shelf yet (see
+    /// NightlyReviewView's TaskReviewCard).
+    func canEverFit(minutesNeeded: Int, isDivisible: Bool) -> Bool {
+        switch fillStrategy {
+        case .fillToFit:
+            return true
+        case .maxDuration:
+            return isDivisible || minutesNeeded <= maxTotalMinutes
+        case .maxTaskCount:
+            return isDivisible || minutesNeeded <= maxMinutesPerTask
+        }
+    }
+
     static let dayLabels: [(weekday: Int, short: String)] = [
         (2, "Mon"), (3, "Tue"), (4, "Wed"), (5, "Thu"), (6, "Fri"), (7, "Sat"), (1, "Sun")
     ]

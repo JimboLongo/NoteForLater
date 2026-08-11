@@ -20,7 +20,7 @@ struct TagsListView: View {
                     LocationTagPickerView(tagName: tag.name)
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(tag.name.capitalized)
+                        Text(tag.name)
                         Text(tag.hasLocation ? (tag.addressLabel.isEmpty ? tag.radiusDescription : "\(tag.addressLabel) · \(tag.radiusDescription)") : "No location")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -55,5 +55,5 @@ struct TagsListView: View {
     NavigationStack {
         TagsListView()
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
+    .modelContainer(for: [TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }

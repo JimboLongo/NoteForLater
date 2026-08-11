@@ -40,10 +40,37 @@ final class Habit {
     var daysOfWeek: [Int] = [1, 2, 3, 4, 5, 6, 7]
     /// Minutes since midnight, one per occurrence — count should track `timesPerDay`.
     var reminderTimesOfDay: [Int] = [540]
+    /// Same shape as `reminderTimesOfDay` (one per occurrence, minutes
+    /// since midnight, count tracks `timesPerDay`), but this is what the
+    /// AI Scheduler actually tries to place the habit near — the
+    /// notification reminder and the scheduler's target time don't have
+    /// to be the same moment.
+    var idealTimesOfDay: [Int] = [540]
     var sortOrder: Int = 0
+
+    /// How long the AI Scheduler should block off for this habit, in
+    /// minutes — mirrors `TaskItem.estimatedMinutes`.
+    var estimatedMinutes: Int = 15
+
+    /// The fraction of scheduled days in the trailing 30 that must be
+    /// completed to stay "on track" for Misses Remaining — e.g. 0.85 means
+    /// at most 15% of scheduled days may be missed. User-editable per habit.
+    var missThreshold: Double = 0.85
+    /// The highest Rolling 30 completion rate ever reached, once the habit
+    /// has existed a full 30 days — see `computeHabitRollingStats` and
+    /// `nextHabitRolling30Record`. Stored as the raw completed/scheduled
+    /// counts (not just a fraction) so "Record 29/30" reflects the window
+    /// that actually produced it. Never regresses; refreshed whenever
+    /// HabitDetailView recomputes its cached stats (same trigger as
+    /// current/max streak, not on every tap).
+    var rolling30RecordCompletedDays: Int?
+    var rolling30RecordScheduledDays: Int?
 
     @Relationship(deleteRule: .cascade, inverse: \HabitLog.habit)
     var logs: [HabitLog]? = []
+
+    @Relationship(deleteRule: .nullify, inverse: \ScheduledBlock.habit)
+    var scheduledBlocks: [ScheduledBlock]? = []
 
     init(
         name: String,
@@ -51,6 +78,7 @@ final class Habit {
         timesPerDay: Int = 1,
         daysOfWeek: [Int] = [1, 2, 3, 4, 5, 6, 7],
         reminderTimesOfDay: [Int] = [540],
+        idealTimesOfDay: [Int]? = nil,
         sortOrder: Int = 0
     ) {
         self.id = UUID()
@@ -59,6 +87,14 @@ final class Habit {
         self.timesPerDay = timesPerDay
         self.daysOfWeek = daysOfWeek
         self.reminderTimesOfDay = reminderTimesOfDay
+        // Defaults to matching `reminderTimesOfDay` one-for-one when the
+        // caller doesn't supply its own — a caller that passes a
+        // multi-occurrence `reminderTimesOfDay` without also passing
+        // `idealTimesOfDay` would otherwise leave this at the property's
+        // single-element default, out of sync with `timesPerDay` (see
+        // `HabitEditView`, whose per-occurrence rows are driven by this
+        // array's own count).
+        self.idealTimesOfDay = idealTimesOfDay ?? reminderTimesOfDay
         self.sortOrder = sortOrder
     }
 
@@ -72,7 +108,27 @@ final class Habit {
     }
 
     func isApplicable(on date: Date, calendar: Calendar = .current) -> Bool {
-        daysOfWeek.contains(calendar.component(.weekday, from: date))
+        calendar.startOfDay(for: date) >= calendar.startOfDay(for: startDate)
+            && daysOfWeek.contains(calendar.component(.weekday, from: date))
+    }
+
+    static func durationLabel(for minutes: Int) -> String {
+        TaskItem.durationLabel(for: minutes)
+    }
+
+    var durationLabel: String { Self.durationLabel(for: estimatedMinutes) }
+
+    /// Convenience wrapper around the two stored record fields — see
+    /// `rolling30RecordCompletedDays`.
+    var rolling30Record: HabitRollingRecord? {
+        get {
+            guard let completed = rolling30RecordCompletedDays, let scheduled = rolling30RecordScheduledDays else { return nil }
+            return HabitRollingRecord(completedDays: completed, scheduledDays: scheduled)
+        }
+        set {
+            rolling30RecordCompletedDays = newValue?.completedDays
+            rolling30RecordScheduledDays = newValue?.scheduledDays
+        }
     }
 
     func log(on date: Date, calendar: Calendar = .current) -> HabitLog? {
@@ -84,17 +140,70 @@ final class Habit {
         log(on: date, calendar: calendar)?.occurrenceStatus(index) ?? .none
     }
 
+    /// The next reminder still ahead of this habit, used to order the Today
+    /// list like a queue of "what's coming up next" rather than a fixed
+    /// list. Scans forward from today (up to a week) for the earliest
+    /// applicable day that still has an unresolved occurrence — one nobody
+    /// has marked complete/missed/excused — and returns that occurrence's
+    /// reminder time. A day with nothing left unresolved (today, once every
+    /// occurrence is settled) rolls forward to the next applicable day,
+    /// whose occurrences are all unresolved by definition. Returns nil only
+    /// if every applicable day in the window is already fully resolved.
+    func nextReminderDate(asOf referenceDate: Date = .now, calendar: Calendar = .current) -> Date? {
+        guard !reminderTimesOfDay.isEmpty else { return nil }
+        var cursor = calendar.startOfDay(for: referenceDate)
+        for _ in 0..<7 {
+            if isApplicable(on: cursor, calendar: calendar) {
+                let dayLog = log(on: cursor, calendar: calendar)
+                for index in 0..<max(timesPerDay, 1) {
+                    let status = dayLog?.occurrenceStatus(index) ?? .none
+                    guard status == .none else { continue }
+                    let minutes = index < reminderTimesOfDay.count ? reminderTimesOfDay[index] : (reminderTimesOfDay.last ?? 0)
+                    return calendar.date(byAdding: .minute, value: minutes, to: cursor)
+                }
+            }
+            cursor = calendar.date(byAdding: .day, value: 1, to: cursor) ?? cursor
+        }
+        return nil
+    }
+
+    /// Every log keyed by its (start-of-day) date, built once so a full
+    /// history walk (streaks, %, the calendar grid) does a single O(logs)
+    /// pass instead of re-scanning the whole `logs` array once per day —
+    /// that per-day-linear-scan was the main cost behind a laggy calendar
+    /// on habits with much history. Pass `from:` with a `@Query`-fetched
+    /// array when you have one (e.g. from the view) — SwiftData serves that
+    /// from its own managed fetch/cache path, which is faster in practice
+    /// than walking the `logs` relationship array on the model directly.
+    func logsByDay(from providedLogs: [HabitLog]? = nil, calendar: Calendar = .current) -> [Date: HabitLog] {
+        var result: [Date: HabitLog] = [:]
+        for log in providedLogs ?? (logs ?? []) {
+            result[calendar.startOfDay(for: log.date)] = log
+        }
+        return result
+    }
+
     /// Rolls up a day's per-occurrence statuses into one day-level result:
-    /// excused override, full completion, a definite miss, or nil if it's
-    /// still pending — today, with no occurrence marked missed yet, and not
-    /// every occurrence resolved. Pending days are omitted from streak/%
-    /// math until they're resolved or the day ends and becomes a miss.
+    /// excused override, full completion, or a miss — except for today,
+    /// which stays `nil` (pending) until every occurrence has been marked
+    /// something (complete, missed, or excused — anything but untouched).
+    /// Streaks and Rolling 30 only credit or debit a day once it's actually
+    /// done; a same-day miss still counts once the *rest* of today's
+    /// occurrences are also resolved, it just doesn't jump the gun while
+    /// some are still untouched.
     func status(on date: Date, asOf referenceDate: Date = .now, calendar: Calendar = .current) -> HabitCompletionStatus? {
+        status(on: date, asOf: referenceDate, calendar: calendar, logsByDay: logsByDay(calendar: calendar))
+    }
+
+    /// Same, but against a `logsByDay` you've already built — use this when
+    /// checking many days at once (e.g. rendering a whole month's calendar
+    /// grid) so the log list isn't re-scanned per day.
+    func status(on date: Date, asOf referenceDate: Date = .now, calendar: Calendar = .current, logsByDay: [Date: HabitLog]) -> HabitCompletionStatus? {
         let day = calendar.startOfDay(for: date)
         let today = calendar.startOfDay(for: referenceDate)
         let isToday = day == today
         let n = max(timesPerDay, 1)
-        guard let log = log(on: day, calendar: calendar) else {
+        guard let log = logsByDay[day] else {
             return isToday ? nil : .no
         }
 
@@ -108,27 +217,29 @@ final class Habit {
             }
         }
 
-        // A single explicit miss marks the day right away — no point
-        // waiting on the rest of the occurrences.
-        if missedCount > 0 { return .no }
+        // Today stays pending until every occurrence has been marked
+        // something — a same-day miss doesn't resolve the day on its own
+        // while others are still untouched.
+        if isToday, completeCount + missedCount + excusedCount < n {
+            return nil
+        }
+
         if excusedCount == n { return .excused }
         if completeCount + excusedCount == n, completeCount > 0 { return .yes }
-        // Some occurrences are still untouched.
-        if isToday { return nil }
         return .no
     }
 
     /// Applicable, countable days from `startDate` through `endDate`
     /// (inclusive), oldest first, with their effective status. Excused days
     /// and pending days are omitted entirely — see `status(on:asOf:)`.
-    private func countedDays(through endDate: Date, calendar: Calendar = .current) -> [(date: Date, status: HabitCompletionStatus)] {
+    private func countedDays(through endDate: Date, calendar: Calendar, logsByDay: [Date: HabitLog]) -> [(date: Date, status: HabitCompletionStatus)] {
         var result: [(Date, HabitCompletionStatus)] = []
         var cursor = calendar.startOfDay(for: startDate)
         let end = calendar.startOfDay(for: endDate)
         guard cursor <= end else { return [] }
         while cursor <= end {
             if isApplicable(on: cursor, calendar: calendar),
-               let status = status(on: cursor, asOf: endDate, calendar: calendar),
+               let status = status(on: cursor, asOf: endDate, calendar: calendar, logsByDay: logsByDay),
                status != .excused {
                 result.append((cursor, status))
             }
@@ -140,20 +251,44 @@ final class Habit {
     /// Positive if the most recent counted day was a hit (and how many in a
     /// row), negative if it was a miss, 0 if there's nothing counted yet.
     func currentStreak(asOf referenceDate: Date = .now, calendar: Calendar = .current) -> Int {
-        let days = countedDays(through: referenceDate, calendar: calendar)
-        guard let last = days.last else { return 0 }
-        var count = 0
-        for entry in days.reversed() {
-            guard entry.status == last.status else { break }
-            count += 1
-        }
-        return last.status == .yes ? count : -count
+        stats(asOf: referenceDate, calendar: calendar).currentStreak
     }
 
-    /// Longest-ever hit streak and longest-ever miss streak, independent of
-    /// which one is current.
-    func longestStreaks(asOf referenceDate: Date = .now, calendar: Calendar = .current) -> (maxYes: Int, maxNo: Int) {
-        let days = countedDays(through: referenceDate, calendar: calendar)
+    /// The max streak to show alongside the current one: the longest hit
+    /// streak if you're currently on a hit streak, otherwise the longest
+    /// miss streak.
+    func displayMaxStreak(asOf referenceDate: Date = .now, calendar: Calendar = .current) -> Int {
+        stats(asOf: referenceDate, calendar: calendar).maxStreak
+    }
+
+    func mtdPercent(asOf referenceDate: Date = .now, calendar: Calendar = .current) -> Double? {
+        stats(asOf: referenceDate, calendar: calendar).mtdPercent
+    }
+
+    func ltdPercent(asOf referenceDate: Date = .now, calendar: Calendar = .current) -> Double? {
+        stats(asOf: referenceDate, calendar: calendar).ltdPercent
+    }
+
+    /// Current streak, max streak, MTD %, and LTD % computed together from
+    /// a single shared history walk (one `logsByDay` build, one pass over
+    /// applicable days) — call this instead of the individual accessors
+    /// when you need more than one of them, which used to mean repeating
+    /// the whole history walk once per metric. Pass `logs:` with a
+    /// `@Query`-fetched array when you have one — see `logsByDay(from:)`.
+    func stats(asOf referenceDate: Date = .now, calendar: Calendar = .current, logs providedLogs: [HabitLog]? = nil) -> HabitStats {
+        let logsByDay = logsByDay(from: providedLogs, calendar: calendar)
+        let days = countedDays(through: referenceDate, calendar: calendar, logsByDay: logsByDay)
+
+        var current = 0
+        if let last = days.last {
+            var count = 0
+            for entry in days.reversed() {
+                guard entry.status == last.status else { break }
+                count += 1
+            }
+            current = last.status == .yes ? count : -count
+        }
+
         var maxYes = 0, maxNo = 0
         var runStatus: HabitCompletionStatus?
         var runLength = 0
@@ -170,20 +305,17 @@ final class Habit {
                 maxNo = max(maxNo, runLength)
             }
         }
-        return (maxYes, maxNo)
-    }
+        let maxStreak = current >= 0 ? maxYes : -maxNo
 
-    /// The max streak to show alongside the current one: the longest hit
-    /// streak if you're currently on a hit streak, otherwise the longest
-    /// miss streak.
-    func displayMaxStreak(asOf referenceDate: Date = .now, calendar: Calendar = .current) -> Int {
-        let current = currentStreak(asOf: referenceDate, calendar: calendar)
-        let (maxYes, maxNo) = longestStreaks(asOf: referenceDate, calendar: calendar)
-        return current >= 0 ? maxYes : -maxNo
+        let monthStart = calendar.dateInterval(of: .month, for: referenceDate)?.start ?? referenceDate
+        let mtd = percentComplete(from: monthStart, through: referenceDate, calendar: calendar, logsByDay: logsByDay)
+        let ltd = percentComplete(from: startDate, through: referenceDate, calendar: calendar, logsByDay: logsByDay)
+
+        return HabitStats(currentStreak: current, maxStreak: maxStreak, mtdPercent: mtd, ltdPercent: ltd)
     }
 
     /// % of counted days (excused/pending omitted) marked Yes, over [periodStart, periodEnd].
-    func percentComplete(from periodStart: Date, through periodEnd: Date, calendar: Calendar = .current) -> Double? {
+    private func percentComplete(from periodStart: Date, through periodEnd: Date, calendar: Calendar, logsByDay: [Date: HabitLog]) -> Double? {
         var cursor = calendar.startOfDay(for: max(startDate, periodStart))
         let end = calendar.startOfDay(for: periodEnd)
         guard cursor <= end else { return nil }
@@ -191,7 +323,7 @@ final class Habit {
         var totalCount = 0
         while cursor <= end {
             if isApplicable(on: cursor, calendar: calendar),
-               let status = status(on: cursor, asOf: periodEnd, calendar: calendar),
+               let status = status(on: cursor, asOf: periodEnd, calendar: calendar, logsByDay: logsByDay),
                status != .excused {
                 totalCount += 1
                 if status == .yes { yesCount += 1 }
@@ -202,28 +334,28 @@ final class Habit {
         return Double(yesCount) / Double(totalCount) * 100
     }
 
-    func mtdPercent(asOf referenceDate: Date = .now, calendar: Calendar = .current) -> Double? {
-        let monthStart = calendar.dateInterval(of: .month, for: referenceDate)?.start ?? referenceDate
-        return percentComplete(from: monthStart, through: referenceDate, calendar: calendar)
-    }
-
-    func ltdPercent(asOf referenceDate: Date = .now, calendar: Calendar = .current) -> Double? {
-        percentComplete(from: startDate, through: referenceDate, calendar: calendar)
-    }
-
-    var currentStreakDisplay: String { Self.signedText(currentStreak()) }
-    var maxStreakDisplay: String { Self.signedText(displayMaxStreak()) }
-    var mtdPercentDisplay: String { Self.percentDisplayText(mtdPercent()) }
-    var ltdPercentDisplay: String { Self.percentDisplayText(ltdPercent()) }
-
-    private static func signedText(_ value: Int) -> String {
+    static func signedText(_ value: Int) -> String {
         value > 0 ? "+\(value)" : "\(value)"
     }
 
-    private static func percentDisplayText(_ value: Double?) -> String {
+    static func percentDisplayText(_ value: Double?) -> String {
         guard let value else { return "—" }
         return "\(Int(value.rounded()))%"
     }
+}
+
+/// Current streak, max streak, MTD %, and LTD % bundled together — see
+/// `Habit.stats(asOf:calendar:)`.
+struct HabitStats {
+    let currentStreak: Int
+    let maxStreak: Int
+    let mtdPercent: Double?
+    let ltdPercent: Double?
+
+    var currentStreakDisplay: String { Habit.signedText(currentStreak) }
+    var maxStreakDisplay: String { Habit.signedText(maxStreak) }
+    var mtdPercentDisplay: String { Habit.percentDisplayText(mtdPercent) }
+    var ltdPercentDisplay: String { Habit.percentDisplayText(ltdPercent) }
 }
 
 /// One day's outcome for a habit, tracked per occurrence: each index
@@ -258,7 +390,7 @@ final class HabitLog {
         setOccurrence(index, to: occurrenceStatus(index).next)
     }
 
-    private func setOccurrence(_ index: Int, to status: OccurrenceStatus) {
+    func setOccurrence(_ index: Int, to status: OccurrenceStatus) {
         completedOccurrences.removeAll { $0 == index }
         missedOccurrences.removeAll { $0 == index }
         excusedOccurrences.removeAll { $0 == index }
@@ -290,10 +422,14 @@ final class HabitLog {
         excusedOccurrences = []
     }
 
-    private func setAll(to status: OccurrenceStatus, timesPerDay: Int) {
-        resetAll()
-        for index in 0..<max(timesPerDay, 1) {
-            setOccurrence(index, to: status)
-        }
+    /// Sets all three occurrence arrays in exactly one write each — not via
+    /// `resetAll()` followed by a per-index loop, which used to fire many
+    /// more intermediate (and visibly inconsistent) states than necessary
+    /// for a single bulk action.
+    func setAll(to status: OccurrenceStatus, timesPerDay: Int) {
+        let full = Array(0..<max(timesPerDay, 1))
+        completedOccurrences = status == .complete ? full : []
+        missedOccurrences = status == .missed ? full : []
+        excusedOccurrences = status == .excused ? full : []
     }
 }

@@ -1,23 +1,17 @@
 import SwiftUI
 import SwiftData
 
-/// Configures one pull window for a shelf: which days, what time range,
-/// and how much to pull in (fill to fit / cap total time / cap task count
+/// Configures how a shelf pulls from a schedule it's already been assigned
+/// (see ShelfEditView's "Assigned Schedules" — the window itself comes from
+/// the NamedSchedule picked there and isn't editable here). This view just
+/// sets the fill strategy (fill to fit / cap total time / cap task count
 /// with a per-task time cap). Edits a local draft — nothing is written back
 /// to the model until Save is tapped.
 struct SchedulingRuleEditView: View {
     let rule: SchedulingRule
     @Environment(\.dismiss) private var dismiss
-    @Query(sort: \NamedSchedule.sortOrder) private var namedSchedules: [NamedSchedule]
 
-    @State private var name: String
     @State private var isEnabled: Bool
-    @State private var selectedSchedule: NamedSchedule?
-    @State private var daysOfWeek: [Int]
-    @State private var startHour: Int
-    @State private var startMinute: Int
-    @State private var endHour: Int
-    @State private var endMinute: Int
     @State private var fillStrategy: FillStrategy
     @State private var maxTotalMinutes: Int
     @State private var maxTaskCount: Int
@@ -25,14 +19,7 @@ struct SchedulingRuleEditView: View {
 
     init(rule: SchedulingRule) {
         self.rule = rule
-        _name = State(initialValue: rule.name)
         _isEnabled = State(initialValue: rule.isEnabled)
-        _selectedSchedule = State(initialValue: rule.namedSchedule)
-        _daysOfWeek = State(initialValue: rule.daysOfWeek)
-        _startHour = State(initialValue: rule.startHour)
-        _startMinute = State(initialValue: rule.startMinute)
-        _endHour = State(initialValue: rule.endHour)
-        _endMinute = State(initialValue: rule.endMinute)
         _fillStrategy = State(initialValue: rule.fillStrategy)
         _maxTotalMinutes = State(initialValue: rule.maxTotalMinutes)
         _maxTaskCount = State(initialValue: rule.maxTaskCount)
@@ -43,55 +30,14 @@ struct SchedulingRuleEditView: View {
         Form {
             Section {
                 Toggle("Enabled", isOn: $isEnabled)
-                TextField("Name (optional)", text: $name)
             }
 
-            Section {
-                Picker("Schedule", selection: $selectedSchedule) {
-                    Text("Custom").tag(NamedSchedule?.none)
-                    ForEach(namedSchedules) { schedule in
-                        Text(schedule.name).tag(Optional(schedule))
-                    }
-                }
-            } footer: {
-                if namedSchedules.isEmpty {
-                    Text("No reusable schedules yet — add one from the Schedules tab in More, or pick Custom to set a one-off window here.")
+            Section("Schedule") {
+                if let schedule = rule.namedSchedule {
+                    LabeledContent(schedule.name, value: schedule.dayAndTimeText)
                 } else {
-                    Text("Pick a reusable schedule from the Schedules tab, or Custom to set a one-off window just for this rule.")
-                }
-            }
-
-            if let selectedSchedule {
-                Section("Window") {
-                    Text(selectedSchedule.dayAndTimeText)
+                    Text("No schedule assigned — remove this and add it again from the shelf's Assigned Schedules section.")
                         .foregroundStyle(.secondary)
-                }
-            } else {
-                Section("Days") {
-                    HStack(spacing: 8) {
-                        ForEach(SchedulingRule.dayLabels, id: \.weekday) { day in
-                            DayToggleChip(
-                                label: day.short,
-                                isOn: daysOfWeek.contains(day.weekday)
-                            ) {
-                                toggleDay(day.weekday)
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-
-                Section("Time Window") {
-                    DatePicker(
-                        "Start",
-                        selection: startTimeBinding,
-                        displayedComponents: [.hourAndMinute]
-                    )
-                    DatePicker(
-                        "End",
-                        selection: endTimeBinding,
-                        displayedComponents: [.hourAndMinute]
-                    )
                 }
             }
 
@@ -124,7 +70,7 @@ struct SchedulingRuleEditView: View {
                 Text("Preview")
             }
         }
-        .navigationTitle(name.isEmpty ? "Pull Schedule" : name)
+        .navigationTitle(rule.displayName.isEmpty ? "Pull Schedule" : rule.displayName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -135,11 +81,11 @@ struct SchedulingRuleEditView: View {
 
     private var previewSummary: String {
         SchedulingRule.summaryText(
-            daysOfWeek: selectedSchedule?.daysOfWeek ?? daysOfWeek,
-            startHour: selectedSchedule?.startHour ?? startHour,
-            startMinute: selectedSchedule?.startMinute ?? startMinute,
-            endHour: selectedSchedule?.endHour ?? endHour,
-            endMinute: selectedSchedule?.endMinute ?? endMinute,
+            daysOfWeek: rule.effectiveDaysOfWeek,
+            startHour: rule.effectiveStartHour,
+            startMinute: rule.effectiveStartMinute,
+            endHour: rule.effectiveEndHour,
+            endMinute: rule.effectiveEndMinute,
             fillStrategy: fillStrategy,
             maxTotalMinutes: maxTotalMinutes,
             maxTaskCount: maxTaskCount,
@@ -148,49 +94,12 @@ struct SchedulingRuleEditView: View {
     }
 
     private func save() {
-        rule.name = name
         rule.isEnabled = isEnabled
-        rule.namedSchedule = selectedSchedule
-        rule.daysOfWeek = daysOfWeek
-        rule.startHour = startHour
-        rule.startMinute = startMinute
-        rule.endHour = endHour
-        rule.endMinute = endMinute
         rule.fillStrategy = fillStrategy
         rule.maxTotalMinutes = maxTotalMinutes
         rule.maxTaskCount = maxTaskCount
         rule.maxMinutesPerTask = maxMinutesPerTask
         dismiss()
-    }
-
-    private func toggleDay(_ weekday: Int) {
-        if daysOfWeek.contains(weekday) {
-            daysOfWeek.removeAll { $0 == weekday }
-        } else {
-            daysOfWeek.append(weekday)
-        }
-    }
-
-    private var startTimeBinding: Binding<Date> {
-        Binding(
-            get: { Calendar.current.date(bySettingHour: startHour, minute: startMinute, second: 0, of: .now) ?? .now },
-            set: { newValue in
-                let components = Calendar.current.dateComponents([.hour, .minute], from: newValue)
-                startHour = components.hour ?? startHour
-                startMinute = components.minute ?? startMinute
-            }
-        )
-    }
-
-    private var endTimeBinding: Binding<Date> {
-        Binding(
-            get: { Calendar.current.date(bySettingHour: endHour, minute: endMinute, second: 0, of: .now) ?? .now },
-            set: { newValue in
-                let components = Calendar.current.dateComponents([.hour, .minute], from: newValue)
-                endHour = components.hour ?? endHour
-                endMinute = components.minute ?? endMinute
-            }
-        )
     }
 }
 
@@ -218,5 +127,5 @@ struct DayToggleChip: View {
     NavigationStack {
         SchedulingRuleEditView(rule: SchedulingRule(shelf: Shelf(name: "Work")))
     }
-    .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
+    .modelContainer(for: [TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }

@@ -19,7 +19,8 @@ struct NewTagSheet: View {
     @State private var searchText = ""
     @State private var searchResults: [MKMapItem] = []
     @State private var addressLabel = ""
-    @State private var radiusMeters: Double = 400
+    @State private var radiusMiles: Double = 0.5
+    @State private var notifyWhenNear = true
     @State private var errorMessage: String?
 
     let onSave: (String) -> Void
@@ -81,8 +82,11 @@ struct NewTagSheet: View {
                     .listRowInsets(EdgeInsets())
 
                     if selectedCoordinate != nil {
-                        Section("Notify Within") {
-                            Stepper(radiusDescription, value: $radiusMeters, in: 50...2000, step: 50)
+                        Section {
+                            Toggle("Notify Me When Near", isOn: $notifyWhenNear.animation())
+                            if notifyWhenNear {
+                                Stepper(radiusDescription, value: $radiusMiles, in: 0.5...5, step: 0.5)
+                            }
                         }
                     }
                 }
@@ -108,8 +112,8 @@ struct NewTagSheet: View {
     }
 
     private var radiusDescription: String {
-        let minutes = max(1, Int(radiusMeters / 80))
-        return "\(Int(radiusMeters))m · ~\(minutes) min walk"
+        let minutes = max(1, Int((radiusMiles / Tag.averageDrivingMph * 60).rounded()))
+        return String(format: "%.1f mi · ~%d min drive", radiusMiles, minutes)
     }
 
     private func search() {
@@ -134,7 +138,7 @@ struct NewTagSheet: View {
     }
 
     private func save() {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             errorMessage = "Name a tag first."
             return
@@ -142,19 +146,24 @@ struct NewTagSheet: View {
 
         let hasLocation = isAddingLocation && selectedCoordinate != nil
 
-        if let existing = existingTags.first(where: { $0.name == trimmed }) {
+        // Matched case-insensitively (typing "dt groton" should still
+        // land on an existing "DT Groton" rather than fork a near-
+        // duplicate), but a genuinely new tag keeps the exact case typed
+        // here — see the `else` branch below.
+        if let existing = existingTags.first(where: { $0.name.lowercased() == trimmed.lowercased() }) {
             if hasLocation, let coordinate = selectedCoordinate {
                 existing.hasLocation = true
                 existing.latitude = coordinate.latitude
                 existing.longitude = coordinate.longitude
-                existing.radiusMeters = radiusMeters
+                existing.radiusMeters = radiusMiles * Tag.metersPerMile
                 existing.addressLabel = addressLabel
+                existing.notifyWhenNear = notifyWhenNear
             }
             onSave(existing.name)
         } else {
             let tag: Tag
             if hasLocation, let coordinate = selectedCoordinate {
-                tag = Tag(name: trimmed, hasLocation: true, latitude: coordinate.latitude, longitude: coordinate.longitude, radiusMeters: radiusMeters, addressLabel: addressLabel)
+                tag = Tag(name: trimmed, hasLocation: true, latitude: coordinate.latitude, longitude: coordinate.longitude, radiusMeters: radiusMiles * Tag.metersPerMile, addressLabel: addressLabel, notifyWhenNear: notifyWhenNear)
             } else {
                 tag = Tag(name: trimmed)
             }
@@ -167,5 +176,5 @@ struct NewTagSheet: View {
 
 #Preview {
     NewTagSheet { _ in }
-        .modelContainer(for: [InboxItem.self, TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
+        .modelContainer(for: [TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }

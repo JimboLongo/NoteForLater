@@ -145,7 +145,7 @@ final class GoogleCalendarService: CalendarServiceProtocol {
         let token = try await accountService.accessToken()
         let formatter = ISO8601DateFormatter()
         let body: [String: Any] = [
-            "summary": block.task?.title ?? "Scheduled task",
+            "summary": block.displayTitle,
             "start": ["dateTime": formatter.string(from: block.startTime)],
             "end": ["dateTime": formatter.string(from: block.endTime)]
         ]
@@ -377,7 +377,7 @@ final class MockCalendarService: CalendarServiceProtocol {
     }
 
     func pushEvent(for block: ScheduledBlock) async throws -> String {
-        print("[MockCalendarService] would push event for \(block.task?.title ?? "untitled") at \(block.startTime)")
+        print("[MockCalendarService] would push event for \(block.displayTitle) at \(block.startTime)")
         return block.googleEventID ?? UUID().uuidString
     }
 

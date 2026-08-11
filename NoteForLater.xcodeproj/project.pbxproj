@@ -6,8 +6,28 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		11C9C180B9449F181FC4A6EA /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1FE8D30E50874F1CFBC6C2DA /* Foundation.framework */; };
+		9E6F11BB107A4A089B67FD31 /* HabitRollingStatsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3F965C18B2385814DF25BDD /* HabitRollingStatsTests.swift */; };
+		AC5AC49498EDDFFFE2E161D4 /* ReceiptLineParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99D88D01BE7CD604EA3CD89C /* ReceiptLineParserTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		534B9879D69E4AF8875A0FD4 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 44CB434C301D3EC300B83C83 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 44CB4353301D3EC300B83C83;
+			remoteInfo = NoteForLater;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		1FE8D30E50874F1CFBC6C2DA /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
+		356652DFD867DA051EA36E9A /* NoteForLaterTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NoteForLaterTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		44CB4354301D3EC300B83C83 /* NoteForLater.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NoteForLater.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		99D88D01BE7CD604EA3CD89C /* ReceiptLineParserTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ReceiptLineParserTests.swift; sourceTree = "<group>"; };
+		A3F965C18B2385814DF25BDD /* HabitRollingStatsTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HabitRollingStatsTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -26,6 +46,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		7DFA3626FD00BAC28E0AF10B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				11C9C180B9449F181FC4A6EA /* Foundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -34,6 +62,8 @@
 			children = (
 				44CB4356301D3EC300B83C83 /* NoteForLater */,
 				44CB4355301D3EC300B83C83 /* Products */,
+				BA83810D3B127A2E86DD20FF /* Frameworks */,
+				5C66D286E9B1DF57237CC39D /* NoteForLaterTests */,
 			);
 			sourceTree = "<group>";
 		};
@@ -41,13 +71,57 @@
 			isa = PBXGroup;
 			children = (
 				44CB4354301D3EC300B83C83 /* NoteForLater.app */,
+				356652DFD867DA051EA36E9A /* NoteForLaterTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		5C66D286E9B1DF57237CC39D /* NoteForLaterTests */ = {
+			isa = PBXGroup;
+			children = (
+				A3F965C18B2385814DF25BDD /* HabitRollingStatsTests.swift */,
+				99D88D01BE7CD604EA3CD89C /* ReceiptLineParserTests.swift */,
+			);
+			path = NoteForLaterTests;
+			sourceTree = "<group>";
+		};
+		BA83810D3B127A2E86DD20FF /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				E3C1C6F43E43BC28E8E2451A /* iOS */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		E3C1C6F43E43BC28E8E2451A /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				1FE8D30E50874F1CFBC6C2DA /* Foundation.framework */,
+			);
+			name = iOS;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		0D1C205E2E57CE5ECC057F4A /* NoteForLaterTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E511C840FA1FA1BD895794C4 /* Build configuration list for PBXNativeTarget "NoteForLaterTests" */;
+			buildPhases = (
+				6AA6DE8AEB78D1682CA3F3CC /* Sources */,
+				7DFA3626FD00BAC28E0AF10B /* Frameworks */,
+				A6C327355E76E5989F9596E7 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				735F2286A00D241B22F77DD7 /* PBXTargetDependency */,
+			);
+			name = NoteForLaterTests;
+			productName = NoteForLaterTests;
+			productReference = 356652DFD867DA051EA36E9A /* NoteForLaterTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		44CB4353301D3EC300B83C83 /* NoteForLater */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 44CB435F301D3EC400B83C83 /* Build configuration list for PBXNativeTarget "NoteForLater" */;
@@ -64,8 +138,6 @@
 				44CB4356301D3EC300B83C83 /* NoteForLater */,
 			);
 			name = NoteForLater;
-			packageProductDependencies = (
-			);
 			productName = NoteForLater;
 			productReference = 44CB4354301D3EC300B83C83 /* NoteForLater.app */;
 			productType = "com.apple.product-type.application";
@@ -100,12 +172,20 @@
 			projectRoot = "";
 			targets = (
 				44CB4353301D3EC300B83C83 /* NoteForLater */,
+				0D1C205E2E57CE5ECC057F4A /* NoteForLaterTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		44CB4352301D3EC300B83C83 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A6C327355E76E5989F9596E7 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -122,7 +202,25 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		6AA6DE8AEB78D1682CA3F3CC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9E6F11BB107A4A089B67FD31 /* HabitRollingStatsTests.swift in Sources */,
+				AC5AC49498EDDFFFE2E161D4 /* ReceiptLineParserTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		735F2286A00D241B22F77DD7 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = NoteForLater;
+			target = 44CB4353301D3EC300B83C83 /* NoteForLater */;
+			targetProxy = 534B9879D69E4AF8875A0FD4 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		44CB435D301D3EC400B83C83 /* Debug */ = {
@@ -256,6 +354,7 @@
 				DEVELOPMENT_TEAM = QJ4HB93XZ8;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Used to take a photo of a grocery receipt so ingredients can be added to your Pantry shelf.";
 				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "Used to notify you when you're near a location tagged on a task.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Used to notify you when you're near a location tagged on a task.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Used to capture voice notes in the Inbox.";
@@ -292,6 +391,7 @@
 				DEVELOPMENT_TEAM = QJ4HB93XZ8;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Used to take a photo of a grocery receipt so ingredients can be added to your Pantry shelf.";
 				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "Used to notify you when you're near a location tagged on a task.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Used to notify you when you're near a location tagged on a task.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Used to capture voice notes in the Inbox.";
@@ -318,6 +418,45 @@
 			};
 			name = Release;
 		};
+		D5E55C54AC15365B8D766A7A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = QJ4HB93XZ8;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jimbo.NoteForLaterTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/NoteForLater.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/NoteForLater";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		FCCEA2C01A84661CDD4B7FD5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = QJ4HB93XZ8;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jimbo.NoteForLaterTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/NoteForLater.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/NoteForLater";
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -335,6 +474,15 @@
 			buildConfigurations = (
 				44CB4360301D3EC400B83C83 /* Debug */,
 				44CB4361301D3EC400B83C83 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E511C840FA1FA1BD895794C4 /* Build configuration list for PBXNativeTarget "NoteForLaterTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D5E55C54AC15365B8D766A7A /* Release */,
+				FCCEA2C01A84661CDD4B7FD5 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -1,58 +1,36 @@
 import Foundation
 import SwiftData
 
-/// A raw, unsorted brain-dump entry. The whole point of the Inbox is that
-/// capture is instant and frictionless — sorting happens later. It can
-/// still carry the same attributes a TaskItem would (due date, next step,
-/// duration, tags, priority), filled in from InboxItemDetailView, which
-/// carry over onto the TaskItem created when it's routed to a shelf.
+/// Deprecated — kept only so `NoteForLaterApp`'s one-time launch migration
+/// can read rows that already exist in a production database. Nothing
+/// else in the app references this anymore: "unsorted" is just
+/// `TaskItem.shelf == nil` now (see `InboxViewModel`). Removing this type
+/// from the schema entirely isn't safe — the on-device store predates any
+/// SwiftData version tracking, so there's no supported staged-migration
+/// path to drop an entity outright; the migration converts every row to a
+/// TaskItem and deletes it instead, leaving this table permanently empty
+/// after the first launch.
 @Model
 final class InboxItem {
-    var id: UUID
-    var text: String
-    var createdAt: Date
-
-    /// Set when this item came from a Gmail sync rather than manual typing,
-    /// so re-syncing doesn't create duplicates for mail already imported.
+    var id: UUID = UUID()
+    var text: String = ""
+    var createdAt: Date = Date.now
     var sourceGmailMessageID: String?
-
     var dueDate: Date?
+    var dueDateDecided: Bool = false
     var nextStep: String = ""
-    var estimatedMinutes: Int = 30
+    var estimatedMinutes: Int = 0
+    var durationDecided: Bool = false
     var tags: [String] = []
-    var priorityRaw: String = Priority.medium.rawValue
+    var priorityRaw: String = Priority.unset.rawValue
     var isDivisible: Bool = false
     var minimumSegmentMinutes: Int = 15
+    var includedSchedulingRuleIDs: [UUID] = []
 
-    init(
-        text: String,
-        createdAt: Date = .now,
-        sourceGmailMessageID: String? = nil,
-        dueDate: Date? = nil,
-        nextStep: String = "",
-        estimatedMinutes: Int = 30,
-        tags: [String] = [],
-        priority: Priority = .medium,
-        isDivisible: Bool = false,
-        minimumSegmentMinutes: Int = 15
-    ) {
-        self.id = UUID()
-        self.text = text
-        self.createdAt = createdAt
-        self.sourceGmailMessageID = sourceGmailMessageID
-        self.dueDate = dueDate
-        self.nextStep = nextStep
-        self.estimatedMinutes = estimatedMinutes
-        self.tags = tags
-        self.priorityRaw = priority.rawValue
-        self.isDivisible = isDivisible
-        self.minimumSegmentMinutes = minimumSegmentMinutes
-    }
+    init() {}
 
     var priority: Priority {
-        get { Priority(rawValue: priorityRaw) ?? .medium }
+        get { Priority(rawValue: priorityRaw) ?? .unset }
         set { priorityRaw = newValue.rawValue }
     }
-
-    var durationLabel: String { TaskItem.durationLabel(for: estimatedMinutes) }
 }
