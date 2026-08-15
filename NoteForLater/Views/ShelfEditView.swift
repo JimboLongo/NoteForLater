@@ -26,9 +26,10 @@ struct ShelfEditView: View {
     @State private var hasDueDates: Bool
     @State private var hasNextStep: Bool
     @State private var hasPriority: Bool
+    @State private var tracksFutureReminder: Bool
 
     private let columns = [GridItem(.adaptive(minimum: 44))]
-    private static let durationOptions = [0, 5, 15, 30, 45, 60, 90, 120, 240, 480]
+    private static let durationOptions = [0, 2, 5, 15, 30, 45, 60, 90, 120, 240, 480]
 
     @State private var showingIconPicker = false
     @State private var showingColorPicker = false
@@ -46,6 +47,7 @@ struct ShelfEditView: View {
         _hasDueDates = State(initialValue: shelf.hasDueDates)
         _hasNextStep = State(initialValue: shelf.hasNextStep)
         _hasPriority = State(initialValue: shelf.hasPriority)
+        _tracksFutureReminder = State(initialValue: shelf.tracksFutureReminder)
         let shelfID = shelf.id
         _rules = Query(
             filter: #Predicate<SchedulingRule> { $0.shelf?.id == shelfID },
@@ -102,47 +104,32 @@ struct ShelfEditView: View {
                 .foregroundStyle(.primary)
             }
 
-            // Pantry items are ingredients, not scheduled tasks — no
-            // duration to track and nothing to pull onto the calendar, so
-            // neither section applies.
-            if !shelf.isPantry {
+            // Pantry items (the Kitchen shelf's tasks) are ingredients,
+            // not scheduled tasks — no duration to track and nothing to
+            // pull onto the calendar, so neither section applies.
+            if !shelf.isKitchen {
+                // One compact table instead of a separate full Section
+                // (with its own explanatory footer) per question — each
+                // toggle still hides/shows the matching field on the
+                // TaskCard exactly as before, just without the paragraph
+                // of prose under every single row.
                 Section {
-                    Toggle("Tasks Have Next Step?", isOn: $hasNextStep)
+                    Toggle("Next Step", isOn: $hasNextStep)
+                    Toggle("Priority", isOn: $hasPriority)
+                    Toggle("Due Date", isOn: $hasDueDates)
+                    Toggle("Duration", isOn: $tracksDuration)
+                    Toggle("Future Reminder", isOn: $tracksFutureReminder)
+                } header: {
+                    Text("Task Card Questions")
                 } footer: {
-                    Text(hasNextStep
-                        ? "Tasks on this shelf ask for a next step."
-                        : "Tasks on this shelf skip the next step — that field is hidden on the card.")
-                }
-
-                Section {
-                    Toggle("Tasks Have Priority?", isOn: $hasPriority)
-                } footer: {
-                    Text(hasPriority
-                        ? "Tasks on this shelf can be marked low/medium/high priority."
-                        : "Tasks on this shelf have no priority — that question is hidden on the card.")
-                }
-
-                Section {
-                    Toggle("Tasks Have Due Dates?", isOn: $hasDueDates)
-                } footer: {
-                    Text(hasDueDates
-                        ? "Tasks on this shelf can have a due date."
-                        : "Tasks on this shelf never have a due date — the Due Date question is hidden on the card.")
-                }
-
-                Section {
-                    Toggle("Tasks Have Durations?", isOn: $tracksDuration)
-                } footer: {
-                    Text(tracksDuration
-                        ? "Tasks on this shelf can have a duration, and can be marked divisible."
-                        : "Tasks on this shelf have no duration — the Duration and Divisible questions are hidden on the card.")
+                    Text("Which questions tasks on this shelf ask for — off hides that field on the card entirely.")
                 }
 
                 if tracksDuration {
                     Section {
                         Picker("Default Duration", selection: $defaultDurationMinutes) {
                             ForEach(Self.durationOptions, id: \.self) { minutes in
-                                Text(TaskItem.durationLabel(for: minutes)).tag(minutes)
+                                Text(minutes == 2 ? "≤2 min" : TaskItem.durationLabel(for: minutes)).tag(minutes)
                             }
                         }
                     } footer: {
@@ -298,17 +285,26 @@ struct ShelfEditView: View {
                             .foregroundStyle(.secondary)
                     }
                     ForEach(availableSchedules) { schedule in
+                        // Already on this shelf (some rule's own
+                        // `namedSchedule`) — shown faded, struck through,
+                        // and unselectable rather than letting it be
+                        // added a second time.
+                        let isAlreadyAssigned = rules.contains { $0.namedSchedule?.id == schedule.id }
                         Button {
                             assignSchedule(schedule)
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(schedule.name)
-                                    .foregroundStyle(.primary)
+                                    .foregroundStyle(.white)
+                                    .strikethrough(isAlreadyAssigned)
                                 Text(schedule.dayAndTimeText)
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(.white.opacity(0.7))
+                                    .strikethrough(isAlreadyAssigned)
                             }
+                            .opacity(isAlreadyAssigned ? 0.4 : 1)
                         }
+                        .disabled(isAlreadyAssigned)
                     }
                 }
                 .navigationTitle("Add Schedule")
@@ -347,29 +343,44 @@ struct ShelfEditView: View {
         shelf.hasDueDates = hasDueDates
         shelf.hasNextStep = hasNextStep
         shelf.hasPriority = hasPriority
-        if shelf.isPantry || !tracksDuration {
+        shelf.tracksFutureReminder = tracksFutureReminder
+        // isTwoMinuteTasks/isRecurringTasks are no longer set from here —
+        // see Settings > Special Shelves, which picks a shelf for either
+        // flag directly rather than toggling it per-shelf.
+        if shelf.isKitchen || !tracksDuration {
             // Not just future tasks — turning this off (or this being
-            // Pantry, unconditionally) means *nothing* on the shelf has a
-            // duration, so clear what's already there too.
+            // the Kitchen shelf, unconditionally) means *nothing* on the
+            // shelf has a duration, so clear what's already there too.
             for task in shelf.tasks ?? [] {
                 task.estimatedMinutes = 0
                 task.isDivisible = false
                 task.minimumSegmentMinutes = 0
             }
         }
-        if shelf.isPantry || !hasDueDates {
+        if shelf.isKitchen || !hasDueDates {
             for task in shelf.tasks ?? [] {
                 task.dueDate = nil
             }
         }
-        if shelf.isPantry || !hasNextStep {
+        if shelf.isKitchen || !hasNextStep {
             for task in shelf.tasks ?? [] {
                 task.nextStep = ""
             }
         }
-        if shelf.isPantry || !hasPriority {
+        if shelf.isKitchen || !hasPriority {
             for task in shelf.tasks ?? [] {
                 task.priority = .unset
+            }
+        }
+        if shelf.isKitchen || !tracksFutureReminder {
+            // `attributeReviewSnoozedUntil` is shared with the plain
+            // Snooze action (see `TaskItem.applyRemindIn`) — only cleared
+            // here when this task's own reminder was actually what set
+            // it, so turning this shelf setting off never clobbers an
+            // unrelated manual snooze.
+            for task in shelf.tasks ?? [] where task.remindInCount > 0 {
+                task.remindInCount = 0
+                task.attributeReviewSnoozedUntil = nil
             }
         }
         dismiss()

@@ -30,13 +30,17 @@ import SwiftData
 ///     A habit block (no task behind it) only ever offers Delete.
 ///   - Long-press an open slot: pick an unscheduled to-do, from a
 ///     full-screen sheet, to drop in right there.
+/// Composes the day's actual grid (`DayTimelineSegment`, one instance, or
+/// two split at noon) with the untimed habit-occurrence lists around it —
+/// this is the piece `ScheduleReviewView`/`NightlyReviewView` actually
+/// hold onto. Owns the single shared `ScrollView` all of that content
+/// lives inside (so it all scrolls together as one continuous page) and
+/// the scroll-position/viewport state each segment needs a slice of,
+/// since only one physical ScrollView exists no matter how many segments
+/// are showing.
 struct DayTimelineGridView: View {
     let rows: [DayTimelineRow]
     let eligibleHoursWindows: [EligibleHoursWindow]
-    /// The reusable day/time windows from Settings > Schedules — narrows
-    /// the grid down to `visibleHourRange` instead of showing the full
-    /// 24 hours.
-    let namedSchedules: [NamedSchedule]
     let targetDate: Date
     let lockedStore: LockedEventsStore
     let viewModel: ScheduleReviewViewModel
@@ -45,11 +49,620 @@ struct DayTimelineGridView: View {
     /// For presenting `TaskCardSheet` (See Task Card) with somewhere to
     /// move a task to.
     let allShelves: [Shelf]
+    /// For the Morning/Midday/Evening untimed habit-occurrence lists (see
+    /// `habitOccurrenceSection`) — a specific-time habit's own occurrence
+    /// still comes through `rows` like any other block; this is only for
+    /// the AM/Midday/PM ones, which never get a `ScheduledBlock` at all
+    /// (see `AISchedulingService.placeHabitsAndRecurringTasks`).
+    let allHabits: [Habit]
     let onSaveEvent: (CalendarEventSummary) -> Void
     let onDeleteBlock: (ScheduledBlock) -> Void
     /// Opens `ReplacementPickerSheet` — a specific pick from the list, or
     /// its Auto button, both handled there (see `ScheduleReviewView`).
     let onPickReplacement: (ScheduledBlock) -> Void
+    /// Off by default so a caller that doesn't offer the toggle at all
+    /// (`NightlyReviewView`, currently) doesn't need to pass anything —
+    /// see `DayTimelineSegment.isCollapsingEmptyPeriods` for what this
+    /// actually does.
+    var isCollapsingEmptyPeriods: Bool = false
+
+    private let pointsPerMinute: CGFloat = 1.6
+
+    /// Drives the initial scroll-to-roughly-now on appear, and — while a
+    /// segment's own empty-slot hold is active — scrolling the pressed
+    /// time up toward the top. Shared across every segment since there's
+    /// only one physical ScrollView.
+    @State private var scrollPosition = ScrollPosition()
+    /// The ScrollView's own viewport height, used to clamp how far a
+    /// segment's `updateEmptySlot` can scroll the pressed time toward the
+    /// top.
+    @State private var viewportHeight: CGFloat = 0
+    /// The ScrollView's current scroll offset — read continuously so a
+    /// segment's own auto-scroll-while-dragging loop (see
+    /// `DayTimelineSegment.startAutoScroll`) always knows where the
+    /// visible viewport actually sits right now, not just how tall it is.
+    @State private var scrollOffsetY: CGFloat = 0
+    /// Measured heights of the variable-height sections stacked around
+    /// the grid segment(s) — each segment needs to know how much content
+    /// sits above its own ZStack to translate a grid-local touch/scroll
+    /// position into the shared ScrollView's own content-space
+    /// coordinates (see `DayTimelineSegment.precedingContentHeight`).
+    @State private var twoMinuteSectionHeight: CGFloat = 0
+    @State private var amSectionHeight: CGFloat = 0
+    @State private var middaySectionHeight: CGFloat = 0
+    /// One per possible segment — whichever's actually showing sets this
+    /// true while it has its own drag or empty-slot hold in progress,
+    /// which is what actually disables the single shared ScrollView (see
+    /// `body`); the other(s) just stay false.
+    @State private var isMorningInteracting = false
+    @State private var isAfternoonInteracting = false
+    @State private var isSingleInteracting = false
+    /// Bumped by `toggleHabitOccurrence` right after it mutates a
+    /// `HabitLog` — a plain `@State` write always forces this view's
+    /// `body` to re-run, which is what actually guarantees the tapped
+    /// row's checkmark/fade/strikethrough shows up the instant you tap it
+    /// rather than waiting on SwiftData's own change notification for a
+    /// freshly-inserted (today's first occurrence toggled) or otherwise
+    /// not-directly-`@Query`'d `HabitLog` to propagate.
+    @State private var habitOccurrenceRefreshTick = 0
+    @Environment(\.modelContext) private var modelContext
+
+    private func minutesSinceMidnight(_ date: Date) -> Int {
+        let startOfDay = Calendar.current.startOfDay(for: date)
+        return Int(date.timeIntervalSince(startOfDay) / 60)
+    }
+
+    /// Only the hours actually relevant to this day are rendered/scrollable
+    /// — derived from the day's own first and last items (blocks and
+    /// calendar events alike, whatever's actually in `rows`), each edge
+    /// rounded out to its own whole hour: the earliest item's start hour
+    /// (minutes dropped, so 9:30 still starts the grid at 9, not 10), and
+    /// the latest item's end hour rounded up (so 4:15 still reaches 5).
+    /// At a minimum though, the grid always opens wide enough to show
+    /// every enabled `EligibleHoursWindow`, and every enabled
+    /// SchedulingRule across every shelf, that applies to this day's
+    /// weekday — in full, even one with nothing on the calendar in it yet
+    /// (a shelf's own 11am–6pm window, say) — otherwise an eligible-hours
+    /// outline (drawn by `DayTimelineSegment`, "a drop target visible
+    /// before you let go") would sit clipped at whatever edge the rows
+    /// alone happened to stop at, and a shelf's own window wouldn't be
+    /// visible at all until something actually landed in it. Rows can
+    /// still widen the range further past either kind of window on
+    /// either side; this only ever raises the floor, never lowers it.
+    /// Falls back to the full day when there's nothing — no rows, no
+    /// enabled windows or rules — to derive a range from.
+    private var visibleHourRange: (start: Int, end: Int) {
+        var startHour = 24
+        var endHour = 0
+        var hasBound = false
+
+        for row in rows {
+            hasBound = true
+            startHour = min(startHour, minutesSinceMidnight(row.startTime) / 60)
+            let endMinutes = minutesSinceMidnight(row.startTime) + row.durationMinutes
+            endHour = max(endHour, Int(ceil(Double(endMinutes) / 60)))
+        }
+
+        let weekday = Calendar.current.component(.weekday, from: targetDate)
+        for window in eligibleHoursWindows where window.isEnabled && window.daysOfWeek.contains(weekday) {
+            hasBound = true
+            startHour = min(startHour, window.startHour)
+            endHour = max(endHour, window.endMinute > 0 ? window.endHour + 1 : window.endHour)
+        }
+
+        // Same "at a minimum, show the full window" treatment as Eligible
+        // Hours above, but for every enabled SchedulingRule across every
+        // shelf that applies to today — a shelf's own window (e.g. 11am–
+        // 6pm) should still be visible on a day nothing's actually landed
+        // in it yet, not just once something has.
+        for rule in allShelves.flatMap({ $0.schedulingRules ?? [] })
+        where rule.isEnabled && rule.namedSchedule != nil && rule.effectiveDaysOfWeek.contains(weekday) {
+            hasBound = true
+            startHour = min(startHour, rule.effectiveStartHour)
+            endHour = max(endHour, rule.effectiveEndMinute > 0 ? rule.effectiveEndHour + 1 : rule.effectiveEndHour)
+        }
+
+        guard hasBound else { return (0, 24) }
+
+        startHour = max(0, min(startHour, 23))
+        endHour = max(startHour + 1, min(24, endHour))
+        return (startHour, endHour)
+    }
+
+    /// `range` is in quarter-hour units (see `morningRange`) — the only
+    /// range this is ever called with.
+    private func dayHeight(for range: (start: Int, end: Int)) -> CGFloat {
+        CGFloat(range.end - range.start) * 15 * pointsPerMinute
+    }
+
+    private struct OpenHabitOccurrence: Identifiable {
+        let id: String
+        let habit: Habit
+        let index: Int
+        /// So the row can show checked/faded/struck-through instead of
+        /// disappearing the instant it's tapped — same as a Specific-Time
+        /// habit's own calendar block, which stays visible (just faded)
+        /// until Nightly Review actually sweeps it, rather than vanishing
+        /// on tap.
+        let isCompleted: Bool
+    }
+
+    /// Every occurrence today whose own `HabitOccurrenceTimeMode` is
+    /// `mode` and isn't missed/excused — habits sorted by `sortOrder`,
+    /// occurrences within a habit in index order. Includes an already-
+    /// complete occurrence (see `isCompleted`) so it can still render,
+    /// checked; only missed/excused ones (resolved a different way, with
+    /// no toggle-back UI here) are actually left out.
+    private func openHabitOccurrences(mode: HabitOccurrenceTimeMode) -> [OpenHabitOccurrence] {
+        let calendar = Calendar.current
+        var result: [OpenHabitOccurrence] = []
+        for habit in allHabits.sorted(by: { $0.sortOrder < $1.sortOrder }) where habit.isApplicable(on: targetDate, calendar: calendar) {
+            for index in 0..<max(habit.timesPerDay, 1) {
+                guard habit.timeMode(for: index) == mode else { continue }
+                let status = habit.occurrenceStatus(index, on: targetDate, calendar: calendar)
+                guard status == .none || status == .complete else { continue }
+                result.append(OpenHabitOccurrence(id: "\(habit.id).\(index)", habit: habit, index: index, isCompleted: status == .complete))
+            }
+        }
+        return result
+    }
+
+    private var amOccurrences: [OpenHabitOccurrence] { openHabitOccurrences(mode: .am) }
+    private var middayOccurrences: [OpenHabitOccurrence] { openHabitOccurrences(mode: .midday) }
+    private var pmOccurrences: [OpenHabitOccurrence] { openHabitOccurrences(mode: .pm) }
+
+    /// The calendar only actually splits in two when there's a Midday
+    /// occurrence to show between the halves — a day with no Midday
+    /// habits renders as the single continuous grid it always has.
+    private var isSplitAtNoon: Bool { !middayOccurrences.isEmpty }
+
+    /// Where the day actually splits for Midday habits, in minutes since
+    /// midnight — noon by default, but pushed later to clear any row
+    /// already in progress at that point (an 11am–12:45pm task, say)
+    /// instead of cutting through it, since a row lands wholly in
+    /// whichever half it *starts* in (see `morningRows`) and would
+    /// otherwise render past the morning segment's own bottom edge,
+    /// overlapping the Midday section below it. Iterates to a fixed
+    /// point so a chain of back-to-back straddling rows (one pushes past
+    /// noon, the next starts right where that one ends, and so on) all
+    /// get cleared, not just the first. Rounded up to the nearest 15
+    /// minutes at the end — the grid itself (`DayTimelineSegment`'s
+    /// `quarterRange`) only ever renders/drags in 15-minute increments,
+    /// so the split stays on that same grid rather than landing on some
+    /// arbitrary minute a stray non-15-aligned event happened to end on.
+    private var middaySplitMinutes: Int {
+        var split = 12 * 60
+        var changed = true
+        while changed {
+            changed = false
+            for row in rows {
+                let start = minutesSinceMidnight(row.startTime)
+                let end = start + row.durationMinutes
+                if start < split, end > split {
+                    split = end
+                    changed = true
+                }
+            }
+        }
+        let remainder = split % 15
+        return remainder == 0 ? split : split + (15 - remainder)
+    }
+
+    /// `middaySplitMinutes` in 15-minute units — `DayTimelineSegment`'s
+    /// `quarterRange` (and everything derived from it: `dayHeight`,
+    /// gridlines, row placement) works in quarter-hours rather than whole
+    /// hours specifically so a split like 12:45 renders exactly there
+    /// instead of rounding out to the next full hour.
+    private var middaySplitQuarter: Int { middaySplitMinutes / 15 }
+
+    /// The one boundary `morningRange.end` and `afternoonRange.start`
+    /// both use — computed exactly once so the two halves can never
+    /// drift apart the way clamping each range independently against
+    /// `visibleHourRange` used to risk: if the split landed right at
+    /// `visibleHourRange`'s own end (nothing today past noon, say),
+    /// `afternoonRange` clamping itself to "at least one quarter before
+    /// the end" pulled its *start* a quarter-hour earlier than
+    /// `morningRange`'s *end* ever moved, splitting the grid at two
+    /// different times instead of one. Not clamped to `visibleHourRange`
+    /// at all here — `morningRange`/`afternoonRange` below handle the
+    /// degenerate "not enough room" case themselves, by extending their
+    /// own *outer* edge outward instead of ever moving this shared one.
+    private var middaySplitBoundaryQuarter: Int { middaySplitQuarter }
+
+    /// At least one quarter-hour tall even in the degenerate case where
+    /// the split lands at or before the visible range's own start (e.g.
+    /// the whole day's own content starts right at noon but a Midday
+    /// habit still needs a Morning section above it) — extends the
+    /// *start* earlier rather than ever moving `middaySplitBoundaryQuarter`.
+    /// In quarter-hour units, like every `*Range` a `DayTimelineSegment`
+    /// is given.
+    private var morningRange: (start: Int, end: Int) {
+        let startQuarter = visibleHourRange.start * 4
+        let end = middaySplitBoundaryQuarter
+        return (start: min(startQuarter, end - 1), end: end)
+    }
+
+    /// Same idea as `morningRange`, extending the *end* later instead —
+    /// e.g. every item today is before noon but a Midday habit still
+    /// needs its own section and grid below the morning one.
+    private var afternoonRange: (start: Int, end: Int) {
+        let endQuarter = visibleHourRange.end * 4
+        let start = middaySplitBoundaryQuarter
+        return (start: start, end: max(endQuarter, start + 1))
+    }
+
+    /// Split by each row's own start time against `middaySplitMinutes` —
+    /// a row that straddles noon (an 11:30am–1pm event, say) lands
+    /// wholly in whichever half it *starts* in rather than being split
+    /// into two rendered pieces; rare enough in practice not to be worth
+    /// the added complexity of an actual split render. Using the pushed-
+    /// out split rather than noon itself is what keeps a *later* row
+    /// (one starting between noon and the pushed-out split) out of the
+    /// morning segment it'd otherwise wrongly qualify for.
+    private var morningRows: [DayTimelineRow] {
+        rows.filter { minutesSinceMidnight($0.startTime) < middaySplitMinutes }
+    }
+
+    private var afternoonRows: [DayTimelineRow] {
+        rows.filter { minutesSinceMidnight($0.startTime) >= middaySplitMinutes }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                twoMinuteTasksSection
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.height
+                    } action: { newValue in
+                        twoMinuteSectionHeight = newValue
+                    }
+                habitOccurrenceSection(title: "Morning Habits", occurrences: amOccurrences)
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.height
+                    } action: { newValue in
+                        amSectionHeight = newValue
+                    }
+
+                if isSplitAtNoon {
+                    DayTimelineSegment(
+                        rows: morningRows,
+                        quarterRange: morningRange,
+                        eligibleHoursWindows: eligibleHoursWindows,
+                        targetDate: targetDate,
+                        lockedStore: lockedStore,
+                        viewModel: viewModel,
+                        isToday: isToday,
+                        allTasks: allTasks,
+                        allShelves: allShelves,
+                        onSaveEvent: onSaveEvent,
+                        onDeleteBlock: onDeleteBlock,
+                        onPickReplacement: onPickReplacement,
+                        precedingContentHeight: twoMinuteSectionHeight + amSectionHeight,
+                        scrollPosition: $scrollPosition,
+                        viewportHeight: viewportHeight,
+                        scrollOffsetY: scrollOffsetY,
+                        isInteracting: $isMorningInteracting,
+                        isCollapsingEmptyPeriods: isCollapsingEmptyPeriods
+                    )
+
+                    habitOccurrenceSection(title: "Midday Habits", occurrences: middayOccurrences)
+                        // Extra breathing room specifically here — sitting
+                        // directly between the two grid segments, this one
+                        // reads as squeezed against both without it, unlike
+                        // Morning/Evening which only ever border the grid
+                        // on one side.
+                        .padding(.vertical, 14)
+                        .onGeometryChange(for: CGFloat.self) { proxy in
+                            proxy.size.height
+                        } action: { newValue in
+                            middaySectionHeight = newValue
+                        }
+
+                    DayTimelineSegment(
+                        rows: afternoonRows,
+                        quarterRange: afternoonRange,
+                        eligibleHoursWindows: eligibleHoursWindows,
+                        targetDate: targetDate,
+                        lockedStore: lockedStore,
+                        viewModel: viewModel,
+                        isToday: isToday,
+                        allTasks: allTasks,
+                        allShelves: allShelves,
+                        onSaveEvent: onSaveEvent,
+                        onDeleteBlock: onDeleteBlock,
+                        onPickReplacement: onPickReplacement,
+                        precedingContentHeight: twoMinuteSectionHeight + amSectionHeight + dayHeight(for: morningRange) + middaySectionHeight,
+                        scrollPosition: $scrollPosition,
+                        viewportHeight: viewportHeight,
+                        scrollOffsetY: scrollOffsetY,
+                        isInteracting: $isAfternoonInteracting,
+                        isCollapsingEmptyPeriods: isCollapsingEmptyPeriods
+                    )
+                } else {
+                    DayTimelineSegment(
+                        rows: rows,
+                        quarterRange: (start: visibleHourRange.start * 4, end: visibleHourRange.end * 4),
+                        eligibleHoursWindows: eligibleHoursWindows,
+                        targetDate: targetDate,
+                        lockedStore: lockedStore,
+                        viewModel: viewModel,
+                        isToday: isToday,
+                        allTasks: allTasks,
+                        allShelves: allShelves,
+                        onSaveEvent: onSaveEvent,
+                        onDeleteBlock: onDeleteBlock,
+                        onPickReplacement: onPickReplacement,
+                        precedingContentHeight: twoMinuteSectionHeight + amSectionHeight,
+                        scrollPosition: $scrollPosition,
+                        viewportHeight: viewportHeight,
+                        scrollOffsetY: scrollOffsetY,
+                        isInteracting: $isSingleInteracting,
+                        isCollapsingEmptyPeriods: isCollapsingEmptyPeriods
+                    )
+                }
+
+                habitOccurrenceSection(title: "Evening Habits", occurrences: pmOccurrences)
+                    .padding(.top, 14)
+            }
+        }
+        // Every hour label sits offset 6pt *above* its own gridline (see
+        // `DayTimelineSegment.hourGrid`) so the label straddles the line
+        // the way a real calendar's does — invisible for every hour after
+        // the first since there's scrollable content above to absorb the
+        // overflow, but the very top label of each segment has nothing
+        // above it, so without this its top few points get clipped by the
+        // ScrollView's own bounds.
+        .scrollClipDisabled()
+        .scrollDisabled(isMorningInteracting || isAfternoonInteracting || isSingleInteracting)
+        .scrollPosition($scrollPosition)
+        .onScrollGeometryChange(for: CGFloat.self) { geometry in
+            geometry.containerSize.height
+        } action: { _, newValue in
+            viewportHeight = newValue
+        }
+        .onScrollGeometryChange(for: CGFloat.self) { geometry in
+            geometry.contentOffset.y
+        } action: { _, newValue in
+            scrollOffsetY = newValue
+        }
+        .onAppear {
+            scrollToRoughlyNow()
+        }
+    }
+
+    /// Scrolls to roughly an hour before the earliest thing on the
+    /// calendar today, same "roughly now" hint the single-grid version
+    /// always gave — now also picking the right segment (and its own
+    /// cumulative offset into the shared ScrollView) when the day's split
+    /// for Midday habits (see `middaySplitQuarter`).
+    private func scrollToRoughlyNow() {
+        let calendar = Calendar.current
+        let earliestHour = rows.map { calendar.component(.hour, from: $0.startTime) }.min() ?? 7
+        let whole = visibleHourRange
+        let targetHour = max(whole.start, earliestHour - 1)
+        let targetQuarter = targetHour * 4
+        let headerHeight = twoMinuteSectionHeight + amSectionHeight
+        if isSplitAtNoon, targetQuarter >= middaySplitQuarter {
+            let offset = headerHeight + dayHeight(for: morningRange) + middaySectionHeight
+                + CGFloat(targetQuarter - afternoonRange.start) * 15 * pointsPerMinute
+            scrollPosition.scrollTo(y: offset)
+        } else {
+            let range = isSplitAtNoon ? morningRange : (start: whole.start * 4, end: whole.end * 4)
+            let offset = headerHeight + CGFloat(targetQuarter - range.start) * 15 * pointsPerMinute
+            scrollPosition.scrollTo(y: offset)
+        }
+    }
+
+    /// The 2-Minute Task shelf's tasks, shown as a plain checklist above
+    /// the grid rather than as calendar blocks — see
+    /// `AISchedulingService`'s doc comment on why these never get a
+    /// start/end time. Lives inside this ScrollView's own content (see
+    /// `body`) so it scrolls away with the rest of the day instead of
+    /// staying pinned above it, and uses a fully opaque background — a
+    /// translucent tint here read as washed-out against the grid's own
+    /// hairline gridlines right below it. A task whose `startDate` hasn't
+    /// arrived yet (see `TaskItem.isEligibleToStart`) stays off this list
+    /// entirely, the same as it stays off the calendar. Tapping a row
+    /// toggles completion right here, live (no separate sheet) — a
+    /// completed one stays visible, faded and struck through, rather than
+    /// disappearing, so it reads the same as a completed calendar block.
+    @ViewBuilder
+    private var twoMinuteTasksSection: some View {
+        if let shelf = allShelves.first(where: { $0.isTwoMinuteTasks }) {
+            let visible = (shelf.tasks ?? [])
+                .filter { $0.isEligibleToStart(on: targetDate) }
+                .sorted { $0.createdAt < $1.createdAt }
+            if !visible.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 5) {
+                        Image(systemName: shelf.systemImage)
+                            .font(.caption)
+                        Text(shelf.name)
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(.secondary)
+
+                    VStack(spacing: 6) {
+                        ForEach(visible) { task in
+                            Button {
+                                task.setCompleted(!task.isCompleted, in: modelContext)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    // Same checkmark-circle look
+                                    // `DayTimelineSegment.completeCircle`
+                                    // uses for a calendar block.
+                                    ZStack {
+                                        Circle()
+                                            .fill(task.isCompleted ? Color.green : Color.clear)
+                                            .overlay(Circle().strokeBorder(task.isCompleted ? Color.green : Color.secondary.opacity(0.7), lineWidth: 1.5))
+                                        if task.isCompleted {
+                                            Image(systemName: "checkmark")
+                                                .font(.system(size: 8, weight: .bold))
+                                                .foregroundStyle(.white)
+                                        }
+                                    }
+                                    .frame(width: 15, height: 15)
+                                    Text(task.title)
+                                        .foregroundStyle(.primary)
+                                        .strikethrough(task.isCompleted)
+                                    Spacer()
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .opacity(task.isCompleted ? 0.5 : 1)
+                        }
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(shelf.flattenedColor(opacity: 0.3))
+                .padding(.bottom, 10)
+            }
+        }
+    }
+
+    /// One of the Morning/Midday/Evening lists — every still-open habit
+    /// occurrence whose `HabitOccurrenceTimeMode` puts it in this section,
+    /// as a plain check-off row (no calendar time at all). Same visual
+    /// shape as `twoMinuteTasksSection` — a neutral background here since
+    /// a habit has no shelf color of its own — but a checked row stays
+    /// visible (checkmark filled, name faded/struck through), same as a
+    /// Specific-Time habit's own calendar block, rather than disappearing
+    /// the instant it's tapped.
+    @ViewBuilder
+    private func habitOccurrenceSection(title: String, occurrences: [OpenHabitOccurrence]) -> some View {
+        if !occurrences.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                VStack(spacing: 12) {
+                    ForEach(occurrences) { occurrence in
+                        Button {
+                            toggleHabitOccurrence(habit: occurrence.habit, index: occurrence.index, isCompleted: occurrence.isCompleted)
+                        } label: {
+                            HStack(spacing: 10) {
+                                // Same checkmark-circle look
+                                // `DayTimelineSegment.completeCircle` uses
+                                // for a calendar block, so a habit reads
+                                // the same way whether it's timed or not.
+                                ZStack {
+                                    Circle()
+                                        .fill(occurrence.isCompleted ? Color.green : Color.clear)
+                                        .overlay(Circle().strokeBorder(occurrence.isCompleted ? Color.green : Color.secondary.opacity(0.7), lineWidth: 1.5))
+                                    if occurrence.isCompleted {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 8, weight: .bold))
+                                            .foregroundStyle(.white)
+                                    }
+                                }
+                                .frame(width: 15, height: 15)
+                                // Same title font a Specific-Time habit's
+                                // own calendar block uses (see
+                                // `DayTimelineSegment.blockContent`), so an
+                                // AM/Midday/PM occurrence reads as the same
+                                // kind of thing, just without a time.
+                                Text(occurrence.habit.name)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                    .strikethrough(occurrence.isCompleted)
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .opacity(occurrence.isCompleted ? 0.5 : 1)
+                    }
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // Same tint a habit's own calendar block uses — `Color
+            // .accentColor.opacity(0.35)` — flattened to a solid color
+            // the same way `twoMinuteTasksSection` is, so it reads as
+            // opaque rather than washed-out.
+            .background(Shelf.flatten(.accentColor, opacity: 0.35))
+            .padding(.bottom, 10)
+        }
+    }
+
+    /// Mirrors `HabitsView.toggleOccurrence`'s completion side (both
+    /// directions — checking and un-checking) — an AM/Midday/PM
+    /// occurrence never has a `ScheduledBlock` to keep in sync (see
+    /// `AISchedulingService.placeHabitsAndRecurringTasks`), so there's
+    /// nothing here beyond the log itself.
+    private func toggleHabitOccurrence(habit: Habit, index: Int, isCompleted: Bool) {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: targetDate)
+        let log = habit.log(on: today, calendar: calendar) ?? {
+            let newLog = HabitLog(habit: habit, date: today)
+            modelContext.insert(newLog)
+            return newLog
+        }()
+        log.setOccurrence(index, to: isCompleted ? .none : .complete)
+        habitOccurrenceRefreshTick += 1
+    }
+}
+
+/// The actual hour-gridline-and-blocks timeline for one contiguous hour
+/// range — either the whole day, or one half of it split at noon by a
+/// Midday habit occurrence (see `DayTimelineGridView`). Every drag/swipe/
+/// tap gesture and its own sheets (event edit, task card, divisible
+/// adjust, habit detail, empty-slot candidates, block actions) live here,
+/// entirely self-contained per instance — two segments on screen at once
+/// never share or interfere with each other's interaction state, only the
+/// single ScrollView they both sit inside (see `scrollPosition`/
+/// `viewportHeight`/`isInteracting`, all owned by the parent and threaded
+/// in here).
+private struct DayTimelineSegment: View {
+    let rows: [DayTimelineRow]
+    /// Explicit rather than derived — the parent decides whether this is
+    /// the whole day or one half of a Midday split. Quarter-hour units
+    /// (15 minutes each), not whole hours — a Midday split lands wherever
+    /// the day's own content needs it to (12:45, say — see
+    /// `DayTimelineGridView.middaySplitQuarter`), not just on the hour.
+    let quarterRange: (start: Int, end: Int)
+    let eligibleHoursWindows: [EligibleHoursWindow]
+    let targetDate: Date
+    let lockedStore: LockedEventsStore
+    let viewModel: ScheduleReviewViewModel
+    let isToday: Bool
+    let allTasks: [TaskItem]
+    let allShelves: [Shelf]
+    let onSaveEvent: (CalendarEventSummary) -> Void
+    let onDeleteBlock: (ScheduledBlock) -> Void
+    let onPickReplacement: (ScheduledBlock) -> Void
+    /// How much content sits above this segment's own ZStack inside the
+    /// shared ScrollView — the parent's running total of every section
+    /// (and, for the second segment of a split day, the first segment's
+    /// own height too) stacked above it. Needed to translate this
+    /// segment's grid-local touch/scroll math into the ScrollView's own
+    /// content-space coordinates, the same reasoning
+    /// `twoMinuteSectionHeight` originally existed for.
+    let precedingContentHeight: CGFloat
+    @Binding var scrollPosition: ScrollPosition
+    let viewportHeight: CGFloat
+    /// The shared ScrollView's current scroll offset — see
+    /// `startAutoScroll`.
+    let scrollOffsetY: CGFloat
+    /// Set true while this segment has its own drag or empty-slot hold in
+    /// progress — the parent disables the single shared ScrollView based
+    /// on this (see `DayTimelineGridView.body`).
+    @Binding var isInteracting: Bool
+    /// When on, a stretch of `quarterRange` with nothing in it (and
+    /// nothing within `collapseBufferQuarters` of it) collapses down to a
+    /// single compact divider instead of rendering every empty
+    /// quarter-hour at full height — see `displaySegments`. Purely
+    /// visual: dragging a block and long-press-to-insert are both
+    /// disabled while this is on (see `dragGesture`/`emptySlotGesture`),
+    /// so nothing needs an inverse (pixel → time) mapping for the
+    /// compacted space, only the forward one `displayOffset(forMinutes:)`
+    /// already provides.
+    let isCollapsingEmptyPeriods: Bool
 
     private let pointsPerMinute: CGFloat = 1.6
     private let hourLabelWidth: CGFloat = 52
@@ -72,6 +685,18 @@ struct DayTimelineGridView: View {
 
     @State private var draggingRowID: String?
     @State private var dragTranslation: CGFloat = 0
+    /// The live drag point's grid-local Y, updated on every
+    /// `dragGesture` change — read by the auto-scroll loop (see
+    /// `startAutoScroll`) to know how close the finger is to the visible
+    /// viewport's top/bottom edge right now, independent of whether the
+    /// finger itself is still moving.
+    @State private var dragPointY: CGFloat?
+    /// The running loop that nudges `scrollPosition` while `dragPointY`
+    /// sits within an edge zone of the viewport — started when a block
+    /// drag begins, stopped the moment it ends or cancels. A `Task`
+    /// rather than a `Timer` since it only ever needs to run while this
+    /// view (and the drag) is alive, and cancellation is automatic.
+    @State private var autoScrollTask: Task<Void, Never>?
     /// The touch's Y at the moment its `LongPressDragGesture` began (i.e.
     /// once the hold threshold was met) — `dragTranslation` is measured
     /// relative to this, since the underlying `UILongPressGestureRecognizer`
@@ -109,55 +734,108 @@ struct DayTimelineGridView: View {
     @State private var emptySlotTime: Date?
     /// True only while the empty-slot hold has actually succeeded and the
     /// finger's still down — combined with `draggingRowID`, controls when
-    /// the ScrollView itself is disabled.
+    /// the shared ScrollView is disabled (via `isInteracting`).
     @State private var isEmptySlotArmed = false
-    /// Drives the initial scroll-to-roughly-now on appear, and — while an
-    /// empty-slot hold is active — scrolling the pressed time up to the
-    /// top of the (still partly visible, above the half-height sheet)
-    /// calendar.
-    @State private var scrollPosition = ScrollPosition()
-    /// The ScrollView's own viewport height, used to clamp how far
-    /// `updateEmptySlot` can scroll the pressed time toward the top.
-    @State private var viewportHeight: CGFloat = 0
 
-    /// Only the hours actually relevant to this day are rendered/scrollable
-    /// — derived from whichever `NamedSchedule`s apply to this weekday,
-    /// widened if needed to cover anything already on the calendar (a
-    /// manually-placed block/event outside every schedule's window never
-    /// gets clipped out of view), then padded by an hour on either side of
-    /// *that* true range — before the earlier of the eligible hours'
-    /// start or the earliest actual appointment, and after the later of
-    /// the eligible hours' end or the latest actual appointment — purely
-    /// so the grid never starts or ends flush against something. Visual
-    /// breathing room only: that padded hour is never itself eligible for
-    /// anything, and a drop there behaves exactly as it always has outside
-    /// eligible hours. Falls back to the full day if no schedule applies
-    /// to this weekday at all and nothing's on the calendar either.
-    private var visibleHourRange: (start: Int, end: Int) {
-        let calendar = Calendar.current
-        let weekday = calendar.component(.weekday, from: targetDate)
-        let applicable = namedSchedules.filter { $0.daysOfWeek.contains(weekday) }
+    private var visibleStartMinutes: Int { quarterRange.start * 15 }
 
-        var startHour = applicable.isEmpty ? 0 : applicable.map(\.startHour).min()!
-        var endHour = applicable.isEmpty ? 24 : applicable.map { $0.endMinute > 0 ? $0.endHour + 1 : $0.endHour }.max()!
-
-        for row in rows {
-            startHour = min(startHour, minutesSinceMidnight(row.startTime) / 60)
-            let endMinutes = minutesSinceMidnight(row.startTime) + row.durationMinutes
-            endHour = max(endHour, Int(ceil(Double(endMinutes) / 60)))
-        }
-
-        startHour -= 1
-        endHour += 1
-
-        startHour = max(0, min(startHour, 23))
-        endHour = max(startHour + 1, min(24, endHour))
-        return (startHour, endHour)
+    /// One contiguous run of `quarterRange`, either rendered at its real
+    /// size (`isGap == false`) or collapsed to `compactGapHeight`
+    /// (`isGap == true`) — see `displaySegments`.
+    private struct DisplaySegment {
+        let startQuarter: Int
+        /// Exclusive.
+        let endQuarter: Int
+        let isGap: Bool
+        var quarterCount: Int { endQuarter - startQuarter }
     }
 
-    private var visibleStartMinutes: Int { visibleHourRange.start * 60 }
+    /// How many quarter-hours of real content (or near-content) get kept
+    /// expanded around a populated stretch before a gap is considered
+    /// worth collapsing — an hour of buffer on each side, so a block
+    /// never reads as jammed right up against a collapsed divider.
+    private static let collapseBufferQuarters = 4
+    /// A gap has to be at least this long to bother collapsing — folding
+    /// away 15 or 30 idle minutes would save almost nothing and just add
+    /// visual noise.
+    private static let minCollapsibleGapQuarters = 6
+    private static let compactGapHeight: CGFloat = 40
 
-    private var dayHeight: CGFloat { CGFloat(visibleHourRange.end - visibleHourRange.start) * 60 * pointsPerMinute }
+    /// `quarterRange` broken into alternating populated/gap runs when
+    /// `isCollapsingEmptyPeriods` is on — a single run covering the whole
+    /// range otherwise. This (and `heightForSegment`/`displayOffset(forMinutes:)`,
+    /// both derived from it) is the one model both `hourGrid`'s rendering
+    /// and every row's own position are built from, so the two can never
+    /// disagree about where a gap actually is.
+    private var displaySegments: [DisplaySegment] {
+        guard isCollapsingEmptyPeriods else {
+            return [DisplaySegment(startQuarter: quarterRange.start, endQuarter: quarterRange.end, isGap: false)]
+        }
+        var populated = Set<Int>()
+        for row in rows {
+            let startQuarter = minutesSinceMidnight(row.startTime) / 15
+            let endQuarter = Int(ceil(Double(minutesSinceMidnight(row.startTime) + row.durationMinutes) / 15))
+            for quarter in startQuarter..<max(startQuarter + 1, endQuarter) {
+                populated.insert(quarter)
+            }
+        }
+        guard !populated.isEmpty else {
+            return [DisplaySegment(startQuarter: quarterRange.start, endQuarter: quarterRange.end, isGap: true)]
+        }
+        var keep = Set<Int>()
+        for quarter in populated {
+            for delta in -Self.collapseBufferQuarters...Self.collapseBufferQuarters {
+                let candidate = quarter + delta
+                if candidate >= quarterRange.start, candidate < quarterRange.end {
+                    keep.insert(candidate)
+                }
+            }
+        }
+        var segments: [DisplaySegment] = []
+        var cursor = quarterRange.start
+        while cursor < quarterRange.end {
+            let keepThis = keep.contains(cursor)
+            var end = cursor + 1
+            while end < quarterRange.end, keep.contains(end) == keepThis {
+                end += 1
+            }
+            let longEnoughToCollapse = !keepThis && (end - cursor) >= Self.minCollapsibleGapQuarters
+            segments.append(DisplaySegment(startQuarter: cursor, endQuarter: end, isGap: longEnoughToCollapse))
+            cursor = end
+        }
+        return segments
+    }
+
+    private func heightForSegment(_ segment: DisplaySegment) -> CGFloat {
+        segment.isGap ? Self.compactGapHeight : CGFloat(segment.quarterCount) * 15 * pointsPerMinute
+    }
+
+    private var dayHeight: CGFloat {
+        displaySegments.reduce(0) { $0 + heightForSegment($1) }
+    }
+
+    /// Maps a real minute-of-day to its Y offset in the (possibly
+    /// collapsed) rendered timeline — what every row's own `baseOffset`
+    /// is actually built from. A minute inside a collapsed gap can't
+    /// happen in practice (a gap is by definition empty of rows), but
+    /// clamps to that gap's own top edge rather than guessing if it ever
+    /// did.
+    private func displayOffset(forMinutes minutes: Int) -> CGFloat {
+        guard isCollapsingEmptyPeriods else {
+            return CGFloat(minutes - visibleStartMinutes) * pointsPerMinute
+        }
+        var offset: CGFloat = 0
+        for segment in displaySegments {
+            let segmentEndMinutes = segment.endQuarter * 15
+            if minutes < segmentEndMinutes {
+                guard !segment.isGap else { return offset }
+                let segmentStartMinutes = segment.startQuarter * 15
+                return offset + CGFloat(minutes - segmentStartMinutes) * pointsPerMinute
+            }
+            offset += heightForSegment(segment)
+        }
+        return offset
+    }
 
     /// Side-by-side layout for genuinely overlapping rows (a habit and an
     /// event at the same time, two back-to-back-but-not-quite blocks,
@@ -242,35 +920,32 @@ struct DayTimelineGridView: View {
     }
 
     var body: some View {
-        ScrollView {
-            ZStack(alignment: .topLeading) {
-                hourGrid
-                eligibleHoursOverlay
-                // Drawn before the rows, so a press on an actual
-                // block or event hits that row's own gesture first
-                // — this only ever fires for genuinely open space.
+        ZStack(alignment: .topLeading) {
+            hourGrid
+            eligibleHoursOverlay
+            // Drawn before the rows, so a press on an actual block or
+            // event hits that row's own gesture first — this only ever
+            // fires for genuinely open space.
+            // Long-press-to-insert needs an inverse (pixel → time)
+            // mapping this view deliberately doesn't build for the
+            // collapsed timeline — see `isCollapsingEmptyPeriods`.
+            if !isCollapsingEmptyPeriods {
                 Color.clear
                     .contentShape(Rectangle())
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .gesture(emptySlotGesture)
-                ForEach(rows) { row in
-                    rowView(for: row)
-                }
             }
-            .frame(height: dayHeight)
-            .padding(.trailing, contentTrailingPadding)
+            ForEach(rows) { row in
+                rowView(for: row)
+            }
         }
-        .scrollDisabled(draggingRowID != nil || isEmptySlotArmed)
-        .scrollPosition($scrollPosition)
-        .onScrollGeometryChange(for: CGFloat.self) { geometry in
-            geometry.containerSize.height
-        } action: { _, newValue in
-            viewportHeight = newValue
+        .frame(height: dayHeight)
+        .padding(.trailing, contentTrailingPadding)
+        .onChange(of: draggingRowID) { _, newValue in
+            isInteracting = (newValue != nil) || isEmptySlotArmed
         }
-        .onAppear {
-            let earliestHour = rows.map { Calendar.current.component(.hour, from: $0.startTime) }.min() ?? 7
-            let targetHour = max(visibleHourRange.start, earliestHour - 1)
-            scrollPosition.scrollTo(y: CGFloat(targetHour - visibleHourRange.start) * 60 * pointsPerMinute)
+        .onChange(of: isEmptySlotArmed) { _, newValue in
+            isInteracting = newValue || (draggingRowID != nil)
         }
         .sheet(item: $editingEvent) { event in
             EventEditSheet(
@@ -284,7 +959,7 @@ struct DayTimelineGridView: View {
             )
         }
         .sheet(item: $taskCardTarget) { task in
-            TaskCardSheet(task: task, shelves: allShelves.filter { !$0.isPantry })
+            TaskCardSheet(task: task, shelves: allShelves.filter { !$0.isKitchen })
         }
         .sheet(item: $divisibleAdjustTarget) { block in
             DivisibleAdjustSheet(block: block)
@@ -366,8 +1041,13 @@ struct DayTimelineGridView: View {
         let occupied = rows.contains { snapped >= $0.startTime && snapped < $0.endTime }
         guard !occupied else { return }
         emptySlotTime = snapped
-        let maxOffset = max(0, dayHeight - viewportHeight)
-        let target = min(max(0, y - viewportHeight / 4), maxOffset)
+        // `y` itself is grid-local (the gesture lives inside this
+        // segment's own ZStack, untouched by whatever's stacked above it)
+        // but `scrollPosition.scrollTo` works in the shared ScrollView's
+        // own content space, which starts `precedingContentHeight` earlier
+        // — see that property's doc comment.
+        let maxOffset = max(0, precedingContentHeight + dayHeight - viewportHeight)
+        let target = min(max(0, precedingContentHeight + y - viewportHeight / 4), maxOffset)
         if animated {
             withAnimation(.easeOut(duration: 0.25)) {
                 scrollPosition.scrollTo(y: target)
@@ -390,75 +1070,103 @@ struct DayTimelineGridView: View {
         Button("Cancel", role: .cancel) {}
     }
 
-    /// Every rendered row labels its own top edge (e.g. "7 PM" at the top
-    /// of the 7-8pm row) — without something more, the *bottom* edge of
+    /// One row per quarter-hour in `quarterRange` — a whole-hour boundary
+    /// (`quarter % 4 == 0`) gets the bold "7 PM"-style label, the other
+    /// three get a lighter ":15"/":30"/":45". Every rendered row labels
+    /// its own top edge — without something more, the *bottom* edge of
     /// the very last row goes unlabeled, so a range padded to end at 8pm
-    /// visually reads as stopping at 7pm (the last label you actually
+    /// visually reads as stopping at 7:45 (the last label you actually
     /// see), even though the row itself does reach 8pm. The trailing
     /// label below closes that off: one more label+gridline pinned to
-    /// `visibleHourRange.end`'s boundary, positioned but not sized into
-    /// `dayHeight` (a pure anchor, not a new 60pt content row).
+    /// `quarterRange.end`'s boundary, positioned but not sized into
+    /// `dayHeight` (a pure anchor, not a new content row) — this is also
+    /// what lets a Midday split land on a quarter-hour like 12:45 instead
+    /// of only ever a whole hour: `quarterRange.end` needn't be a
+    /// multiple of 4.
     private var hourGrid: some View {
         ZStack(alignment: .topLeading) {
             VStack(spacing: 0) {
-                ForEach(visibleHourRange.start..<visibleHourRange.end, id: \.self) { hour in
-                    ZStack(alignment: .topLeading) {
-                        HStack(alignment: .top, spacing: 8) {
-                            Text(hourLabel(hour))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .frame(width: hourLabelWidth, alignment: .trailing)
-                                .offset(y: -6)
-                            Rectangle()
-                                .fill(Color.secondary.opacity(0.15))
-                                .frame(height: 1)
-                                .offset(y: -0.5)
-                        }
-                        ForEach([15, 30, 45], id: \.self) { minute in
-                            quarterHourGridline(minute: minute)
+                ForEach(Array(displaySegments.enumerated()), id: \.offset) { _, segment in
+                    if segment.isGap {
+                        collapsedGapRow(segment)
+                            .frame(height: Self.compactGapHeight, alignment: .center)
+                    } else {
+                        VStack(spacing: 0) {
+                            ForEach(segment.startQuarter..<segment.endQuarter, id: \.self) { quarter in
+                                gridLine(forQuarter: quarter)
+                                    .frame(height: 15 * pointsPerMinute, alignment: .top)
+                                    .id(quarter)
+                            }
                         }
                     }
-                    .frame(height: 60 * pointsPerMinute, alignment: .top)
-                    .id(hour)
                 }
             }
-            HStack(alignment: .top, spacing: 8) {
-                Text(hourLabel(visibleHourRange.end))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(width: hourLabelWidth, alignment: .trailing)
-                    .offset(y: -6)
-                Rectangle()
-                    .fill(Color.secondary.opacity(0.15))
-                    .frame(height: 1)
-                    .offset(y: -0.5)
-            }
-            .offset(y: CGFloat(visibleHourRange.end - visibleHourRange.start) * 60 * pointsPerMinute)
+            gridLine(forQuarter: quarterRange.end)
+                .offset(y: dayHeight)
         }
     }
 
-    /// A lighter, unlabeled-hour-number gridline at :15/:30/:45 within an
-    /// hour row, spreading the timeline out into tappable 15-minute
-    /// increments instead of one dense 60-minute block.
-    private func quarterHourGridline(minute: Int) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text(":\(minute)")
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary.opacity(0.6))
-                .frame(width: hourLabelWidth, alignment: .trailing)
-                .offset(y: -4)
+    /// The compact divider shown in place of a collapsed empty stretch —
+    /// just how much free time is being hidden there. Not individually
+    /// tappable to re-expand; the whole day collapses/expands together
+    /// via the toolbar toggle (see `ScheduleReviewView`).
+    private func collapsedGapRow(_ segment: DisplaySegment) -> some View {
+        HStack(spacing: 6) {
+            Rectangle().fill(Color.secondary.opacity(0.15)).frame(height: 1)
+            Text(freeTimeLabel(forMinutes: segment.quarterCount * 15))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize()
+            Rectangle().fill(Color.secondary.opacity(0.15)).frame(height: 1)
+        }
+        .padding(.leading, hourLabelWidth + 8)
+        .padding(.trailing, contentTrailingPadding)
+    }
+
+    private func freeTimeLabel(forMinutes minutes: Int) -> String {
+        let hours = minutes / 60
+        let mins = minutes % 60
+        if hours > 0, mins > 0 { return "\(hours)h \(mins)m free" }
+        if hours > 0 { return "\(hours)h free" }
+        return "\(mins)m free"
+    }
+
+    /// One label+gridline for a given quarter-hour boundary — bold and
+    /// hour-labeled ("7 PM") on the hour itself, lighter and minute-
+    /// labeled (":15") otherwise. Shared by `hourGrid`'s per-row loop and
+    /// its own trailing boundary line so the two never drift out of sync.
+    private func gridLine(forQuarter quarter: Int) -> some View {
+        let isWholeHour = quarter % 4 == 0
+        return HStack(alignment: .top, spacing: 8) {
+            Group {
+                if isWholeHour {
+                    Text(hourLabel(quarter / 4))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(":\((quarter % 4) * 15)")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary.opacity(0.6))
+                }
+            }
+            .frame(width: hourLabelWidth, alignment: .trailing)
+            .offset(y: isWholeHour ? -6 : -4)
             Rectangle()
-                .fill(Color.secondary.opacity(0.08))
+                .fill(Color.secondary.opacity(isWholeHour ? 0.15 : 0.08))
                 .frame(height: 1)
                 .offset(y: -0.5)
         }
-        .offset(y: CGFloat(minute) * pointsPerMinute)
     }
 
     /// Enabled windows that apply to `targetDate`'s weekday, outlined so a
-    /// drag has a visible target before you let go.
+    /// drag has a visible target before you let go — hidden entirely
+    /// while collapsing empty periods, since dragging is disabled then
+    /// anyway (see `isCollapsingEmptyPeriods`) and a window spanning a
+    /// collapsed gap has no single real position to draw it at.
     @ViewBuilder
     private var eligibleHoursOverlay: some View {
+        if !isCollapsingEmptyPeriods {
         let weekday = Calendar.current.component(.weekday, from: targetDate)
         ForEach(eligibleHoursWindows.filter { $0.isEnabled && $0.daysOfWeek.contains(weekday) }) { window in
             let startMinutes = window.startHour * 60 + window.startMinute
@@ -476,6 +1184,7 @@ struct DayTimelineGridView: View {
                 .offset(y: CGFloat(startMinutes - visibleStartMinutes) * pointsPerMinute)
                 .allowsHitTesting(false)
         }
+        }
     }
 
     @ViewBuilder
@@ -491,7 +1200,7 @@ struct DayTimelineGridView: View {
         let isDragging = draggingRowID == row.id
         let isSwiping = swipingRowID == row.id
         let swipeX = isSwiping ? min(0, swipeTranslationX) : 0
-        let baseOffset: CGFloat = CGFloat(minutesSinceMidnight(row.startTime) - visibleStartMinutes) * pointsPerMinute
+        let baseOffset: CGFloat = displayOffset(forMinutes: minutesSinceMidnight(row.startTime))
 
         // What the in-progress drag (if any) would actually do to *this*
         // row if released right now — the pushed-down (default) or
@@ -622,16 +1331,20 @@ struct DayTimelineGridView: View {
                 // open, or this row is already mid-swipe — otherwise you
                 // could pick up an unrelated block right out from under
                 // it, or start a vertical move partway through a delete
-                // swipe.
-                guard !isLocked, emptySlotTime == nil, swipingRowID == nil else { return }
+                // swipe. And while collapsing empty periods — see
+                // `isCollapsingEmptyPeriods`.
+                guard !isCollapsingEmptyPeriods, !isLocked, emptySlotTime == nil, swipingRowID == nil else { return }
                 draggingRowID = row.id
                 dragOriginY = point.y
                 dragOriginX = point.x
+                dragPointY = point.y
+                startAutoScroll()
             },
             onChanged: { point in
                 guard draggingRowID == row.id, let dragOriginY, let dragOriginX else { return }
                 dragTranslation = snappedTranslation(point.y - dragOriginY, for: row)
                 dragTranslationX = point.x - dragOriginX
+                dragPointY = point.y
             },
             onEnded: { _ in
                 guard draggingRowID == row.id else { return }
@@ -646,6 +1359,7 @@ struct DayTimelineGridView: View {
                 dragOriginY = nil
                 dragTranslationX = 0
                 dragOriginX = nil
+                stopAutoScroll()
             },
             onCancelled: {
                 guard draggingRowID == row.id else { return }
@@ -654,8 +1368,68 @@ struct DayTimelineGridView: View {
                 dragOriginY = nil
                 dragTranslationX = 0
                 dragOriginX = nil
+                stopAutoScroll()
             }
         )
+    }
+
+    /// Nudges `scrollPosition` on a ~60fps loop for as long as
+    /// `dragPointY` sits within `edgeZone` points of the visible
+    /// viewport's top or bottom edge — the closer to the edge, the faster
+    /// it scrolls, capped at `maxSpeed` points/tick right at the edge
+    /// itself. Runs independent of finger movement (a `LongPressDragGesture`
+    /// only calls `onChanged` when the touch actually moves), which is
+    /// what lets holding still right at the edge keep scrolling instead of
+    /// stalling. Programmatic `scrollPosition.scrollTo` calls go through
+    /// fine even though the shared ScrollView is `.scrollDisabled` for the
+    /// whole duration of a drag (see `DayTimelineGridView.body`) — only
+    /// user-driven scrolling is blocked, and `updateEmptySlot` already
+    /// relies on that same fact.
+    private func startAutoScroll() {
+        autoScrollTask?.cancel()
+        // Captured into locals before the `Task` starts rather than read
+        // as `self.foo` from inside its loop — `self` is a struct, and the
+        // closure below keeps whatever copy of it existed the moment this
+        // method ran for the entire lifetime of the drag, since nothing
+        // ever re-creates the `Task` on a later re-render the way a
+        // gesture's own synchronous callbacks get rebound each time.
+        // `currentOffset` tracks our own progress locally rather than
+        // re-reading `scrollOffsetY` for the same reason — this loop is
+        // the only thing moving the scroll position during a drag (the
+        // ScrollView itself is `.scrollDisabled`), so it's the only
+        // source of truth that actually needs to stay live.
+        let edgeZone: CGFloat = 70
+        let maxSpeed: CGFloat = 14
+        let preceding = precedingContentHeight
+        let viewport = viewportHeight
+        let maxOffset = max(0, precedingContentHeight + dayHeight - viewportHeight)
+        var currentOffset = scrollOffsetY
+        autoScrollTask = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 16_000_000)
+                guard !Task.isCancelled, let pointY = dragPointY else { continue }
+                let contentY = preceding + pointY
+                let distanceFromTop = contentY - currentOffset
+                let distanceFromBottom = (currentOffset + viewport) - contentY
+                var delta: CGFloat = 0
+                if distanceFromTop < edgeZone {
+                    delta = -maxSpeed * (edgeZone - max(0, distanceFromTop)) / edgeZone
+                } else if distanceFromBottom < edgeZone {
+                    delta = maxSpeed * (edgeZone - max(0, distanceFromBottom)) / edgeZone
+                }
+                guard delta != 0 else { continue }
+                let newOffset = min(max(0, currentOffset + delta), maxOffset)
+                guard newOffset != currentOffset else { continue }
+                currentOffset = newOffset
+                scrollPosition.scrollTo(y: newOffset)
+            }
+        }
+    }
+
+    private func stopAutoScroll() {
+        autoScrollTask?.cancel()
+        autoScrollTask = nil
+        dragPointY = nil
     }
 
     /// Swipe-left-to-remove for a proposed block — ignored entirely for

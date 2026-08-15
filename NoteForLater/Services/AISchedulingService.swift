@@ -14,6 +14,21 @@ protocol AISchedulingServiceProtocol: AnyObject {
         eligibleHoursWindows: [EligibleHoursWindow],
         date: Date
     ) async throws -> [ScheduledBlock]
+
+    /// The two categories that jump the whole queue — habits and the
+    /// Recurring Tasks shelf's own tasks (see `Shelf.isRecurringTasks`) —
+    /// split out of `generateProposedSchedule` so a caller can top these
+    /// up on their own, without a full (rule-packing, network-fetching)
+    /// regenerate. Synchronous and side-effect-free — no calendar or
+    /// model access here, that's on the caller. See
+    /// `ScheduleReviewViewModel.autoPlaceHabitsAndRecurringTasks`.
+    func placeHabitsAndRecurringTasks(
+        shelves: [Shelf],
+        habits: [Habit],
+        freeSlots: [TimeSlot],
+        eligibleHoursWindows: [EligibleHoursWindow],
+        date: Date
+    ) -> (blocks: [ScheduledBlock], remainingFree: [TimeSlot])
 }
 
 /// Greedy packer, but rule-aware: for each enabled SchedulingRule whose
@@ -70,6 +85,78 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             .filter { $0.rule.isEnabled && $0.rule.namedSchedule != nil && $0.rule.effectiveDaysOfWeek.contains(weekday) }
             .sorted { $0.rule.sortOrder < $1.rule.sortOrder }
 
+        let (initialBlocks, freeAfterHabits) = placeHabitsAndRecurringTasks(
+            shelves: shelves,
+            habits: habits,
+            freeSlots: freeSlots,
+            eligibleHoursWindows: eligibleHoursWindows,
+            date: date
+        )
+        var blocks = initialBlocks
+        var remainingFree = freeAfterHabits
+
+        var scheduledTaskIDs = Set<UUID>()
+
+        // Each rule's window gets one combined pack() call covering all
+        // three tiers at once (eligible-and-timed, eligible-and-guessed,
+        // then not-explicitly-eligible) — a single call so the rule's own
+        // fill-strategy budget (e.g. "≤2 tasks") is enforced once across
+        // every tier, not reset per tier and potentially double-spent.
+        for (rule, shelf) in applicableRules {
+            guard
+                let windowStart = calendar.date(bySettingHour: rule.effectiveStartHour, minute: rule.effectiveStartMinute, second: 0, of: date),
+                let windowEnd = calendar.date(bySettingHour: rule.effectiveEndHour, minute: rule.effectiveEndMinute, second: 0, of: date),
+                windowStart < windowEnd
+            else { continue }
+
+            let window = TimeSlot(start: windowStart, end: windowEnd)
+            let availableInWindow = intersect(remainingFree, with: window)
+            guard !availableInWindow.isEmpty else { continue }
+
+            let candidates = (shelf.tasks ?? [])
+                // A recurring task (see `Shelf.isRecurringTasks`) is
+                // placed exclusively by the fixed-time pass above, at its
+                // own anchor time on every occurrence day — `isScheduled`
+                // is deliberately never set for it, so without this
+                // exclusion it would look permanently unscheduled and
+                // eligible to *also* get pulled in here if this shelf
+                // ever picked up a SchedulingRule of its own. A task
+                // whose own `startDate` hasn't arrived yet (see
+                // `TaskItem.isEligibleToStart`) is excluded the same way —
+                // it just sits out this day's packing entirely rather
+                // than counting as unschedulable.
+                .filter { !$0.isScheduled && !$0.isRecurring && !scheduledTaskIDs.contains($0.id) && $0.isEligibleToStart(on: date, calendar: calendar) }
+                .sorted { tieredOrdering($0, $1, rule: rule) }
+
+            let (placed, leftoverInWindow) = pack(candidates: candidates, into: availableInWindow, rule: rule)
+            for (task, start, end, isEstimated) in placed {
+                blocks.append(ScheduledBlock(date: date, startTime: start, endTime: end, task: task, isEstimatedDuration: isEstimated))
+                scheduledTaskIDs.insert(task.id)
+            }
+
+            let outsideWindow = subtract(remainingFree, window: window)
+            remainingFree = (outsideWindow + leftoverInWindow).sorted { $0.start < $1.start }
+        }
+
+        return blocks.sorted { $0.startTime < $1.startTime }
+    }
+
+    // MARK: - Habits + Recurring Tasks (also callable on their own)
+
+    /// The shared front-of-day pass `generateProposedSchedule` itself opens
+    /// with — pulled out so a caller (see
+    /// `ScheduleReviewViewModel.autoPlaceHabitsAndRecurringTasks`) can top
+    /// these up on their own without a full regenerate.
+    func placeHabitsAndRecurringTasks(
+        shelves: [Shelf],
+        habits: [Habit],
+        freeSlots: [TimeSlot],
+        eligibleHoursWindows: [EligibleHoursWindow],
+        date: Date
+    ) -> (blocks: [ScheduledBlock], remainingFree: [TimeSlot]) {
+        let calendar = Calendar.current
+        let weekday = calendar.component(.weekday, from: date)
+
         var remainingFree = freeSlots.sorted { $0.start < $1.start }
 
         // Global guardrail: clip the day's whole free pool down to whatever
@@ -91,40 +178,19 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
                 .sorted { $0.start < $1.start }
         }
 
-        var scheduledTaskIDs = Set<UUID>()
         var blocks: [ScheduledBlock] = []
 
-        // Each rule's window gets one combined pack() call covering all
-        // three tiers at once (eligible-and-timed, eligible-and-guessed,
-        // then not-explicitly-eligible) — a single call so the rule's own
-        // fill-strategy budget (e.g. "≤2 tasks") is enforced once across
-        // every tier, not reset per tier and potentially double-spent.
-        for (rule, shelf) in applicableRules {
-            guard
-                let windowStart = calendar.date(bySettingHour: rule.effectiveStartHour, minute: rule.effectiveStartMinute, second: 0, of: date),
-                let windowEnd = calendar.date(bySettingHour: rule.effectiveEndHour, minute: rule.effectiveEndMinute, second: 0, of: date),
-                windowStart < windowEnd
-            else { continue }
+        // The shelf marked `isTwoMinuteTasks` (see `Shelf.isTwoMinuteTasks`)
+        // is deliberately NOT placed onto the calendar here — it used to
+        // jump the queue and land at the very front of the day's free
+        // time, which in practice meant midnight whenever nothing else
+        // occupied the morning. These are surfaced instead as their own
+        // untimed checklist above the calendar (see
+        // `ScheduleReviewView.twoMinuteTasksSection`) and in Nightly
+        // Review's own step — nothing here ever gives one of its tasks a
+        // start/end time.
 
-            let window = TimeSlot(start: windowStart, end: windowEnd)
-            let availableInWindow = intersect(remainingFree, with: window)
-            guard !availableInWindow.isEmpty else { continue }
-
-            let candidates = (shelf.tasks ?? [])
-                .filter { !$0.isScheduled && !scheduledTaskIDs.contains($0.id) }
-                .sorted { tieredOrdering($0, $1, rule: rule) }
-
-            let (placed, leftoverInWindow) = pack(candidates: candidates, into: availableInWindow, rule: rule)
-            for (task, start, end, isEstimated) in placed {
-                blocks.append(ScheduledBlock(date: date, startTime: start, endTime: end, task: task, isEstimatedDuration: isEstimated))
-                scheduledTaskIDs.insert(task.id)
-            }
-
-            let outsideWindow = subtract(remainingFree, window: window)
-            remainingFree = (outsideWindow + leftoverInWindow).sorted { $0.start < $1.start }
-        }
-
-        // Every habit is assumed schedulable — placed last, one block per
+        // Every habit is assumed schedulable — placed first, one block per
         // occurrence (not just the first), each exactly at that
         // occurrence's own target time and `estimatedMinutes` long —
         // deliberately ignoring eligible hours entirely (neither the
@@ -132,13 +198,20 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
         // *when* it lands, only *whether* it's applicable today and not
         // already fully resolved). A habit's target time is a commitment
         // the user made directly; it shouldn't get bumped around by a
-        // scheduling concept that exists for tasks. Whichever occurrences
-        // already have a block for this day (checked by start time, since
-        // a block itself doesn't record an occurrence index) are left
-        // alone rather than re-added — a habit can be partially placed
-        // (one occurrence generated earlier, say) and still pick up its
-        // remaining occurrences here. An occurrence past `idealTimesOfDay`
-        // reuses the last time on the list.
+        // scheduling concept that exists for tasks — and, going the other
+        // way, a habit is the one thing allowed to land on a time a task
+        // already occupies (or vice versa below); nothing here checks for
+        // that. Whichever occurrences already have a block for this day
+        // (checked by start time, since a block itself doesn't record an
+        // occurrence index) are left alone rather than re-added — a habit
+        // can be partially placed (one occurrence generated earlier, say)
+        // and still pick up its remaining occurrences here. An occurrence
+        // past `idealTimesOfDay` reuses the last time on the list.
+        //
+        // Placed before any task packing below specifically so tasks can
+        // see where habits already are and route around them — see
+        // `habitOccupiedRanges` — since only a habit is allowed to
+        // double-book, never a task against anything else.
         let eligibleHabits = habits
             .filter {
                 $0.isApplicable(on: date, calendar: calendar)
@@ -146,24 +219,79 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             }
             .sorted { $0.sortOrder < $1.sortOrder }
 
+        var habitOccupiedRanges: [TimeSlot] = []
         for habit in eligibleHabits {
-            let existingStarts = Set(
-                (habit.scheduledBlocks ?? [])
-                    .filter { calendar.isDate($0.date, inSameDayAs: date) }
-                    .map(\.startTime)
-            )
+            let existingBlocksToday = (habit.scheduledBlocks ?? []).filter { calendar.isDate($0.date, inSameDayAs: date) }
+            habitOccupiedRanges.append(contentsOf: existingBlocksToday.map { TimeSlot(start: $0.startTime, end: $0.endTime) })
+            // Keyed by occurrence index, not start time — a block that's
+            // been dragged to a different time (see
+            // `ScheduleReviewViewModel.reorderTimeline`) no longer sits at
+            // its own `idealTimesOfDay` slot, so matching on start time
+            // alone would miss it and place a second, duplicate block for
+            // the same occurrence right back at the original ideal time
+            // every time this runs (every time the Calendar tab reappears
+            // or the viewed day changes — see `autoPlaceHabitsAndRecurringTasks`).
+            let existingOccurrenceIndices = Set(existingBlocksToday.map(\.habitOccurrenceIndex))
+
             for occurrenceIndex in 0..<max(habit.timesPerDay, 1) {
+                // The authoritative check — an occurrence already marked
+                // complete/missed/excused never gets placed again, even if
+                // its own block happened to get swept up and deleted by
+                // something unrelated (e.g. `regenerateFromNow` clearing
+                // out not-yet-approved future blocks): resolved is
+                // resolved, regardless of whether a block still exists for
+                // it right now.
+                guard habit.occurrenceStatus(occurrenceIndex, on: date, calendar: calendar) == .none else { continue }
+                // An AM/Midday/PM occurrence (see `HabitOccurrenceTimeMode`)
+                // never gets a calendar block at all — it surfaces instead
+                // as an untimed list item (see
+                // `DayTimelineGridView.habitOccurrenceSection`).
+                guard habit.timeMode(for: occurrenceIndex) == .specific else { continue }
+                // Still-incomplete but already on the calendar somewhere
+                // (moved or not) — don't duplicate it.
+                guard !existingOccurrenceIndices.contains(occurrenceIndex) else { continue }
                 let idealMinutes = occurrenceIndex < habit.idealTimesOfDay.count
                     ? habit.idealTimesOfDay[occurrenceIndex]
                     : (habit.idealTimesOfDay.last ?? 0)
                 let start = calendar.date(bySettingHour: idealMinutes / 60, minute: idealMinutes % 60, second: 0, of: date) ?? date
-                guard !existingStarts.contains(start) else { continue }
                 let end = start.addingTimeInterval(TimeInterval(habit.estimatedMinutes * 60))
                 blocks.append(ScheduledBlock(date: date, startTime: start, endTime: end, task: nil, habit: habit, habitOccurrenceIndex: occurrenceIndex))
+                habitOccupiedRanges.append(TimeSlot(start: start, end: end))
             }
         }
 
-        return blocks.sorted { $0.startTime < $1.startTime }
+        // Any task with "Recurring?" toggled on (see `TaskItem.isRecurring`,
+        // toggleable from the top of any task card, on any shelf) is
+        // treated the same way habits are — every occurrence due today
+        // (see `TaskItem.hasRecurringOccurrence`) is placed unconditionally
+        // at its own fixed anchor time (`recurringOccurrenceTime`),
+        // regardless of what else is going on: a recurring task is a
+        // commitment with a fixed time, not something competing for free
+        // time the way a shelf's rule-packed tasks do. One recurring task
+        // can carry many blocks over its lifetime — unlike every other
+        // task, `TaskItem.isScheduled`/`isCompleted` stay meaningless
+        // here; completion lives entirely on each occurrence's own block.
+        for task in shelves.flatMap({ $0.tasks ?? [] }) where task.isRecurring {
+            guard task.hasRecurringOccurrence(on: date, calendar: calendar) else { continue }
+            guard let start = task.recurringOccurrenceTime(on: date, calendar: calendar) else { continue }
+            let alreadyExists = (task.scheduledBlocks ?? []).contains { calendar.isDate($0.date, inSameDayAs: date) }
+            guard !alreadyExists else { continue }
+            let minutes = task.estimatedMinutes > 0 ? task.estimatedMinutes : 30
+            let end = start.addingTimeInterval(TimeInterval(minutes * 60))
+            blocks.append(ScheduledBlock(date: date, startTime: start, endTime: end, task: task, isEstimatedDuration: task.estimatedMinutes <= 0))
+            habitOccupiedRanges.append(TimeSlot(start: start, end: end))
+        }
+
+        // Carved out of the free pool before any task ever gets packed —
+        // this is what keeps a rule-packed task from ever landing on a
+        // habit's or recurring task's time, the one overlap that isn't
+        // allowed. A habit or recurring task itself never consults this;
+        // each is only ever the thing being routed around.
+        for occupied in habitOccupiedRanges {
+            remainingFree = subtract(remainingFree, window: occupied)
+        }
+
+        return (blocks, remainingFree)
     }
 
     // MARK: - Packing
@@ -199,6 +327,10 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
         for task in candidates {
             if rule.fillStrategy == .maxTaskCount, taskCount >= rule.maxTaskCount { break }
             if rule.fillStrategy == .maxDuration, totalMinutesUsed >= rule.maxTotalMinutes { break }
+            // Max Total Duration's own optional secondary cap — stops the
+            // window early even with budget still left, once its own
+            // `maxTaskCount` tasks are already in.
+            if rule.fillStrategy == .maxDuration, rule.maxDurationTaskCountEnabled, taskCount >= rule.maxTaskCount { break }
 
             let isEstimated = task.estimatedMinutes <= 0
             let baseMinutes = isEstimated ? guessedMinutes(for: rule) : task.estimatedMinutes
@@ -243,13 +375,21 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
                 results.append((task, start, end, isEstimated))
             }
             slots = updatedSlots(after: placement, in: slots)
-            totalMinutesUsed += minutesNeeded
+            // Not always equal to `minutesNeeded` — `place` rounds a
+            // final divisible segment up to the task's own minimum chunk
+            // size rather than ever leaving a sliver smaller than it, so
+            // the actual placed total can run a few minutes over what was
+            // asked for. Bookkeeping (the budget/cap counters below, and
+            // what's left owed on the task itself) has to track the real
+            // placed amount, not the request, or the two drift apart.
+            let actualMinutes = placement.reduce(0) { $0 + Int($1.end.timeIntervalSince($1.start) / 60) }
+            totalMinutesUsed += actualMinutes
             taskCount += 1
 
-            if isEstimated || minutesNeeded >= task.estimatedMinutes {
+            if isEstimated || actualMinutes >= task.estimatedMinutes {
                 task.isScheduled = true
             } else {
-                task.estimatedMinutes -= minutesNeeded
+                task.estimatedMinutes -= actualMinutes
             }
         }
 
@@ -288,7 +428,13 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
         for slot in slots {
             guard remaining > 0 else { break }
             guard slot.durationMinutes >= minimumSegment else { continue }
-            let take = min(remaining, slot.durationMinutes)
+            // A trailing sliver smaller than the task's own configured
+            // minimum chunk is never scheduled — the guard above already
+            // guarantees this slot can hold at least `minimumSegment`, so
+            // rounding the final piece up to it (rather than the smaller
+            // `remaining`) trades a few extra minutes on the calendar for
+            // never producing a segment under the floor the user chose.
+            let take = remaining >= minimumSegment ? min(remaining, slot.durationMinutes) : minimumSegment
             let segmentEnd = slot.start.addingTimeInterval(TimeInterval(take * 60))
             segments.append((slot.start, segmentEnd))
             remaining -= take
@@ -369,17 +515,33 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
         return taskOrdering(lhs, rhs)
     }
 
-    /// Priority first (high before low), then whichever task has been
-    /// sitting on the shelf longest (oldest `createdAt` first), then due
-    /// date as the final tiebreaker.
+    /// Nearing due date first, then priority (high before low), then
+    /// whichever task has been sitting on the shelf longest (oldest
+    /// `createdAt` first) — the three real ranking criteria. Whatever
+    /// survives all three still tied (most often several tasks added in
+    /// the same batch import, sharing an identical `createdAt`) falls
+    /// through to a fourth, "minimize how many tasks it takes to fill the
+    /// available time" tiebreak: larger before smaller, and a task that
+    /// fills a slot in one whole piece before a divisible one that would
+    /// have to be chopped up to do the same — so, all else equal, one
+    /// 2-hour task is preferred over four 30-minute divisible ones for
+    /// filling a 2-hour window, rather than fragmenting it four ways.
     private func taskOrdering(_ lhs: TaskItem, _ rhs: TaskItem) -> Bool {
+        let lhsDue = lhs.dueDate ?? .distantFuture
+        let rhsDue = rhs.dueDate ?? .distantFuture
+        if lhsDue != rhsDue {
+            return lhsDue < rhsDue
+        }
         if lhs.priority != rhs.priority {
             return priorityRank(lhs.priority) > priorityRank(rhs.priority)
         }
         if lhs.createdAt != rhs.createdAt {
             return lhs.createdAt < rhs.createdAt
         }
-        return (lhs.dueDate ?? .distantFuture) < (rhs.dueDate ?? .distantFuture)
+        if lhs.estimatedMinutes != rhs.estimatedMinutes {
+            return lhs.estimatedMinutes > rhs.estimatedMinutes
+        }
+        return !lhs.isDivisible && rhs.isDivisible
     }
 
     private func priorityRank(_ priority: Priority) -> Int {

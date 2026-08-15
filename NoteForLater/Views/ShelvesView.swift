@@ -19,8 +19,9 @@ struct ShelvesView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Shelf.sortOrder) private var shelves: [Shelf]
 
-    @State private var showsCannotDeleteAlert = false
-    @State private var navigationPath = NavigationPath()
+    @Binding var navigationPath: NavigationPath
+
+    @State private var cannotDeleteMessage: String?
     @State private var justAddedShelfID: UUID?
 
     var body: some View {
@@ -61,10 +62,16 @@ struct ShelvesView: View {
                     ShelfEditView(shelf: shelf, focusNameOnAppear: shelf.id == justAddedShelfID)
                 }
             }
-            .alert("Can't Delete Shelf", isPresented: $showsCannotDeleteAlert) {
+            .alert(
+                "Can't Delete Shelf",
+                isPresented: Binding(
+                    get: { cannotDeleteMessage != nil },
+                    set: { isPresented in if !isPresented { cannotDeleteMessage = nil } }
+                )
+            ) {
                 Button("OK", role: .cancel) {}
             } message: {
-                Text("Move or delete the tasks on this shelf first.")
+                Text(cannotDeleteMessage ?? "")
             }
         }
     }
@@ -91,8 +98,24 @@ struct ShelvesView: View {
     private func deleteShelves(at offsets: IndexSet) {
         for index in offsets {
             let shelf = shelves[index]
-            if let tasks = shelf.tasks, !tasks.isEmpty {
-                showsCannotDeleteAlert = true
+            if shelf.isTwoMinuteTasks {
+                cannotDeleteMessage = "This is your permanent 2-Minute Task shelf and can't be deleted. Turn that off in the shelf's settings first if you really want to remove it."
+                continue
+            }
+            if shelf.isRecurringTasks {
+                cannotDeleteMessage = "This is your permanent Recurring Tasks shelf and can't be deleted. Turn that off in the shelf's settings first if you really want to remove it."
+                continue
+            }
+            // Matches `ShelfListView.visibleTasks` — a completed task with
+            // no calendar block behind it is already hidden from the
+            // shelf's own list, so it shouldn't count as "still on this
+            // shelf" here either. `shelf.tasks` deletes with `.nullify`,
+            // not `.cascade` (see `Shelf.tasks`), so this is purely about
+            // not silently vanishing something the user can still see —
+            // it's never a data-loss risk.
+            let visibleTasks = (shelf.tasks ?? []).filter { !$0.isCompleted || !($0.scheduledBlocks ?? []).isEmpty }
+            if !visibleTasks.isEmpty {
+                cannotDeleteMessage = "Move or delete the tasks on this shelf first."
                 continue
             }
             modelContext.delete(shelf)
@@ -109,6 +132,6 @@ struct ShelvesView: View {
 }
 
 #Preview {
-    ShelvesView()
+    ShelvesView(navigationPath: .constant(NavigationPath()))
         .modelContainer(for: [TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }

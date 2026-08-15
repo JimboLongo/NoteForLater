@@ -99,7 +99,6 @@ enum HabitImportService {
                 sortOrder: nextOrder
             )
             modelContext.insert(habit)
-            HabitNotificationService.shared.reschedule(habit)
             nextOrder += 1
             summary.importedCount += 1
         }

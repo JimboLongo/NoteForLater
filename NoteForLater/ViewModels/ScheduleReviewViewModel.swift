@@ -72,6 +72,69 @@ final class ScheduleReviewViewModel {
         }
     }
 
+    /// Keeps habits and the Recurring Tasks shelf's own tasks (see
+    /// `Shelf.isRecurringTasks`) showing up on `targetDate` without the
+    /// user ever tapping Generate/Regenerate — see
+    /// `AISchedulingServiceProtocol.placeHabitsAndRecurringTasks`, the
+    /// same pass a full generate opens with, just without the rule-packing
+    /// or the wipe-and-rebuild `regenerateFromNow` does. Idempotent (a
+    /// habit occurrence or recurring-task occurrence already scheduled is
+    /// skipped by that same pass), so it's safe to call every time this
+    /// screen appears or the viewed day changes. Never touches a day
+    /// already in the past, and fails silently — a background top-up
+    /// erroring out shouldn't pop an alert over a screen the user didn't
+    /// ask to regenerate. The 2-Minute Task shelf's tasks are deliberately
+    /// never placed here — see `ScheduleReviewView.twoMinuteTasksSection`,
+    /// an untimed checklist instead of a calendar block.
+    func autoPlaceHabitsAndRecurringTasks(shelves: [Shelf], habits: [Habit], eligibleHoursWindows: [EligibleHoursWindow]) async {
+        guard targetDate >= Calendar.current.startOfDay(for: .now) else { return }
+        removeStaleNonSpecificHabitBlocks()
+        guard let freeSlots = try? await calendarService.fetchFreeSlots(for: targetDate) else { return }
+        let (newBlocks, _) = schedulingService.placeHabitsAndRecurringTasks(
+            shelves: shelves,
+            habits: habits,
+            freeSlots: freeSlots,
+            eligibleHoursWindows: eligibleHoursWindows,
+            date: targetDate
+        )
+        guard !newBlocks.isEmpty else { return }
+        for block in newBlocks {
+            modelContext.insert(block)
+        }
+        try? modelContext.save()
+        blocks = (blocks + newBlocks).sorted { $0.startTime < $1.startTime }
+    }
+
+    /// Self-healing sweep for `targetDate`: an occurrence whose mode
+    /// isn't (or no longer is) Specific Time should never have a
+    /// `ScheduledBlock` at all (see
+    /// `AISchedulingService.placeHabitsAndRecurringTasks`'s own guard on
+    /// `HabitOccurrenceTimeMode`), but one changed away from Specific
+    /// Time before `HabitEditView.removeStaleBlocks` existed to clean up
+    /// after it can still have a block left over from back then. This
+    /// catches those too, not just ones created going forward — same
+    /// scope as `removeStaleBlocks` itself: only a not-yet-completed
+    /// block, never a past or already-resolved one, so nothing about the
+    /// day's actual history changes.
+    private func removeStaleNonSpecificHabitBlocks() {
+        let stale = blocks.filter { block in
+            guard let habit = block.habit, !block.isCompleted else { return false }
+            return habit.timeMode(for: block.habitOccurrenceIndex) != .specific
+        }
+        guard !stale.isEmpty else { return }
+        for block in stale {
+            block.habit = nil
+            modelContext.delete(block)
+        }
+        let staleIDs = Set(stale.map(\.id))
+        blocks.removeAll { staleIDs.contains($0.id) }
+        // Saved explicitly here rather than left to the caller's own
+        // save below — that one's skipped entirely whenever there's
+        // nothing new to place (`guard !newBlocks.isEmpty else { return }`),
+        // which would otherwise leave this deletion sitting unsaved.
+        try? modelContext.save()
+    }
+
     // MARK: - Regenerate (from now, across as many days as it takes)
 
     /// Rebuilds the schedule starting from the next quarter-hour after
@@ -122,7 +185,7 @@ final class ScheduleReviewViewModel {
         // already-*approved* block gets, just for a reason the user chose
         // rather than the calendar push having already happened.
         var survivingBlocks = allBlocks
-        for block in allBlocks where block.approvalStatus != .approved && !block.isLocked && block.startTime >= cutoff {
+        for block in allBlocks where block.approvalStatus != .approved && !block.isLocked && !block.isCompleted && block.startTime >= cutoff {
             block.task?.isScheduled = false
             // Explicitly clears the task/habit's to-one inverse before the
             // delete, rather than letting SwiftData's delete-rule nullify
@@ -172,15 +235,16 @@ final class ScheduleReviewViewModel {
                     }
                 }
                 // An approved surviving block is already reflected in the
-                // calendar's own free/busy above (it's really been pushed),
-                // but a locked-while-still-proposed one hasn't — carve its
+                // calendar's own free/busy above (it's really been
+                // pushed), but a locked-while-still-proposed or
+                // completed-while-still-proposed one hasn't — carve its
                 // time back out manually so regeneration doesn't schedule
                 // something new right on top of it.
-                let lockedSurviving = survivingBlocks.filter {
-                    $0.isLocked && $0.approvalStatus != .approved && calendar.isDate($0.date, inSameDayAs: cursorDay)
+                let protectedSurviving = survivingBlocks.filter {
+                    ($0.isLocked || $0.isCompleted) && $0.approvalStatus != .approved && calendar.isDate($0.date, inSameDayAs: cursorDay)
                 }
-                for locked in lockedSurviving {
-                    freeSlots = subtracting(locked.startTime..<locked.endTime, from: freeSlots)
+                for protected in protectedSurviving {
+                    freeSlots = subtracting(protected.startTime..<protected.endTime, from: freeSlots)
                 }
                 let dayBlocks = try await schedulingService.generateProposedSchedule(
                     shelves: shelves,
@@ -208,6 +272,78 @@ final class ScheduleReviewViewModel {
             .sorted { $0.startTime < $1.startTime }
 
         await loadCalendarEvents()
+    }
+
+    /// Nightly Review's own version of `regenerateFromNow`, scoped to just
+    /// `targetDate` (tomorrow) instead of walking forward — used right
+    /// after the Inbox step (see `NightlyReviewView.advance()`) so a task
+    /// just routed onto a shelf moments earlier gets picked up as a real
+    /// candidate for tomorrow's plan, rather than the day silently
+    /// keeping whatever shape it already had before that routing
+    /// happened. Clears whatever non-approved, non-locked blocks already
+    /// sit on `targetDate` first (freeing their tasks back up, same
+    /// rationale as `regenerateFromNow`), then re-generates that single
+    /// day from scratch — approved/locked blocks are left untouched, and
+    /// a task already placed by a fresh call simply won't show up again
+    /// as a candidate (`generateProposedSchedule` only ever pulls from
+    /// `!task.isScheduled`). Deliberately doesn't walk to later days the
+    /// way `regenerateFromNow` does — that would mean a 30-day re-walk
+    /// (and 30 more calendar fetches) every single night just to pick up
+    /// one newly-sorted task.
+    func regenerateSingleDay(shelves: [Shelf], habits: [Habit], eligibleHoursWindows: [EligibleHoursWindow]) async {
+        isGenerating = true
+        errorMessage = nil
+        defer { isGenerating = false }
+
+        await clearBlocksBeforeToday()
+
+        let calendar = Calendar.current
+        let allBlocksNow = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        var survivingBlocks = allBlocksNow
+        // Completed blocks are deliberately left alone here, same as
+        // `regenerateFromNow` — they stay on the calendar (faded, struck
+        // through) until Nightly Review's own sweep actually clears them;
+        // see `purgeCompletedBlocks`.
+        for block in allBlocksNow where block.approvalStatus != .approved && !block.isLocked && !block.isCompleted && calendar.isDate(block.date, inSameDayAs: targetDate) {
+            block.task?.isScheduled = false
+            block.task = nil
+            block.habit = nil
+            modelContext.delete(block)
+            survivingBlocks.removeAll { $0.id == block.id }
+        }
+        try? modelContext.save()
+
+        await loadCalendarEvents()
+
+        do {
+            var freeSlots = try await calendarService.fetchFreeSlots(for: targetDate)
+            // Same reasoning as `regenerateFromNow` — a completed but
+            // still-unapproved survivor hasn't been pushed to the real
+            // calendar either, so its time needs the same manual carve-out
+            // a locked one gets.
+            let protectedSurviving = survivingBlocks.filter {
+                ($0.isLocked || $0.isCompleted) && $0.approvalStatus != .approved && calendar.isDate($0.date, inSameDayAs: targetDate)
+            }
+            for protected in protectedSurviving {
+                freeSlots = subtracting(protected.startTime..<protected.endTime, from: freeSlots)
+            }
+            let proposed = try await schedulingService.generateProposedSchedule(
+                shelves: shelves,
+                habits: habits,
+                freeSlots: freeSlots,
+                eligibleHoursWindows: eligibleHoursWindows,
+                date: targetDate
+            )
+            for block in proposed {
+                modelContext.insert(block)
+            }
+            try? modelContext.save()
+            blocks = (survivingBlocks + proposed)
+                .filter { calendar.isDate($0.date, inSameDayAs: targetDate) }
+                .sorted { $0.startTime < $1.startTime }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     /// Carves `occupied` out of `slots`, splitting or trimming whichever
@@ -569,11 +705,19 @@ final class ScheduleReviewViewModel {
     func toggleComplete(_ block: ScheduledBlock) {
         block.isCompleted.toggle()
         if let task = block.task {
-            task.isCompleted = block.isCompleted
-            if block.isCompleted {
-                upsertCompletionRecord(for: task)
-            } else {
-                removeCompletionRecord(for: task)
+            // A recurring task's TaskItem is shared across every
+            // occurrence's own block (see `Shelf.isRecurringTasks`) —
+            // completion lives entirely on the block for these, same as
+            // a habit's does, rather than mirrored onto the shared task
+            // (which one occurrence finishing shouldn't mark done for
+            // every other occurrence, past or future).
+            if !task.isRecurring {
+                task.isCompleted = block.isCompleted
+                if block.isCompleted {
+                    upsertCompletionRecord(for: task)
+                } else {
+                    removeCompletionRecord(for: task)
+                }
             }
         }
         guard let habit = block.habit else { return }
@@ -582,12 +726,6 @@ final class ScheduleReviewViewModel {
         // until every occurrence is resolved (see `Habit.status`).
         let status: OccurrenceStatus = block.isCompleted ? .complete : .none
         habitLog(for: habit, on: block.date).setOccurrence(block.habitOccurrenceIndex, to: status)
-        // Rebuilds this habit's pending reminders from scratch, which
-        // already skips any occurrence marked complete for its day — so
-        // completing (or un-completing) right here immediately drops (or
-        // restores) just that occurrence's own reminder, not the whole
-        // habit's.
-        HabitNotificationService.shared.reschedule(habit)
     }
 
     /// See `TaskCompletionRecord.upsert(for:in:)`.
@@ -622,9 +760,16 @@ final class ScheduleReviewViewModel {
                     try? await calendarService.deleteEvent(eventID: eventID)
                 }
                 block.task = nil
-                modelContext.delete(task)
                 modelContext.delete(block)
                 blocks.removeAll { $0.id == block.id }
+                // A recurring task (see `Shelf.isRecurringTasks`) is one
+                // TaskItem shared across every occurrence's own block —
+                // deleting it here the way a normal one-block task's is
+                // would wipe out every future occurrence the moment a
+                // single one gets swept.
+                if !task.isRecurring {
+                    modelContext.delete(task)
+                }
             } else if block.habit != nil {
                 if let eventID = block.googleEventID {
                     try? await calendarService.deleteEvent(eventID: eventID)
@@ -633,6 +778,21 @@ final class ScheduleReviewViewModel {
                 modelContext.delete(block)
                 blocks.removeAll { $0.id == block.id }
             }
+        }
+
+        // A completed task with no block at all — the 2-Minute Task
+        // shelf's tasks never get one (see `AISchedulingService`'s doc
+        // comment), and the older Task Attribute Review "Mark Complete"
+        // path (`TaskCardSheet`/`TaskReviewQueueSheet`) never created one
+        // either — gets the same removal-from-shelf treatment here as a
+        // completed block's task does above. Without this, a task
+        // completed either of those ways would sit marked-done on its
+        // shelf forever, since nothing else ever sweeps it.
+        let allTasks = (try? modelContext.fetch(FetchDescriptor<TaskItem>())) ?? []
+        for task in allTasks {
+            guard task.isCompleted, !task.isRecurring, (task.scheduledBlocks ?? []).isEmpty else { continue }
+            upsertCompletionRecord(for: task)
+            modelContext.delete(task)
         }
     }
 
@@ -653,7 +813,13 @@ final class ScheduleReviewViewModel {
             if let task = block.task {
                 if block.isCompleted {
                     upsertCompletionRecord(for: task)
-                    modelContext.delete(task)
+                    // See the matching comment in `purgeCompletedBlocks` —
+                    // a recurring task's single TaskItem is shared across
+                    // every occurrence, so it survives past its own
+                    // completed block.
+                    if !task.isRecurring {
+                        modelContext.delete(task)
+                    }
                 } else {
                     task.isScheduled = false
                 }

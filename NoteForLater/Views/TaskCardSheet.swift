@@ -55,8 +55,13 @@ struct TaskCardSheet: View {
                     dismiss()
                 },
                 onNext: { dismiss() },
-                isExcludedFromAttributeReview: task.attributeReviewExcluded,
-                onToggleExcludeFromAttributeReview: { task.attributeReviewExcluded.toggle() }
+                onSnooze: { days in
+                    if let days {
+                        task.attributeReviewSnoozedUntil = Calendar.current.date(byAdding: .day, value: days, to: .now)
+                    } else {
+                        task.attributeReviewSnoozedUntil = nil
+                    }
+                }
             )
             .padding(.top, 4)
             .toolbar {
@@ -114,7 +119,13 @@ struct TaskEditSnapshot: Equatable {
     let isDivisibleDecided: Bool
     let tags: [String]
     let includedSchedulingRuleIDs: [UUID]
-    let attributeReviewExcluded: Bool
+    let attributeReviewSnoozedUntil: Date?
+    let remindInCount: Int
+    let remindInUnitRaw: String
+    let isRecurring: Bool
+    let recurrenceIntervalCount: Int
+    let recurrenceUnitRaw: String
+    let recurrenceEndDate: Date?
 
     init(_ task: TaskItem) {
         title = task.title
@@ -131,7 +142,13 @@ struct TaskEditSnapshot: Equatable {
         isDivisibleDecided = task.isDivisibleDecided
         tags = task.tags
         includedSchedulingRuleIDs = task.includedSchedulingRuleIDs
-        attributeReviewExcluded = task.attributeReviewExcluded
+        attributeReviewSnoozedUntil = task.attributeReviewSnoozedUntil
+        remindInCount = task.remindInCount
+        remindInUnitRaw = task.remindInUnitRaw
+        isRecurring = task.isRecurring
+        recurrenceIntervalCount = task.recurrenceIntervalCount
+        recurrenceUnitRaw = task.recurrenceUnitRaw
+        recurrenceEndDate = task.recurrenceEndDate
     }
 
     func restore(into task: TaskItem) {
@@ -149,7 +166,13 @@ struct TaskEditSnapshot: Equatable {
         task.isDivisibleDecided = isDivisibleDecided
         task.tags = tags
         task.includedSchedulingRuleIDs = includedSchedulingRuleIDs
-        task.attributeReviewExcluded = attributeReviewExcluded
+        task.attributeReviewSnoozedUntil = attributeReviewSnoozedUntil
+        task.remindInCount = remindInCount
+        task.remindInUnitRaw = remindInUnitRaw
+        task.isRecurring = isRecurring
+        task.recurrenceIntervalCount = recurrenceIntervalCount
+        task.recurrenceUnitRaw = recurrenceUnitRaw
+        task.recurrenceEndDate = recurrenceEndDate
         // A duration edit already live-resized any scheduled block behind
         // this task (see `TaskItem.syncScheduledBlockDuration`) — restoring
         // the old `estimatedMinutes` here without also re-syncing would

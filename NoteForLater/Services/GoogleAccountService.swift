@@ -15,6 +15,7 @@ enum GoogleAuthError: LocalizedError {
     case invalidCallback
     case tokenExchangeFailed
     case notSignedIn
+    case sessionExpired
 
     var errorDescription: String? {
         switch self {
@@ -28,6 +29,8 @@ enum GoogleAuthError: LocalizedError {
             return "Couldn't exchange the authorization code for a token."
         case .notSignedIn:
             return "Not signed in to Google."
+        case .sessionExpired:
+            return "Your Google sign-in expired. Reconnect it in Settings > Google Account."
         }
     }
 }
@@ -134,21 +137,33 @@ final class GoogleAccountService: NSObject, GoogleAccountServiceProtocol {
         }
         guard let refreshToken else { throw GoogleAuthError.notSignedIn }
 
-        let refreshed = try await refreshAccessToken(refreshToken: refreshToken)
-        let newExpiresAt = Date().addingTimeInterval(TimeInterval(refreshed.expiresIn))
-        self.storedAccessToken = refreshed.accessToken
-        self.expiresAt = newExpiresAt
+        do {
+            let refreshed = try await refreshAccessToken(refreshToken: refreshToken)
+            let newExpiresAt = Date().addingTimeInterval(TimeInterval(refreshed.expiresIn))
+            self.storedAccessToken = refreshed.accessToken
+            self.expiresAt = newExpiresAt
 
-        if let currentAccount {
-            KeychainTokenStore.save(StoredGoogleTokens(
-                accessToken: refreshed.accessToken,
-                refreshToken: self.refreshToken,
-                expiresAt: newExpiresAt,
-                email: currentAccount.email,
-                displayName: currentAccount.displayName
-            ))
+            if let currentAccount {
+                KeychainTokenStore.save(StoredGoogleTokens(
+                    accessToken: refreshed.accessToken,
+                    refreshToken: self.refreshToken,
+                    expiresAt: newExpiresAt,
+                    email: currentAccount.email,
+                    displayName: currentAccount.displayName
+                ))
+            }
+            return refreshed.accessToken
+        } catch {
+            // The refresh token itself was rejected by Google — expired,
+            // revoked, or (the common cause for a personal/testing OAuth
+            // client) a test-user refresh token that only lives 7 days.
+            // Signing out here is what makes Settings honestly go back to
+            // showing "Connect Google Account" instead of a permanently
+            // broken "signed in" state that just keeps failing every
+            // calendar call with an opaque token-exchange error.
+            signOut()
+            throw GoogleAuthError.sessionExpired
         }
-        return refreshed.accessToken
     }
 
     // MARK: - ASWebAuthenticationSession

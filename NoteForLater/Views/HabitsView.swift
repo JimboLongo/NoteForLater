@@ -64,15 +64,6 @@ struct HabitsView: View {
             .sheet(isPresented: $isShowingImporter) {
                 HabitImportView()
             }
-            .onAppear {
-                HabitNotificationService.shared.requestAuthorization()
-                // Reminders are one-shot over a short rolling window (see
-                // HabitNotificationService), not repeating — this keeps
-                // that window topped up every time the Habits tab opens.
-                for habit in habits {
-                    HabitNotificationService.shared.reschedule(habit)
-                }
-            }
         }
     }
 
@@ -124,8 +115,8 @@ struct HabitsTodayView: View {
 
     private var liveSortedHabits: [Habit] {
         habits.sorted { lhs, rhs in
-            let l = lhs.nextReminderDate(calendar: calendar)
-            let r = rhs.nextReminderDate(calendar: calendar)
+            let l = lhs.nextTargetDate(calendar: calendar)
+            let r = rhs.nextTargetDate(calendar: calendar)
             switch (l, r) {
             case let (l?, r?): return l < r
             case (nil, _): return false
@@ -270,10 +261,9 @@ struct HabitsTodayView: View {
 
     /// Toggles one occurrence between complete and unselected, keeping its
     /// matching `ScheduledBlock.isCompleted` (if that occurrence made it
-    /// onto today's calendar) in sync, and drops that occurrence's own
-    /// reminder notification when it's completed ahead of time — the same
-    /// three effects `ScheduleReviewViewModel.toggleComplete` produces
-    /// from the calendar side, just triggered from this circle instead.
+    /// onto today's calendar) in sync — the same effect
+    /// `ScheduleReviewViewModel.toggleComplete` produces from the
+    /// calendar side, just triggered from this circle instead.
     private func toggleOccurrence(habit: Habit, index: Int, todayLog: HabitLog?) {
         let today = calendar.startOfDay(for: .now)
         let log = todayLog ?? {
@@ -289,8 +279,6 @@ struct HabitsTodayView: View {
         }) {
             block.isCompleted = isNowComplete
         }
-
-        HabitNotificationService.shared.reschedule(habit)
     }
 
     private func fillColor(for status: OccurrenceStatus) -> Color {
@@ -329,7 +317,6 @@ struct HabitsTodayView: View {
         let ordered = liveSortedHabits
         for index in offsets {
             let habit = ordered[index]
-            HabitNotificationService.shared.cancelAll(for: habit)
             modelContext.delete(habit)
         }
     }

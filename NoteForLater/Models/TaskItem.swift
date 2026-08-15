@@ -31,6 +31,16 @@ final class TaskItem {
     /// date yet. Irrelevant when the answer is "No" (`dueDate == nil`
     /// already says everything there).
     var dueDatePicked: Bool = false
+    /// The earliest day this task may land on the calendar — `nil` means
+    /// no restriction (the card's picker just shows today until touched;
+    /// there's no separate Yes/No question the way `dueDate` has, so `nil`
+    /// only ever means "never touched," not "explicitly none"). Distinct
+    /// from `dueDate` (a deadline, not a floor): a task can have either,
+    /// both, or neither. `AISchedulingService` excludes a task from a
+    /// given day's candidate packing whenever that day falls before this
+    /// one, the same way `isScheduled` already excludes an already-placed
+    /// task.
+    var startDate: Date?
     var nextStep: String = ""
     /// 0 means "no duration set" — see `durationLabel(for:)`.
     var estimatedMinutes: Int = 0
@@ -55,9 +65,149 @@ final class TaskItem {
     /// gets bumped rather than actually done, not reset by rescheduling.
     var pushedCount: Int = 0
     /// Opts this task out of Task Attribute Review and Nightly Review's
-    /// attribute-cleanup step, even while `isMissingAttributes` is true —
-    /// an escape hatch for a task you've decided not to fully fill in.
-    var attributeReviewExcluded: Bool = false
+    /// attribute-cleanup step for a chosen number of days, even while
+    /// `isMissingAttributes` is true — a temporary escape hatch for a task
+    /// you've decided not to think about right now, rather than a
+    /// permanent silence. Compare against `.now` (see
+    /// `isSnoozedFromAttributeReview`) rather than deleting this once it
+    /// passes, so the last snooze length picked stays visible if it's
+    /// ever snoozed again.
+    var attributeReviewSnoozedUntil: Date?
+
+    var isSnoozedFromAttributeReview: Bool {
+        guard let attributeReviewSnoozedUntil else { return false }
+        return attributeReviewSnoozedUntil > .now
+    }
+
+    /// "Remind Me In" — only ever shown on the card for a shelf with
+    /// `Shelf.effectiveTracksFutureReminder` on. `0` means no reminder is
+    /// set. See `applyRemindIn`, which turns this + `remindInUnit` into
+    /// the actual `attributeReviewSnoozedUntil` date that hides the task
+    /// from the attribute-review queue until it's up — the exact same
+    /// mechanism the Snooze action already uses, just driven by a
+    /// persistent count/unit pair on the card instead of a one-off pick
+    /// made during review.
+    var remindInCount: Int = 0
+    var remindInUnitRaw: String = RecurrenceUnit.days.rawValue
+    var remindInUnit: RecurrenceUnit {
+        get { RecurrenceUnit(rawValue: remindInUnitRaw) ?? .days }
+        set { remindInUnitRaw = newValue.rawValue }
+    }
+
+    /// Recomputes `attributeReviewSnoozedUntil` from `remindInCount`/
+    /// `remindInUnit`, anchored to `referenceDate` — called whenever
+    /// either wheel changes on the task card. `remindInCount <= 0` clears
+    /// the reminder (and any snooze it was driving) entirely.
+    func applyRemindIn(referenceDate: Date = .now, calendar: Calendar = .current) {
+        guard remindInCount > 0 else {
+            attributeReviewSnoozedUntil = nil
+            return
+        }
+        let component: Calendar.Component
+        switch remindInUnit {
+        case .days: component = .day
+        case .weeks: component = .weekOfYear
+        case .months: component = .month
+        }
+        attributeReviewSnoozedUntil = calendar.date(byAdding: component, value: remindInCount, to: referenceDate)
+    }
+
+    /// Whether this task belongs in the attribute-review queue purely
+    /// because its "Remind Me In" timer is up — independent of
+    /// `isMissingAttributes`, since a reminder can be set on an otherwise
+    /// fully-filled-out task that just needs a future second look.
+    var isDueForFutureReminder: Bool {
+        remindInCount > 0 && !isSnoozedFromAttributeReview
+    }
+
+    /// Whether this task repeats — toggleable from "Recurring?" at the top
+    /// of any task card, on any shelf. The anchor point — the first
+    /// occurrence, and the time-of-day every later occurrence reuses — is
+    /// `dueDate` itself; there's no separate "start date" field.
+    /// `AISchedulingService.placeHabitsAndRecurringTasks` is what actually
+    /// turns this into calendar blocks, one per occurrence day, computed
+    /// fresh from `hasRecurringOccurrence`/`recurringOccurrenceTime` rather
+    /// than stored anywhere.
+    var isRecurring: Bool = false
+    /// The "every X" in "every X days/weeks/months" — always >= 1.
+    var recurrenceIntervalCount: Int = 1
+    var recurrenceUnitRaw: String = RecurrenceUnit.days.rawValue
+    /// nil means "indefinitely."
+    var recurrenceEndDate: Date?
+
+    var recurrenceUnit: RecurrenceUnit {
+        get { RecurrenceUnit(rawValue: recurrenceUnitRaw) ?? .days }
+        set { recurrenceUnitRaw = newValue.rawValue }
+    }
+
+    /// Whether an occurrence of this recurring task lands on `date`'s
+    /// calendar day — stepping forward from the anchor (`dueDate`'s own
+    /// day) by `recurrenceIntervalCount` `recurrenceUnit`s at a time,
+    /// forever unless `recurrenceEndDate` cuts it off. `date` is compared
+    /// by calendar day only; see `recurringOccurrenceTime` for the actual
+    /// time an occurrence should land at.
+    func hasRecurringOccurrence(on date: Date, calendar: Calendar = .current) -> Bool {
+        guard isRecurring, recurrenceIntervalCount > 0, let anchor = dueDate else { return false }
+        let day = calendar.startOfDay(for: date)
+        let anchorDay = calendar.startOfDay(for: anchor)
+        guard day >= anchorDay else { return false }
+        if let end = recurrenceEndDate, day > calendar.startOfDay(for: end) { return false }
+
+        switch recurrenceUnit {
+        case .days:
+            guard let deltaDays = calendar.dateComponents([.day], from: anchorDay, to: day).day else { return false }
+            return deltaDays % recurrenceIntervalCount == 0
+        case .weeks:
+            guard let deltaDays = calendar.dateComponents([.day], from: anchorDay, to: day).day else { return false }
+            return deltaDays % (recurrenceIntervalCount * 7) == 0
+        case .months:
+            guard let deltaMonths = calendar.dateComponents([.month], from: anchorDay, to: day).month,
+                  deltaMonths % recurrenceIntervalCount == 0,
+                  let expected = calendar.date(byAdding: .month, value: deltaMonths, to: anchorDay)
+            else { return false }
+            // Same day-of-month as the anchor — a short month clamps the
+            // added date to its own last day (Foundation's own Calendar
+            // behavior), so e.g. a Jan 31 anchor lands on Feb 28/29
+            // rather than never firing that month at all.
+            return calendar.isDate(expected, inSameDayAs: day)
+        }
+    }
+
+    /// Whether this task is allowed to land on `date` at all, per its own
+    /// `startDate` — `true` when there's no `startDate` set. Checked by
+    /// `AISchedulingService` before ever considering a task as a
+    /// candidate for a given day's packing.
+    func isEligibleToStart(on date: Date, calendar: Calendar = .current) -> Bool {
+        guard let startDate else { return true }
+        return calendar.startOfDay(for: date) >= calendar.startOfDay(for: startDate)
+    }
+
+    /// The time an occurrence landing on `date` should actually be placed
+    /// at — always the anchor (`dueDate`)'s own time-of-day, applied onto
+    /// `date`'s calendar day.
+    func recurringOccurrenceTime(on date: Date, calendar: Calendar = .current) -> Date? {
+        guard let anchor = dueDate else { return nil }
+        let anchorComponents = calendar.dateComponents([.hour, .minute], from: anchor)
+        return calendar.date(bySettingHour: anchorComponents.hour ?? 9, minute: anchorComponents.minute ?? 0, second: 0, of: date)
+    }
+
+    /// The next date (today or later) this recurring task has an
+    /// occurrence on, walking forward day by day — used to sort recurring
+    /// tasks by soonest-first on their shelf (see `ShelfListView`). `nil`
+    /// if nothing's coming (not recurring, or `recurrenceEndDate` has
+    /// already passed). Capped at a year out so a stray misconfiguration
+    /// can't loop indefinitely.
+    func nextRecurringOccurrenceDate(asOf referenceDate: Date = .now, calendar: Calendar = .current) -> Date? {
+        guard isRecurring else { return nil }
+        var cursor = calendar.startOfDay(for: referenceDate)
+        for _ in 0..<366 {
+            if hasRecurringOccurrence(on: cursor, calendar: calendar) {
+                return recurringOccurrenceTime(on: cursor, calendar: calendar)
+            }
+            cursor = calendar.date(byAdding: .day, value: 1, to: cursor) ?? cursor
+        }
+        return nil
+    }
 
     /// Whether the AI Scheduler may split this task across multiple blocks
     /// (different times/slots the same day) if it doesn't fit in one

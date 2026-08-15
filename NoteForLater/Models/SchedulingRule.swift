@@ -53,6 +53,13 @@ final class SchedulingRule {
     var maxTotalMinutes: Int = 120
     var maxTaskCount: Int = 2
     var maxMinutesPerTask: Int = 15
+    /// Max Total Duration's own optional secondary cap — off by default so
+    /// an existing rule's behavior doesn't silently change. When on, the
+    /// window still stops filling once `maxTotalMinutes` is reached same
+    /// as before, but now also stops once `maxTaskCount` tasks have been
+    /// placed, whichever comes first — the same `maxTaskCount` field the
+    /// Max Task Count strategy uses, just optionally applied here too.
+    var maxDurationTaskCountEnabled: Bool = false
 
     init(
         shelf: Shelf,
@@ -66,6 +73,7 @@ final class SchedulingRule {
         maxTotalMinutes: Int = 120,
         maxTaskCount: Int = 2,
         maxMinutesPerTask: Int = 15,
+        maxDurationTaskCountEnabled: Bool = false,
         sortOrder: Int = 0,
         isEnabled: Bool = true
     ) {
@@ -81,6 +89,7 @@ final class SchedulingRule {
         self.maxTotalMinutes = maxTotalMinutes
         self.maxTaskCount = maxTaskCount
         self.maxMinutesPerTask = maxMinutesPerTask
+        self.maxDurationTaskCountEnabled = maxDurationTaskCountEnabled
         self.sortOrder = sortOrder
         self.isEnabled = isEnabled
     }
@@ -137,7 +146,8 @@ final class SchedulingRule {
             fillStrategy: fillStrategy,
             maxTotalMinutes: maxTotalMinutes,
             maxTaskCount: maxTaskCount,
-            maxMinutesPerTask: maxMinutesPerTask
+            maxMinutesPerTask: maxMinutesPerTask,
+            maxDurationTaskCountEnabled: maxDurationTaskCountEnabled
         )
     }
 
@@ -150,14 +160,19 @@ final class SchedulingRule {
         fillStrategy: FillStrategy,
         maxTotalMinutes: Int,
         maxTaskCount: Int,
-        maxMinutesPerTask: Int
+        maxMinutesPerTask: Int,
+        maxDurationTaskCountEnabled: Bool = false
     ) -> String {
         let dayTimeText = dayAndTimeText(daysOfWeek: daysOfWeek, startHour: startHour, startMinute: startMinute, endHour: endHour, endMinute: endMinute)
 
         let strategyText: String
         switch fillStrategy {
         case .fillToFit: strategyText = "Fill to fit"
-        case .maxDuration: strategyText = "Up to \(TaskItem.durationLabel(for: maxTotalMinutes))"
+        case .maxDuration:
+            let durationText = "Up to \(TaskItem.durationLabel(for: maxTotalMinutes))"
+            strategyText = maxDurationTaskCountEnabled
+                ? "\(durationText), ≤\(maxTaskCount) task\(maxTaskCount == 1 ? "" : "s")"
+                : durationText
         case .maxTaskCount: strategyText = "Up to \(maxTaskCount) task\(maxTaskCount == 1 ? "" : "s"), ≤\(maxMinutesPerTask) min each"
         }
         return "\(dayTimeText) · \(strategyText)"

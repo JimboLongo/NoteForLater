@@ -17,11 +17,12 @@ struct SettingsView: View {
     @Query private var allTags: [Tag]
     @Query private var allHabits: [Habit]
     @Query private var allTaskCompletionRecords: [TaskCompletionRecord]
+    @Query private var allRecipes: [Recipe]
 
     private var accountService: GoogleAccountService { GoogleAccountService.shared }
     private var locationService: LocationMonitoringService { LocationMonitoringService.shared }
     private var nightlyReviewSettings: NightlyReviewSettings { NightlyReviewSettings.shared }
-    private var upcomingReminderSettings: UpcomingReminderSettings { UpcomingReminderSettings.shared }
+    private var dailyDigestSettings: DailyDigestSettings { DailyDigestSettings.shared }
 
     @State private var isSigningIn = false
     @State private var isSyncingCalendars = false
@@ -144,7 +145,7 @@ struct SettingsView: View {
             Section {
                 Toggle("Meal Planning", isOn: mealPlanningBinding)
             } footer: {
-                Text("Adds a Pantry shelf for tracking ingredients on hand. Pantry is never a destination for Inbox items — add to it directly, or import from a grocery receipt photo.")
+                Text("Adds a Kitchen shelf with a Pantry for tracking ingredients on hand and a Cookbook for recipes. Neither is a destination for Inbox items — add to them directly, or import Pantry items from a grocery receipt photo.")
             }
 
             Section {
@@ -159,18 +160,20 @@ struct SettingsView: View {
             }
 
             Section {
-                Toggle("Remind Me Before Events", isOn: upcomingReminderEnabledBinding)
-                if upcomingReminderSettings.isEnabled {
-                    Picker("Notice", selection: upcomingReminderLeadBinding) {
-                        ForEach(UpcomingReminderSettings.leadOptions, id: \.self) { minutes in
-                            Text(UpcomingReminderSettings.leadLabel(for: minutes)).tag(minutes)
-                        }
+                Toggle("Daily Check-Ins", isOn: dailyDigestEnabledBinding)
+                if dailyDigestSettings.isEnabled {
+                    ForEach(0..<3, id: \.self) { index in
+                        DatePicker(
+                            "Check-In \(index + 1)",
+                            selection: dailyDigestTimeBinding(at: index),
+                            displayedComponents: [.hourAndMinute]
+                        )
                     }
                 }
             } header: {
-                Text("Upcoming Reminders")
+                Text("Daily Check-Ins")
             } footer: {
-                Text("Get a push notification this far before each approved task or habit on your calendar is about to start.")
+                Text("Up to three times a day, get one notification listing every habit and task still open today, instead of a separate reminder for each one — tap it to check things off right there.")
             }
 
             Section {
@@ -186,7 +189,7 @@ struct SettingsView: View {
             } header: {
                 Text("Danger Zone")
             } footer: {
-                Text("\"Reset Task Stats\" clears every completion snapshot behind the Task Stats page — completed tasks and habits themselves are untouched. \"Delete All Habits\" removes every habit and its tracked days (and cancels their reminders). \"Clear All Data\" additionally deletes every inbox item, task, shelf, scheduled block, and tag on this device, and disconnects your Google account. None of this can be undone.")
+                Text("\"Reset Task Stats\" clears every completion snapshot behind the Task Stats page — completed tasks and habits themselves are untouched. \"Delete All Habits\" removes every habit and its tracked days. \"Clear All Data\" additionally deletes every inbox item, task, shelf, scheduled block, tag, and recipe on this device, and disconnects your Google account. None of this can be undone.")
             }
 
             if let errorMessage {
@@ -234,7 +237,7 @@ struct SettingsView: View {
         .alert("Can't Turn Off Meal Planning", isPresented: $isShowingCannotDisableMealPlanningAlert) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("Delete the items on your Pantry shelf first.")
+            Text("Delete the items in your Pantry and Cookbook first.")
         }
     }
 
@@ -302,12 +305,12 @@ struct SettingsView: View {
     }
 
     /// Reads/writes Meal Planning as pure derived state — "on" means a
-    /// Pantry shelf exists, "off" means it doesn't — rather than a separate
-    /// flag that could drift out of sync with the shelf actually being
-    /// there. Mirrors ShelvesView's own add/delete-shelf pattern.
+    /// Kitchen shelf exists, "off" means it doesn't — rather than a
+    /// separate flag that could drift out of sync with the shelf actually
+    /// being there. Mirrors ShelvesView's own add/delete-shelf pattern.
     private var mealPlanningBinding: Binding<Bool> {
         Binding(
-            get: { allShelves.contains { $0.isPantry } },
+            get: { allShelves.contains { $0.isKitchen } },
             set: { isOn in
                 if isOn {
                     enableMealPlanning()
@@ -319,26 +322,29 @@ struct SettingsView: View {
     }
 
     private func enableMealPlanning() {
-        guard !allShelves.contains(where: { $0.isPantry }) else { return }
+        guard !allShelves.contains(where: { $0.isKitchen }) else { return }
         let nextOrder = (allShelves.map(\.sortOrder).max() ?? -1) + 1
-        let pantry = Shelf(name: "Pantry", systemImage: "refrigerator", sortOrder: nextOrder)
-        pantry.isPantry = true
-        pantry.tracksDuration = false
-        pantry.hasDueDates = false
-        pantry.hasNextStep = false
-        pantry.hasPriority = false
-        modelContext.insert(pantry)
+        let kitchen = Shelf(name: "The Kitchen", systemImage: "refrigerator", sortOrder: nextOrder)
+        kitchen.isKitchen = true
+        kitchen.tracksDuration = false
+        kitchen.hasDueDates = false
+        kitchen.hasNextStep = false
+        kitchen.hasPriority = false
+        modelContext.insert(kitchen)
     }
 
     /// Same guard ShelvesView uses for manual shelf deletion — don't
-    /// silently drop a shelf's contents; make the user clear it first.
+    /// silently drop a shelf's contents; make the user clear the Pantry
+    /// and the Cookbook first.
     private func disableMealPlanning() {
-        guard let pantry = allShelves.first(where: { $0.isPantry }) else { return }
-        if let tasks = pantry.tasks, !tasks.isEmpty {
+        guard let kitchen = allShelves.first(where: { $0.isKitchen }) else { return }
+        let hasPantryItems = !(kitchen.tasks ?? []).isEmpty
+        let hasRecipes = !allRecipes.isEmpty
+        if hasPantryItems || hasRecipes {
             isShowingCannotDisableMealPlanningAlert = true
             return
         }
-        modelContext.delete(pantry)
+        modelContext.delete(kitchen)
     }
 
     private var nightlyReviewEnabledBinding: Binding<Bool> {
@@ -358,22 +364,23 @@ struct SettingsView: View {
         )
     }
 
-    private var upcomingReminderEnabledBinding: Binding<Bool> {
+    private var dailyDigestEnabledBinding: Binding<Bool> {
         Binding(
-            get: { upcomingReminderSettings.isEnabled },
+            get: { dailyDigestSettings.isEnabled },
             set: { isOn in
-                upcomingReminderSettings.isEnabled = isOn
-                if isOn { UpcomingBlockNotificationService.shared.requestAuthorization() }
+                dailyDigestSettings.isEnabled = isOn
+                if isOn { DailyDigestNotificationService.shared.requestAuthorization() }
             }
         )
     }
 
-    private var upcomingReminderLeadBinding: Binding<Int> {
+    private func dailyDigestTimeBinding(at index: Int) -> Binding<Date> {
         Binding(
-            get: { upcomingReminderSettings.leadMinutes },
-            set: { upcomingReminderSettings.leadMinutes = $0 }
+            get: { dailyDigestSettings.time(at: index) },
+            set: { dailyDigestSettings.setTime($0, at: index) }
         )
     }
+
 
     private func resetTaskStats() {
         for record in allTaskCompletionRecords {
@@ -390,7 +397,6 @@ struct SettingsView: View {
 
     private func clearAllHabits() {
         for habit in allHabits {
-            HabitNotificationService.shared.cancelAll(for: habit)
             modelContext.delete(habit)
         }
     }
@@ -400,6 +406,7 @@ struct SettingsView: View {
         for block in allScheduledBlocks { modelContext.delete(block) }
         for shelf in allShelves { modelContext.delete(shelf) }
         for tag in allTags { modelContext.delete(tag) }
+        for recipe in allRecipes { modelContext.delete(recipe) }
         for window in eligibleHoursWindows { modelContext.delete(window) }
         for subscription in subscriptions { modelContext.delete(subscription) }
         clearAllHabits()
@@ -412,5 +419,5 @@ struct SettingsView: View {
     NavigationStack {
         SettingsView()
     }
-    .modelContainer(for: [TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self, TaskCompletionRecord.self], inMemory: true)
+    .modelContainer(for: [TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self, TaskCompletionRecord.self, Recipe.self], inMemory: true)
 }

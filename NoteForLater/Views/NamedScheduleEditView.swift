@@ -52,8 +52,18 @@ struct NamedScheduleEditView: View {
             }
 
             Section("Time Window") {
-                DatePicker("Start", selection: startTimeBinding, displayedComponents: [.hourAndMinute])
-                DatePicker("End", selection: endTimeBinding, displayedComponents: [.hourAndMinute])
+                HStack {
+                    Text("Start")
+                    Spacer()
+                    QuarterHourDatePicker(date: startTimeBinding)
+                        .fixedSize()
+                }
+                HStack {
+                    Text("End")
+                    Spacer()
+                    QuarterHourDatePicker(date: endTimeBinding)
+                        .fixedSize()
+                }
             }
 
             Section {
@@ -131,4 +141,38 @@ struct NamedScheduleEditView: View {
         NamedScheduleEditView(schedule: NamedSchedule(name: "Work"))
     }
     .modelContainer(for: [TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
+}
+
+/// Wraps `UIDatePicker` directly (rather than SwiftUI's `DatePicker`) since
+/// SwiftUI exposes no way to set `minuteInterval` — this is the only way to
+/// make the popover wheel itself only offer :00/:15/:30/:45, instead of
+/// snapping an arbitrary-minute selection after the fact.
+private struct QuarterHourDatePicker: UIViewRepresentable {
+    @Binding var date: Date
+
+    func makeUIView(context: Context) -> UIDatePicker {
+        let picker = UIDatePicker()
+        picker.datePickerMode = .time
+        picker.preferredDatePickerStyle = .compact
+        picker.minuteInterval = 15
+        picker.date = date
+        picker.addTarget(context.coordinator, action: #selector(Coordinator.changed(_:)), for: .valueChanged)
+        return picker
+    }
+
+    func updateUIView(_ uiView: UIDatePicker, context: Context) {
+        if uiView.date != date {
+            uiView.date = date
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject {
+        var parent: QuarterHourDatePicker
+        init(_ parent: QuarterHourDatePicker) { self.parent = parent }
+        @objc func changed(_ sender: UIDatePicker) {
+            parent.date = sender.date
+        }
+    }
 }

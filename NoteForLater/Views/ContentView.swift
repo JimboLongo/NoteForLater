@@ -14,14 +14,17 @@ struct ContentView: View {
     @Query(sort: \Shelf.sortOrder) private var shelves: [Shelf]
     @Query private var tags: [Tag]
     @Query private var allBlocks: [ScheduledBlock]
+    @Query(sort: \Habit.sortOrder) private var allHabits: [Habit]
 
     @State private var selectedTab: AppTab = .inbox
     @State private var quickAction = QuickActionService.shared
     @State private var nightlyReviewLaunchState = NightlyReviewLaunchState.shared
-    @State private var upcomingReminderSettings = UpcomingReminderSettings.shared
+    @State private var dailyDigestLaunchState = DailyDigestLaunchState.shared
+    @State private var dailyDigestSettings = DailyDigestSettings.shared
     @State private var moreNavigationPath = NavigationPath()
     @State private var inboxNavigationPath = NavigationPath()
     @State private var inboxResetToken = 0
+    @State private var shelvesNavigationPath = NavigationPath()
 
     var body: some View {
         TabView(selection: selectedTabBinding) {
@@ -39,7 +42,7 @@ struct ContentView: View {
                 .tabItem { Label("Calendar", systemImage: "calendar") }
                 .tag(AppTab.calendar)
 
-            ShelvesView()
+            ShelvesView(navigationPath: $shelvesNavigationPath)
                 .tabItem { Label("Shelves", systemImage: "square.stack.3d.up") }
                 .tag(AppTab.shelves)
 
@@ -50,7 +53,7 @@ struct ContentView: View {
         .onAppear {
             seedDefaultShelvesIfNeeded()
             LocationMonitoringService.shared.syncRegions(with: tags)
-            UpcomingBlockNotificationService.shared.reschedule(blocks: allBlocks)
+            DailyDigestNotificationService.shared.reschedule(habits: allHabits, blocks: allBlocks)
         }
         .onChange(of: tags) { _, newValue in
             LocationMonitoringService.shared.syncRegions(with: newValue)
@@ -59,13 +62,16 @@ struct ContentView: View {
             seedDefaultShelvesIfNeeded()
         }
         .onChange(of: allBlocks) { _, newValue in
-            UpcomingBlockNotificationService.shared.reschedule(blocks: newValue)
+            DailyDigestNotificationService.shared.reschedule(habits: allHabits, blocks: newValue)
         }
-        .onChange(of: upcomingReminderSettings.isEnabled) { _, _ in
-            UpcomingBlockNotificationService.shared.reschedule(blocks: allBlocks)
+        .onChange(of: allHabits) { _, newValue in
+            DailyDigestNotificationService.shared.reschedule(habits: newValue, blocks: allBlocks)
         }
-        .onChange(of: upcomingReminderSettings.leadMinutes) { _, _ in
-            UpcomingBlockNotificationService.shared.reschedule(blocks: allBlocks)
+        .onChange(of: dailyDigestSettings.isEnabled) { _, _ in
+            DailyDigestNotificationService.shared.reschedule(habits: allHabits, blocks: allBlocks)
+        }
+        .onChange(of: dailyDigestSettings.minutesOfDay) { _, _ in
+            DailyDigestNotificationService.shared.reschedule(habits: allHabits, blocks: allBlocks)
         }
         .onChange(of: quickAction.pendingQuickAdd) { _, isPending in
             if isPending { selectedTab = .inbox }
@@ -73,12 +79,22 @@ struct ContentView: View {
         .fullScreenCover(isPresented: nightlyReviewPresentedBinding) {
             NightlyReviewView()
         }
+        .sheet(isPresented: dailyDigestCheckInPresentedBinding) {
+            DailyDigestCheckInView()
+        }
     }
 
     private var nightlyReviewPresentedBinding: Binding<Bool> {
         Binding(
             get: { nightlyReviewLaunchState.pendingReview },
             set: { nightlyReviewLaunchState.pendingReview = $0 }
+        )
+    }
+
+    private var dailyDigestCheckInPresentedBinding: Binding<Bool> {
+        Binding(
+            get: { dailyDigestLaunchState.pendingCheckIn },
+            set: { dailyDigestLaunchState.pendingCheckIn = $0 }
         )
     }
 
@@ -103,14 +119,41 @@ struct ContentView: View {
                     inboxNavigationPath = NavigationPath()
                     inboxResetToken += 1
                 }
+                if newValue == .shelves {
+                    shelvesNavigationPath = NavigationPath()
+                }
                 selectedTab = newValue
             }
         )
     }
 
     private func seedDefaultShelvesIfNeeded() {
-        guard shelves.isEmpty else { return }
-        for shelf in Shelf.defaultSeedShelves() {
+        if shelves.isEmpty {
+            for shelf in Shelf.defaultSeedShelves() {
+                modelContext.insert(shelf)
+            }
+        }
+        seedSpecialShelvesIfNeeded()
+    }
+
+    /// The 2-Minute Task and Recurring Tasks shelves are permanent — no
+    /// Settings toggle decides whether they exist anymore, they just
+    /// always do, the same way `ShelvesView.deleteShelves` already
+    /// refuses to ever delete one. Runs alongside the regular default-seed
+    /// pass (`.onAppear`/whenever `shelves` changes — see `body`), so a
+    /// shelf that somehow goes missing (e.g. `SettingsView.clearAllData`
+    /// wiping every shelf) comes right back rather than staying gone.
+    private func seedSpecialShelvesIfNeeded() {
+        var nextOrder = (shelves.map(\.sortOrder).max() ?? -1) + 1
+        if !shelves.contains(where: { $0.isTwoMinuteTasks }) {
+            let shelf = Shelf(name: "2-Minute Tasks", systemImage: "2.circle.fill", sortOrder: nextOrder)
+            shelf.isTwoMinuteTasks = true
+            modelContext.insert(shelf)
+            nextOrder += 1
+        }
+        if !shelves.contains(where: { $0.isRecurringTasks }) {
+            let shelf = Shelf(name: "Recurring Tasks", systemImage: "arrow.triangle.2.circlepath", sortOrder: nextOrder)
+            shelf.isRecurringTasks = true
             modelContext.insert(shelf)
         }
     }
@@ -119,10 +162,17 @@ struct ContentView: View {
 /// Tags, Schedules, and Settings — everything not among the 5 fixed tabs.
 struct MoreView: View {
     @Binding var navigationPath: NavigationPath
+    @State private var isShowingTutorial = false
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
             List {
+                Button {
+                    isShowingTutorial = true
+                } label: {
+                    Label("Tutorial", systemImage: "sparkles")
+                }
+                .foregroundStyle(.primary)
                 NavigationLink {
                     TagsListView()
                 } label: {
@@ -145,6 +195,9 @@ struct MoreView: View {
                 }
             }
             .navigationTitle("More")
+            .sheet(isPresented: $isShowingTutorial) {
+                TutorialView()
+            }
         }
     }
 }

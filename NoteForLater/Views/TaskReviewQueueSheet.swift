@@ -87,8 +87,13 @@ struct TaskReviewQueueSheet: View {
                             advance()
                         },
                         onNext: advance,
-                        isExcludedFromAttributeReview: currentTask.attributeReviewExcluded,
-                        onToggleExcludeFromAttributeReview: { currentTask.attributeReviewExcluded.toggle() },
+                        onSnooze: { days in
+                            if let days {
+                                currentTask.attributeReviewSnoozedUntil = Calendar.current.date(byAdding: .day, value: days, to: .now)
+                            } else {
+                                currentTask.attributeReviewSnoozedUntil = nil
+                            }
+                        },
                         entersFromLeft: entersFromLeft
                     )
                     .id(currentTask.id)

@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UserNotifications
 
 @main
 struct NoteForLaterApp: App {
@@ -23,7 +24,8 @@ struct NoteForLaterApp: App {
             Habit.self,
             HabitLog.self,
             TaskCompletionRecord.self,
-            TagLink.self
+            TagLink.self,
+            Recipe.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
@@ -41,6 +43,96 @@ struct NoteForLaterApp: App {
         // App Intents run with no SwiftUI environment to pull a context from.
         SharedModelContainer.current = sharedModelContainer
         Self.migrateLegacyInboxItemsIfNeeded(container: sharedModelContainer)
+        Self.renamePantryShelfToKitchenIfNeeded(container: sharedModelContainer)
+        Self.unscheduleTwoMinuteTaskBlocksIfNeeded(container: sharedModelContainer)
+        Self.cancelLegacyIndividualReminderNotificationsIfNeeded()
+    }
+
+    /// One-time launch cleanup: the old per-habit (`HabitNotificationService`)
+    /// and per-block (`UpcomingBlockNotificationService`) reminder systems
+    /// were removed in favor of the Daily Check-Ins digest
+    /// (`DailyDigestNotificationService`), but deleting that Swift code
+    /// never un-scheduled whatever individual reminders those two had
+    /// already queued with iOS before the removal — a local notification,
+    /// once added, keeps existing (and firing) independently of whether
+    /// the code that created it still exists, until its own trigger date
+    /// or an explicit removal. This sweeps out anything still pending
+    /// under either service's old identifier prefix, so someone who had
+    /// individual reminders scheduled right before updating doesn't keep
+    /// getting them for the rest of that old rolling window on top of the
+    /// new digest.
+    private static func cancelLegacyIndividualReminderNotificationsIfNeeded() {
+        let flagKey = "didCancelLegacyIndividualReminderNotifications.v1"
+        guard !UserDefaults.standard.bool(forKey: flagKey) else { return }
+
+        let center = UNUserNotificationCenter.current()
+        center.getPendingNotificationRequests { requests in
+            let staleIDs = requests
+                .map(\.identifier)
+                .filter { $0.hasPrefix("com.jimbo.NoteForLater.habit.") || $0.hasPrefix("com.jimbo.NoteForLater.upcomingBlock") }
+            center.removePendingNotificationRequests(withIdentifiers: staleIDs)
+        }
+        // Fired-and-forgotten rather than waiting on the async callback
+        // above to set this — `getPendingNotificationRequests` always
+        // succeeds (there's no failure case to retry for), so there's
+        // nothing worth blocking launch on.
+        UserDefaults.standard.set(true, forKey: flagKey)
+    }
+
+    /// One-time launch migration: the 2-Minute Task shelf used to jump the
+    /// scheduling queue and land at the very front of the day's free
+    /// time — in practice, midnight, whenever nothing else occupied the
+    /// morning (see `AISchedulingService`'s doc comment on
+    /// `placeHabits`). That's gone now — those tasks are an untimed
+    /// checklist instead (`ScheduleReviewView.twoMinuteTasksSection`) —
+    /// so this sweeps away whatever stray midnight blocks that old
+    /// behavior already left on-device, freeing their tasks back up.
+    /// Leaves anything already approved (actually pushed to Google
+    /// Calendar) alone rather than silently deleting a real calendar
+    /// event out from under the user.
+    private static func unscheduleTwoMinuteTaskBlocksIfNeeded(container: ModelContainer) {
+        let flagKey = "didUnscheduleTwoMinuteTaskBlocks.v1"
+        guard !UserDefaults.standard.bool(forKey: flagKey) else { return }
+
+        let context = ModelContext(container)
+        guard let blocks = try? context.fetch(FetchDescriptor<ScheduledBlock>()) else { return }
+        for block in blocks where block.approvalStatus != .approved && block.task?.shelf?.isTwoMinuteTasks == true {
+            block.task?.isScheduled = false
+            block.task = nil
+            context.delete(block)
+        }
+        do {
+            try context.save()
+            UserDefaults.standard.set(true, forKey: flagKey)
+        } catch {
+            // Leave the flag unset so this retries next launch instead of
+            // silently leaving stray midnight blocks in place.
+        }
+    }
+
+    /// One-time launch migration: an existing Kitchen shelf (see
+    /// `Shelf.isKitchen`, preserved across the `isPantry` rename via
+    /// `@Attribute(originalName:)`) still literally named "Pantry" from
+    /// before it grew a Cookbook pane gets renamed to "The Kitchen" —
+    /// `isKitchen == true` is how it's found rather than matching on the
+    /// old name, so this is a no-op for anyone who already renamed their
+    /// Pantry shelf to something else.
+    private static func renamePantryShelfToKitchenIfNeeded(container: ModelContainer) {
+        let flagKey = "didRenamePantryShelfToKitchen.v1"
+        guard !UserDefaults.standard.bool(forKey: flagKey) else { return }
+
+        let context = ModelContext(container)
+        guard let shelves = try? context.fetch(FetchDescriptor<Shelf>()) else { return }
+        for shelf in shelves where shelf.isKitchen && shelf.name == "Pantry" {
+            shelf.name = "The Kitchen"
+        }
+        do {
+            try context.save()
+            UserDefaults.standard.set(true, forKey: flagKey)
+        } catch {
+            // Leave the flag unset so this retries next launch instead of
+            // silently leaving the shelf named "Pantry".
+        }
     }
 
     /// One-time launch migration: converts every pre-existing InboxItem row

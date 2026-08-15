@@ -26,10 +26,11 @@ enum OccurrenceStatus {
 }
 
 /// A recurring habit tracked day by day. `daysOfWeek` says which days it
-/// applies to; `timesPerDay` and `reminderTimesOfDay` (one time-of-day per
-/// occurrence, in minutes since midnight) drive how many local reminders
-/// get scheduled on each applicable day. Each occurrence is tracked
-/// individually (complete/missed/excused/untouched) — see HabitLog.
+/// applies to; `timesPerDay` and `idealTimesOfDay` (one time-of-day per
+/// occurrence, in minutes since midnight) drive how many occurrences get
+/// placed on the calendar on each applicable day, and when. Each
+/// occurrence is tracked individually (complete/missed/excused/untouched)
+/// — see HabitLog.
 @Model
 final class Habit {
     var id: UUID
@@ -38,14 +39,28 @@ final class Habit {
     var timesPerDay: Int = 1
     /// Calendar weekday numbering: 1 = Sunday ... 7 = Saturday.
     var daysOfWeek: [Int] = [1, 2, 3, 4, 5, 6, 7]
-    /// Minutes since midnight, one per occurrence — count should track `timesPerDay`.
+    /// No longer independently editable or used for any push notification
+    /// (habits don't get their own — see the Daily Check-Ins digest in
+    /// Settings instead) — `HabitEditView` keeps this mirrored to
+    /// `idealTimesOfDay` on every save purely so it doesn't drift stale,
+    /// since `HabitImportService` still reads/writes this same shape.
     var reminderTimesOfDay: [Int] = [540]
-    /// Same shape as `reminderTimesOfDay` (one per occurrence, minutes
-    /// since midnight, count tracks `timesPerDay`), but this is what the
-    /// AI Scheduler actually tries to place the habit near — the
-    /// notification reminder and the scheduler's target time don't have
-    /// to be the same moment.
+    /// Minutes since midnight, one per occurrence (count tracks
+    /// `timesPerDay`) — what the AI Scheduler actually tries to place the
+    /// habit at, when that occurrence's own `timeMode` is `.specific`.
     var idealTimesOfDay: [Int] = [540]
+    /// One `HabitOccurrenceTimeMode` raw value per occurrence (count
+    /// tracks `timesPerDay`) — see that type's doc comment. An index past
+    /// the end (any habit created before this existed, or a new
+    /// occurrence added by bumping `timesPerDay` without yet touching
+    /// this) reads as `.specific` via `timeMode(for:)`, so nothing
+    /// changes behavior until the user actually picks something else.
+    var occurrenceTimeModesRaw: [String] = []
+
+    func timeMode(for occurrenceIndex: Int) -> HabitOccurrenceTimeMode {
+        guard occurrenceIndex < occurrenceTimeModesRaw.count else { return .specific }
+        return HabitOccurrenceTimeMode(rawValue: occurrenceTimeModesRaw[occurrenceIndex]) ?? .specific
+    }
     var sortOrder: Int = 0
 
     /// How long the AI Scheduler should block off for this habit, in
@@ -140,17 +155,22 @@ final class Habit {
         log(on: date, calendar: calendar)?.occurrenceStatus(index) ?? .none
     }
 
-    /// The next reminder still ahead of this habit, used to order the Today
-    /// list like a queue of "what's coming up next" rather than a fixed
-    /// list. Scans forward from today (up to a week) for the earliest
-    /// applicable day that still has an unresolved occurrence — one nobody
-    /// has marked complete/missed/excused — and returns that occurrence's
-    /// reminder time. A day with nothing left unresolved (today, once every
-    /// occurrence is settled) rolls forward to the next applicable day,
-    /// whose occurrences are all unresolved by definition. Returns nil only
-    /// if every applicable day in the window is already fully resolved.
-    func nextReminderDate(asOf referenceDate: Date = .now, calendar: Calendar = .current) -> Date? {
-        guard !reminderTimesOfDay.isEmpty else { return nil }
+    /// The next target time still ahead of this habit, used to order the
+    /// Today list like a queue of "what's coming up next" rather than a
+    /// fixed list. Scans forward from today (up to a week) for the
+    /// earliest applicable day that still has an unresolved occurrence —
+    /// one nobody has marked complete/missed/excused — and returns that
+    /// occurrence's own target time: its real `idealTimesOfDay` slot for
+    /// a Specific-Time occurrence, or a fixed stand-in time for an AM
+    /// (7am), Midday (noon), or PM (9pm) one — those don't have a real
+    /// time of their own (see `HabitOccurrenceTimeMode`), but still need
+    /// *something* to sort by here. A day with nothing left unresolved
+    /// (today, once every occurrence is settled) rolls forward to the
+    /// next applicable day, whose occurrences are all unresolved by
+    /// definition. Returns nil only if every applicable day in the window
+    /// is already fully resolved.
+    func nextTargetDate(asOf referenceDate: Date = .now, calendar: Calendar = .current) -> Date? {
+        guard timesPerDay > 0 else { return nil }
         var cursor = calendar.startOfDay(for: referenceDate)
         for _ in 0..<7 {
             if isApplicable(on: cursor, calendar: calendar) {
@@ -158,7 +178,13 @@ final class Habit {
                 for index in 0..<max(timesPerDay, 1) {
                     let status = dayLog?.occurrenceStatus(index) ?? .none
                     guard status == .none else { continue }
-                    let minutes = index < reminderTimesOfDay.count ? reminderTimesOfDay[index] : (reminderTimesOfDay.last ?? 0)
+                    let minutes: Int
+                    switch timeMode(for: index) {
+                    case .am: minutes = 7 * 60
+                    case .midday: minutes = 12 * 60
+                    case .pm: minutes = 21 * 60
+                    case .specific: minutes = index < idealTimesOfDay.count ? idealTimesOfDay[index] : (idealTimesOfDay.last ?? 0)
+                    }
                     return calendar.date(byAdding: .minute, value: minutes, to: cursor)
                 }
             }

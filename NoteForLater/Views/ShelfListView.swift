@@ -8,6 +8,10 @@ import SwiftData
 /// (name/icon/color/AI-Scheduler eligibility).
 struct ShelfListView: View {
     let shelf: Shelf
+    /// Defaults to the shelf's own name — overridden by `KitchenView` when
+    /// embedding this as the Pantry pane, where the shelf itself is named
+    /// "The Kitchen" but this specific pane should read "Pantry" instead.
+    let displayName: String
 
     @Environment(\.modelContext) private var modelContext
     @Query private var allTasks: [TaskItem]
@@ -20,14 +24,16 @@ struct ShelfListView: View {
     @FocusState private var isCaptureFocused: Bool
 
     /// Move targets offered on a task's Tinder card — same convention as
-    /// the Attribute Review flows: Pantry holds ingredients, not tasks, so
-    /// it's never a routing destination.
+    /// the Attribute Review flows: the Kitchen shelf holds Pantry
+    /// ingredients (and Cookbook recipes), not tasks, so it's never a
+    /// routing destination.
     private var routableShelves: [Shelf] {
-        allShelves.filter { !$0.isPantry }
+        allShelves.filter { !$0.isKitchen }
     }
 
-    init(shelf: Shelf) {
+    init(shelf: Shelf, displayName: String? = nil) {
         self.shelf = shelf
+        self.displayName = displayName ?? shelf.name
         let shelfID = shelf.id
         _allTasks = Query(
             filter: #Predicate<TaskItem> { $0.shelf?.id == shelfID },
@@ -48,7 +54,21 @@ struct ShelfListView: View {
     /// visible here (faded, struck through — see `TaskRow`) the whole
     /// time in between, instead of vanishing the instant it's checked off.
     private var visibleTasks: [TaskItem] {
-        allTasks.filter { !$0.isCompleted || !($0.scheduledBlocks ?? []).isEmpty }
+        allTasks
+            .filter { !$0.isCompleted || !($0.scheduledBlocks ?? []).isEmpty }
+            .sorted { sortDate(for: $0) < sortDate(for: $1) }
+    }
+
+    /// A recurring task sorts by its own next occurrence (soonest first)
+    /// rather than `createdAt` — otherwise it'd sit wherever it happened
+    /// to be added instead of where it's actually coming up next. A
+    /// recurring task with nothing left coming (past `recurrenceEndDate`)
+    /// sorts to the very end rather than fighting for a spot among what's
+    /// still upcoming. Every other task keeps the query's own oldest-first
+    /// `createdAt` order.
+    private func sortDate(for task: TaskItem) -> Date {
+        guard task.isRecurring else { return task.createdAt }
+        return task.nextRecurringOccurrenceDate() ?? .distantFuture
     }
 
     var body: some View {
@@ -63,7 +83,7 @@ struct ShelfListView: View {
                     Button {
                         selectedTask = task
                     } label: {
-                        TaskRow(task: task, showsScheduledBadge: shelf.hasEnabledSchedulingRules, showsPantryAge: shelf.isPantry)
+                        TaskRow(task: task, showsScheduledBadge: shelf.hasEnabledSchedulingRules, showsPantryAge: shelf.isKitchen)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .contentShape(Rectangle())
                     }
@@ -77,7 +97,7 @@ struct ShelfListView: View {
                         }
                     }
                     .swipeActions(edge: .leading) {
-                        if shelf.isPantry {
+                        if shelf.isKitchen {
                             Button {
                                 task.createdAt = .now
                             } label: {
@@ -120,11 +140,11 @@ struct ShelfListView: View {
     /// content underneath it, instead of it cross-fading on its own.
     private var header: some View {
         HStack {
-            Text(shelf.name)
+            Text(displayName)
                 .font(.title2.weight(.bold))
                 .lineLimit(1)
             Spacer()
-            if shelf.isPantry {
+            if shelf.isKitchen {
                 Button {
                     isShowingReceiptImporter = true
                 } label: {
@@ -151,7 +171,7 @@ struct ShelfListView: View {
     /// shelf instead of into the Inbox.
     private var captureBar: some View {
         HStack {
-            TextField("Add to \(shelf.name)", text: $draftTitle, axis: .vertical)
+            TextField("Add to \(displayName)", text: $draftTitle, axis: .vertical)
                 .submitLabel(.done)
                 .onSubmit(addTask)
                 .focused($isCaptureFocused)
@@ -188,7 +208,7 @@ struct ShelfListView: View {
         isCaptureFocused = false
         // Pantry reads oldest-first, so a new item lands at the bottom;
         // every other shelf reads newest-first, so it lands at the top.
-        let anchor: UnitPoint = shelf.isPantry ? .bottom : .top
+        let anchor: UnitPoint = shelf.isKitchen ? .bottom : .top
         DispatchQueue.main.async {
             withAnimation {
                 scrollProxy?.scrollTo(task.id, anchor: anchor)

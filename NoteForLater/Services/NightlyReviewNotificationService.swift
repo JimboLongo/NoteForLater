@@ -2,7 +2,7 @@ import Foundation
 import UserNotifications
 
 /// Schedules the single daily "time for your Nightly Review" local
-/// notification — mirrors HabitNotificationService's
+/// notification — mirrors DailyDigestNotificationService's
 /// authorize/reschedule shape but for one fixed identifier instead of a
 /// per-habit prefix. Tapping it is handled in AppDelegate, which sets
 /// NightlyReviewLaunchState.shared.pendingReview.

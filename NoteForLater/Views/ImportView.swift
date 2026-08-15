@@ -13,6 +13,13 @@ struct ImportView: View {
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \Shelf.sortOrder) private var shelves: [Shelf]
 
+    /// The Kitchen shelf (Pantry + Cookbook) is never a routing destination
+    /// for arbitrary imported rows — same reasoning as every other
+    /// task-routing picker in the app (see `InboxView.routableShelves`).
+    private var routableShelves: [Shelf] {
+        shelves.filter { !$0.isKitchen }
+    }
+
     /// nil means "Inbox" — the default.
     @State private var defaultShelf: Shelf?
     @State private var isShowingFilePicker = false
@@ -41,7 +48,7 @@ struct ImportView: View {
                 Section {
                     Picker("Default Shelf", selection: $defaultShelf) {
                         Text("Inbox").tag(nil as Shelf?)
-                        ForEach(shelves) { shelf in
+                        ForEach(routableShelves) { shelf in
                             Text(shelf.name).tag(shelf as Shelf?)
                         }
                     }

@@ -4,9 +4,9 @@ import UIKit
 import PhotosUI
 
 /// One OCR'd candidate line, checkable before it's actually added to the
-/// Pantry shelf — OCR is far less reliable than a well-formed CSV column,
-/// so (unlike the file-based imports elsewhere in the app) this shows a
-/// review step before anything is inserted.
+/// Kitchen shelf's Pantry — OCR is far less reliable than a well-formed
+/// CSV column, so (unlike the file-based imports elsewhere in the app)
+/// this shows a review step before anything is inserted.
 private struct ReceiptCandidate: Identifiable {
     let id = UUID()
     var name: String
@@ -14,7 +14,8 @@ private struct ReceiptCandidate: Identifiable {
 }
 
 /// Take a photo of a grocery receipt, OCR it, and add the checked lines to
-/// the Pantry shelf as items. Reached only from a Pantry shelf's screen.
+/// the Kitchen shelf's Pantry as items. Reached only from the Kitchen
+/// shelf's own Pantry pane.
 struct ReceiptImportView: View {
     let shelf: Shelf
     @Environment(\.modelContext) private var modelContext
@@ -36,7 +37,7 @@ struct ReceiptImportView: View {
                     ContentUnavailableView {
                         Label("Scan a Receipt", systemImage: "camera.viewfinder")
                     } description: {
-                        Text("Take a photo of a grocery receipt to pull out items for your Pantry.")
+                        Text("Take a photo of a grocery receipt to pull out items for your Kitchen's Pantry.")
                     } actions: {
                         Button("Take Photo") {
                             isShowingCamera = true
@@ -142,6 +143,6 @@ struct ReceiptImportView: View {
 }
 
 #Preview {
-    ReceiptImportView(shelf: Shelf(name: "Pantry", systemImage: "refrigerator"))
+    ReceiptImportView(shelf: Shelf(name: "The Kitchen", systemImage: "refrigerator"))
         .modelContainer(for: [TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }

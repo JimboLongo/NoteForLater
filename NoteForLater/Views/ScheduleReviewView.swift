@@ -25,7 +25,6 @@ struct ScheduleReviewView: View {
     @Query private var allBlocks: [ScheduledBlock]
     @Query private var calendarSubscriptions: [CalendarSubscription]
     @Query private var eligibleHoursWindows: [EligibleHoursWindow]
-    @Query(sort: \NamedSchedule.sortOrder) private var namedSchedules: [NamedSchedule]
 
     @State private var viewModel: ScheduleReviewViewModel?
     @State private var pickerTarget: ScheduledBlock?
@@ -47,6 +46,7 @@ struct ScheduleReviewView: View {
     /// (the push), rather than only reacting once you release past a
     /// threshold.
     @State private var dateDragOffset: CGFloat = 0
+    @State private var isCollapsingEmptyPeriods = false
 
     // AI scheduling itself is still mocked (that's a separate TODO: swap in
     // a real Claude API call). The calendar side is real — it hits Google
@@ -75,6 +75,14 @@ struct ScheduleReviewView: View {
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        isCollapsingEmptyPeriods.toggle()
+                    } label: {
+                        Image(systemName: isCollapsingEmptyPeriods ? "arrow.up.and.down.and.arrow.left.and.right" : "arrow.down.right.and.arrow.up.left")
+                    }
+                    .accessibilityLabel(isCollapsingEmptyPeriods ? "Expand Empty Periods" : "Collapse Empty Periods")
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button("Approve All") {
                         viewModel?.approveAll()
@@ -83,6 +91,19 @@ struct ScheduleReviewView: View {
                 }
             }
             .onAppear(perform: setupIfNeeded)
+            // `errorMessage` was already being set on a failed
+            // generate/regenerate (a calendar fetch throwing, most
+            // likely) but nothing ever surfaced it — a failure looked
+            // identical to "nothing changed," with no way to tell the two
+            // apart.
+            .alert("Couldn't Generate Schedule", isPresented: Binding(
+                get: { viewModel?.errorMessage != nil },
+                set: { isPresented in if !isPresented { viewModel?.errorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(viewModel?.errorMessage ?? "")
+            }
             .sheet(item: $pickerTarget) { block in
                 if let viewModel {
                     ReplacementPickerSheet(
@@ -107,19 +128,25 @@ struct ScheduleReviewView: View {
             ProgressView("Building schedule...")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
+            // The 2-Minute Task shelf's checklist rides inside
+            // DayTimelineGridView's own ScrollView now (as its first
+            // piece of content, above the grid) rather than sitting
+            // outside it here — so it scrolls away with the rest of the
+            // timeline instead of staying pinned above it.
             DayTimelineGridView(
                 rows: timelineRows(viewModel: viewModel),
                 eligibleHoursWindows: eligibleHoursWindows,
-                namedSchedules: namedSchedules,
                 targetDate: viewModel.targetDate,
                 lockedStore: lockedStore,
                 viewModel: viewModel,
                 isToday: isToday,
                 allTasks: allTasks,
                 allShelves: allShelves,
+                allHabits: allHabits,
                 onSaveEvent: { updated in viewModel.saveEventEdit(updated) },
                 onDeleteBlock: { block in viewModel.deleteBlock(block) },
-                onPickReplacement: { block in pickerTarget = block }
+                onPickReplacement: { block in pickerTarget = block },
+                isCollapsingEmptyPeriods: isCollapsingEmptyPeriods
             )
             .refreshable {
                 await viewModel.loadCalendarEvents()
@@ -153,7 +180,10 @@ struct ScheduleReviewView: View {
         )
         vm.loadExistingBlocks(allBlocks)
         viewModel = vm
-        Task { await vm.loadCalendarEvents() }
+        Task {
+            await vm.loadCalendarEvents()
+            await vm.autoPlaceHabitsAndRecurringTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+        }
     }
 
     private func configureCalendarService() {
@@ -172,11 +202,13 @@ struct ScheduleReviewView: View {
         guard let viewModel else { return }
         let newDate = Calendar.current.date(byAdding: .day, value: days, to: viewModel.targetDate) ?? viewModel.targetDate
         await viewModel.changeTargetDate(to: newDate, existingBlocks: allBlocks)
+        await viewModel.autoPlaceHabitsAndRecurringTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
     }
 
     private func goToToday() async {
         guard let viewModel else { return }
         await viewModel.changeTargetDate(to: .now, existingBlocks: allBlocks)
+        await viewModel.autoPlaceHabitsAndRecurringTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
     }
 
     /// In-content header (not the system nav bar) so the full date reads
@@ -271,11 +303,11 @@ struct ScheduleReviewView: View {
     /// NightlyReviewView's own Inbox-step filter, so this prompt and that
     /// one agree on what counts as "needs attention."
     private var inboxTasksToReview: [TaskItem] {
-        allTasks.filter { $0.shelf == nil && !$0.attributeReviewExcluded }
+        allTasks.filter { $0.shelf == nil && !$0.isSnoozedFromAttributeReview }
     }
 
     private var routableShelves: [Shelf] {
-        allShelves.filter { !$0.isPantry }
+        allShelves.filter { !$0.isKitchen }
     }
 
     /// Frozen directly above `dateSwiper` — regenerating rebuilds from
@@ -351,8 +383,9 @@ struct ScheduleReviewView: View {
         .sheet(isPresented: $showPastReviewSheet) {
             NavigationStack {
                 OverdueBlocksReviewList(
-                    blocks: ScheduleReviewViewModel.reviewableBlocks(from: allBlocks),
-                    onToggle: { block in
+                    items: ScheduleReviewViewModel.reviewableBlocks(from: allBlocks).map { .block($0) },
+                    onToggle: { item in
+                        guard case .block(let block) = item else { return }
                         viewModel?.toggleComplete(block)
                     },
                     onDone: {
@@ -506,24 +539,83 @@ struct ReplacementPickerSheet: View {
     let onAuto: () -> Void
     @Environment(\.dismiss) private var dismiss
 
+    private struct ShelfGroup: Identifiable {
+        let id: String
+        let title: String
+        let tasks: [TaskItem]
+        let color: Color
+    }
+
+    /// Same shelf-grouped, colored, due-date-first layout as
+    /// `EmptySlotPickerSheet` (`DayTimelineGridView.swift`) — that sheet
+    /// and this one both boil down to "pick an unscheduled to-do to land
+    /// on a given time," just reached from a different tap (an open
+    /// slot's own "add here" vs. an existing block's "replace"), so they
+    /// should read as the same picker rather than one being a flat list.
+    private var groups: [ShelfGroup] {
+        let byShelf = Dictionary(grouping: candidates) { $0.shelf?.id }
+        func dueDateFirst(_ lhs: TaskItem, _ rhs: TaskItem) -> Bool {
+            switch (lhs.dueDate, rhs.dueDate) {
+            case let (l?, r?): return l < r
+            case (_?, nil): return true
+            case (nil, _?): return false
+            case (nil, nil): return false
+            }
+        }
+        let shelfGroups = byShelf.values
+            .compactMap { tasks -> ShelfGroup? in
+                guard let shelf = tasks.first?.shelf else { return nil }
+                return ShelfGroup(id: shelf.id.uuidString, title: shelf.name, tasks: tasks.sorted(by: dueDateFirst), color: shelf.color)
+            }
+            .sorted { ($0.tasks.first?.shelf?.sortOrder ?? 0) < ($1.tasks.first?.shelf?.sortOrder ?? 0) }
+        let inboxTasks = (byShelf[nil] ?? []).sorted(by: dueDateFirst)
+        return inboxTasks.isEmpty ? shelfGroups : shelfGroups + [ShelfGroup(id: "inbox", title: "Inbox", tasks: inboxTasks, color: .secondary)]
+    }
+
     var body: some View {
         NavigationStack {
-            List {
+            Group {
                 if candidates.isEmpty {
-                    Text("No unscheduled to-dos available.")
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(candidates) { task in
-                    Button {
-                        onPick(task)
-                    } label: {
-                        VStack(alignment: .leading) {
-                            Text(task.title)
-                            Text("\(task.durationLabel) · \(task.priority.label)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                    ContentUnavailableView("Nothing to Schedule", systemImage: "tray", description: Text("No unscheduled to-dos available."))
+                } else {
+                    List {
+                        ForEach(groups) { group in
+                            Section {
+                                ForEach(group.tasks) { task in
+                                    Button {
+                                        onPick(task)
+                                    } label: {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(task.title)
+                                                .font(.body.weight(.medium))
+                                                .foregroundStyle(.primary)
+                                            Text("\(task.durationLabel) \u{00B7} \(task.priority.label)")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.vertical, 2)
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .listRowBackground(
+                                        RoundedRectangle(cornerRadius: 10)
+                                            .fill(group.color.opacity(0.15))
+                                            .padding(.vertical, 2)
+                                    )
+                                    .listRowSeparator(.hidden)
+                                }
+                            } header: {
+                                HStack(spacing: 5) {
+                                    Circle()
+                                        .fill(group.color)
+                                        .frame(width: 6, height: 6)
+                                    Text(group.title)
+                                }
+                            }
                         }
                     }
+                    .listStyle(.plain)
                 }
             }
             .navigationTitle(title)

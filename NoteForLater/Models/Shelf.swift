@@ -41,11 +41,49 @@ final class Shelf {
     /// Priority section on the TaskCard and it's no longer required for the
     /// task to count as complete.
     var hasPriority: Bool = true
-    /// Marks this as *the* Pantry shelf, created/removed by the "Meal
-    /// Planning" toggle in Settings — a flag rather than matching on name
-    /// so a rename doesn't silently break its special handling (excluded
-    /// from Inbox routing; the one shelf a receipt scan can import into).
-    var isPantry: Bool = false
+    /// Whether tasks on this shelf can be given a "Remind Me In" — off
+    /// hides that question on the TaskCard entirely. On, a task here (or
+    /// sent here) can pick a count + `RecurrenceUnit` (Days/Weeks/Months)
+    /// that reappears it in the Nightly Review / Inbox attribute-review
+    /// queue once that much time has passed — see
+    /// `TaskItem.applyRemindIn`/`isDueForFutureReminder`, which reuse the
+    /// same "hidden until a date" mechanism the existing Snooze action
+    /// already provides.
+    var tracksFutureReminder: Bool = false
+    /// Marks this as *the* Kitchen shelf (Pantry + Cookbook), created/
+    /// removed by the "Meal Planning" toggle in Settings — a flag rather
+    /// than matching on name so a rename doesn't silently break its
+    /// special handling (excluded from Inbox routing; the one shelf a
+    /// receipt scan can import into; routed to `KitchenView` instead of
+    /// the plain `ShelfListView`).
+    // Renamed from `isPantry` when the Kitchen shelf grew a Cookbook pane
+    // alongside Pantry — `originalName` keeps lightweight migration
+    // mapping the old stored attribute onto this property, so an existing
+    // Pantry shelf doesn't silently lose this flag (and, with it, its
+    // whole special routing/exclusion behavior) on first launch post-update.
+    @Attribute(originalName: "isPantry")
+    var isKitchen: Bool = false
+    /// Marks this as *the* 2-Minute Task shelf — a permanent shelf (see
+    /// `ShelvesView.deleteShelves`) that gets its own checklist step
+    /// during Nightly Review and its own untimed checklist above the
+    /// calendar (`ScheduleReviewView.twoMinuteTasksSection`/
+    /// `DayTimelineGridView.twoMinuteTasksSection`) — its tasks never get
+    /// a start/end time on the calendar itself (see
+    /// `AISchedulingService`'s doc comment). Picked from Settings >
+    /// Special Shelves rather than auto-detected by name, and kept
+    /// unique there (choosing a shelf clears whichever other shelf had
+    /// it, and clears `isRecurringTasks` on the same shelf).
+    var isTwoMinuteTasks: Bool = false
+    /// Marks this as *the* Recurring Tasks shelf — a permanent shelf (see
+    /// `ShelvesView.deleteShelves`) whose tasks (see
+    /// `TaskItem.isRecurring`) get placed onto the calendar at their own
+    /// fixed time on every occurrence day, the same unconditional way a
+    /// habit lands at its own target time (see
+    /// `AISchedulingService.placeHabitsAndRecurringTasks`) — never
+    /// competing for free time against a shelf's rule-packed tasks.
+    /// Picked from Settings > Special Shelves, kept unique there the same
+    /// way `isTwoMinuteTasks` is.
+    var isRecurringTasks: Bool = false
 
     @Relationship(deleteRule: .nullify, inverse: \TaskItem.shelf)
     var tasks: [TaskItem]? = []
@@ -68,21 +106,25 @@ final class Shelf {
         (schedulingRules ?? []).contains { $0.isEnabled }
     }
 
-    /// Whether duration is actually tracked here — Pantry is forced off
-    /// unconditionally, regardless of `tracksDuration`'s stored value, so
-    /// nothing added to it can end up with a duration even from stale state
-    /// (e.g. a Pantry shelf created before this field existed).
-    var effectiveTracksDuration: Bool { !isPantry && tracksDuration }
+    /// Whether duration is actually tracked here — the Kitchen shelf is
+    /// forced off unconditionally, regardless of `tracksDuration`'s stored
+    /// value, so nothing added to it can end up with a duration even from
+    /// stale state (e.g. a Kitchen shelf created before this field existed).
+    var effectiveTracksDuration: Bool { !isKitchen && tracksDuration }
 
-    /// Whether due dates are actually tracked here — same Pantry override
+    /// Whether due dates are actually tracked here — same Kitchen override
     /// as `effectiveTracksDuration`.
-    var effectiveTracksDueDates: Bool { !isPantry && hasDueDates }
+    var effectiveTracksDueDates: Bool { !isKitchen && hasDueDates }
 
-    /// Whether Next Step is actually tracked here — same Pantry override.
-    var effectiveTracksNextStep: Bool { !isPantry && hasNextStep }
+    /// Whether Next Step is actually tracked here — same Kitchen override.
+    var effectiveTracksNextStep: Bool { !isKitchen && hasNextStep }
 
-    /// Whether Priority is actually tracked here — same Pantry override.
-    var effectiveTracksPriority: Bool { !isPantry && hasPriority }
+    /// Whether Priority is actually tracked here — same Kitchen override.
+    var effectiveTracksPriority: Bool { !isKitchen && hasPriority }
+
+    /// Whether "Remind Me In" is actually tracked here — same Kitchen
+    /// override.
+    var effectiveTracksFutureReminder: Bool { !isKitchen && tracksFutureReminder }
 
     /// A task landing on this shelf — routed from the Inbox, or added
     /// directly here — keeps whatever duration it already had; only a task
@@ -139,7 +181,8 @@ final class Shelf {
     static let iconOptions = [
         "checklist", "cart", "lightbulb", "archivebox", "tray",
         "star", "flag", "book", "briefcase", "house",
-        "heart", "dollarsign.circle", "airplane", "gift", "wrench.and.screwdriver"
+        "heart", "dollarsign.circle", "airplane", "gift", "wrench.and.screwdriver",
+        "2.circle.fill", "arrow.triangle.2.circlepath"
     ]
 
     /// Earth tones plus a handful of blues/greens, all chosen to stay

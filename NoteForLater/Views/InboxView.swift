@@ -48,10 +48,11 @@ struct InboxView: View {
     @State private var attributeReviewSession: AttributeReviewSession?
     @State private var showingAllCaughtUpAlert = false
 
-    /// Pantry is ingredients-only, filled by hand or a receipt scan — never
-    /// a routing destination for arbitrary Inbox brain-dumps.
+    /// The Kitchen shelf (Pantry + Cookbook) is never a routing
+    /// destination for arbitrary Inbox brain-dumps — Pantry is
+    /// ingredients-only, filled by hand or a receipt scan.
     private var routableShelves: [Shelf] {
-        shelves.filter { !$0.isPantry }
+        shelves.filter { !$0.isKitchen }
     }
 
     private var trimmedSearchQuery: String {
@@ -72,14 +73,14 @@ struct InboxView: View {
                         Text("Inbox zero. Nice.")
                             .foregroundStyle(.secondary)
                     }
-                    ForEach(items) { item in
+                    ForEach(sortedItems) { item in
                         Button {
                             selectedTask = item
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(item.title)
                                     .lineLimit(2)
-                                Text(daysSittingText(item))
+                                Text(item.isSnoozedFromAttributeReview ? snoozeRemainingText(item) : daysSittingText(item))
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -87,6 +88,7 @@ struct InboxView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .opacity(item.isSnoozedFromAttributeReview ? 0.5 : 1)
                         .swipeActions(edge: .trailing) {
                             Button(role: .destructive) {
                                 viewModel?.discard(item)
@@ -290,8 +292,14 @@ struct InboxView: View {
     /// Inbox tasks oldest-added first — matches `allTasks`'s
     /// `createdAt`-ascending order within each group.
     private func startAttributeReview() {
-        let shelfTasks = allTasks.filter { $0.shelf != nil && !($0.shelf!.isPantry) && $0.isMissingAttributes && !$0.attributeReviewExcluded }
-        let unsortedTasks = allTasks.filter { $0.shelf == nil && !$0.attributeReviewExcluded }
+        // A task also lands here once its own "Remind Me In" timer is up
+        // (see `TaskItem.isDueForFutureReminder`) — independent of
+        // `isMissingAttributes`, matching `NightlyReviewView.startAttributeReviewSession`.
+        let shelfTasks = allTasks.filter {
+            $0.shelf != nil && !($0.shelf!.isKitchen) && !$0.isSnoozedFromAttributeReview
+                && ($0.isMissingAttributes || $0.isDueForFutureReminder)
+        }
+        let unsortedTasks = allTasks.filter { $0.shelf == nil && !$0.isSnoozedFromAttributeReview }
         let queue = shelfTasks + unsortedTasks
         guard !queue.isEmpty else {
             showingAllCaughtUpAlert = true
@@ -309,6 +317,24 @@ struct InboxView: View {
         ).day ?? 0
         if days <= 0 { return "Added today" }
         return "\(days) day\(days == 1 ? "" : "s") in inbox"
+    }
+
+    /// Snoozed items sort to the bottom of the list — still oldest-first
+    /// within each group, since `items` itself already arrives sorted that
+    /// way and `sorted(by:)` is stable — rather than disappearing outright,
+    /// so a snoozed brain-dump doesn't get lost, just deprioritized.
+    private var sortedItems: [TaskItem] {
+        items.sorted { !$0.isSnoozedFromAttributeReview && $1.isSnoozedFromAttributeReview }
+    }
+
+    /// Whole days remaining until `attributeReviewSnoozedUntil`, rounded up
+    /// so "snoozed until 11pm tomorrow" still reads as "1 day" rather than
+    /// "0 days" a minute after snoozing.
+    private func snoozeRemainingText(_ item: TaskItem) -> String {
+        guard let until = item.attributeReviewSnoozedUntil else { return "" }
+        let seconds = until.timeIntervalSince(.now)
+        let days = max(1, Int(ceil(seconds / 86400)))
+        return "Snoozed \(days) day\(days == 1 ? "" : "s")"
     }
 
     // MARK: - Live search
@@ -412,7 +438,7 @@ struct InboxView: View {
     @ViewBuilder
     private func searchTaskRow(for task: TaskItem) -> some View {
         if let shelf = task.shelf {
-            TaskRow(task: task, showsScheduledBadge: shelf.hasEnabledSchedulingRules, showsPantryAge: shelf.isPantry)
+            TaskRow(task: task, showsScheduledBadge: shelf.hasEnabledSchedulingRules, showsPantryAge: shelf.isKitchen)
         } else {
             VStack(alignment: .leading, spacing: 2) {
                 Text(task.title).lineLimit(2)

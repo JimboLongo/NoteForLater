@@ -16,6 +16,7 @@ struct SchedulingRuleEditView: View {
     @State private var maxTotalMinutes: Int
     @State private var maxTaskCount: Int
     @State private var maxMinutesPerTask: Int
+    @State private var maxDurationTaskCountEnabled: Bool
 
     init(rule: SchedulingRule) {
         self.rule = rule
@@ -24,6 +25,7 @@ struct SchedulingRuleEditView: View {
         _maxTotalMinutes = State(initialValue: rule.maxTotalMinutes)
         _maxTaskCount = State(initialValue: rule.maxTaskCount)
         _maxMinutesPerTask = State(initialValue: rule.maxMinutesPerTask)
+        _maxDurationTaskCountEnabled = State(initialValue: rule.maxDurationTaskCountEnabled)
     }
 
     var body: some View {
@@ -57,6 +59,10 @@ struct SchedulingRuleEditView: View {
                         .foregroundStyle(.secondary)
                 case .maxDuration:
                     Stepper("Up to \(TaskItem.durationLabel(for: maxTotalMinutes)) total", value: $maxTotalMinutes, in: 15...480, step: 15)
+                    Toggle("Limit number of tasks", isOn: $maxDurationTaskCountEnabled.animation())
+                    if maxDurationTaskCountEnabled {
+                        Stepper("Up to \(maxTaskCount) task\(maxTaskCount == 1 ? "" : "s")", value: $maxTaskCount, in: 1...10)
+                    }
                 case .maxTaskCount:
                     Stepper("Up to \(maxTaskCount) task\(maxTaskCount == 1 ? "" : "s")", value: $maxTaskCount, in: 1...10)
                     Stepper("\(maxMinutesPerTask) min max per task", value: $maxMinutesPerTask, in: 5...240, step: 5)
@@ -89,7 +95,8 @@ struct SchedulingRuleEditView: View {
             fillStrategy: fillStrategy,
             maxTotalMinutes: maxTotalMinutes,
             maxTaskCount: maxTaskCount,
-            maxMinutesPerTask: maxMinutesPerTask
+            maxMinutesPerTask: maxMinutesPerTask,
+            maxDurationTaskCountEnabled: maxDurationTaskCountEnabled
         )
     }
 
@@ -99,6 +106,7 @@ struct SchedulingRuleEditView: View {
         rule.maxTotalMinutes = maxTotalMinutes
         rule.maxTaskCount = maxTaskCount
         rule.maxMinutesPerTask = maxMinutesPerTask
+        rule.maxDurationTaskCountEnabled = maxDurationTaskCountEnabled
         dismiss()
     }
 }

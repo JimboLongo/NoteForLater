@@ -88,7 +88,11 @@ struct ShelfCarouselView: View {
         case .inbox:
             InboxView()
         case .shelf(let shelf):
-            ShelfListView(shelf: shelf)
+            if shelf.isKitchen {
+                KitchenView(shelf: shelf)
+            } else {
+                ShelfListView(shelf: shelf)
+            }
         }
     }
 

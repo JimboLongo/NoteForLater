@@ -5,8 +5,9 @@ import UserNotifications
 /// it to QuickActionService. Warm-app taps are handled by SceneDelegate
 /// instead. Also the app's UNUserNotificationCenterDelegate, so a tap on
 /// the Nightly Review notification (see NightlyReviewNotificationService)
-/// can be routed to NightlyReviewLaunchState regardless of whether the app
-/// was cold-launched, backgrounded, or already in the foreground.
+/// or a Daily Digest notification (see DailyDigestNotificationService) can
+/// be routed to their respective launch states regardless of whether the
+/// app was cold-launched, backgrounded, or already in the foreground.
 final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(
         _ application: UIApplication,
@@ -52,14 +53,17 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
     ) {
         if response.notification.request.identifier == NightlyReviewNotificationService.identifier {
             NightlyReviewLaunchState.shared.pendingReview = true
+        } else if response.notification.request.identifier.hasPrefix(DailyDigestNotificationService.identifierPrefix) {
+            DailyDigestLaunchState.shared.pendingCheckIn = true
         }
         completionHandler()
     }
 
     /// Without this, a notification is silently swallowed while the app is
-    /// already in the foreground — fine for most reminders, but the
-    /// Nightly Review notification is the intended entry point into the
-    /// review flow, so it still needs to show as a banner even then.
+    /// already in the foreground — fine for most reminders, but both the
+    /// Nightly Review and Daily Digest notifications are meant as entry
+    /// points into their own flows, so they still need to show as a
+    /// banner even then.
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,

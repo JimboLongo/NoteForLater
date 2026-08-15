@@ -19,7 +19,6 @@ struct NightlyReviewView: View {
     @Query private var eligibleHoursWindows: [EligibleHoursWindow]
     @Query private var calendarSubscriptions: [CalendarSubscription]
     @Query(sort: \TaskItem.createdAt) private var allTasks: [TaskItem]
-    @Query(sort: \NamedSchedule.sortOrder) private var namedSchedules: [NamedSchedule]
 
     @State private var step: Step = .chooseDay
     /// The day being reviewed — defaults to today, but overridable (e.g.
@@ -36,6 +35,11 @@ struct NightlyReviewView: View {
     /// launches it instead of landing on a bespoke mini-flow that happens
     /// to do almost the same thing.
     @State private var attributeReviewSession: AttributeReviewSession?
+    /// Snapshotted the moment the 2-Minute Tasks step is entered (see
+    /// `advance()`) rather than computed live off `!task.isCompleted` — so
+    /// checking a task off leaves it in the list, strikethrough, instead of
+    /// yanking it out from under the user mid-review.
+    @State private var twoMinuteReviewTaskIDs: Set<UUID> = []
     /// Drives the Plan step's Replace-Task sheet — same
     /// `ReplacementPickerSheet` the regular calendar view uses (see
     /// `ScheduleReviewView`).
@@ -46,7 +50,7 @@ struct NightlyReviewView: View {
     private let schedulingService: AISchedulingServiceProtocol = MockAISchedulingService()
 
     private enum Step: Int, CaseIterable {
-        case chooseDay, today, inbox, tomorrow
+        case chooseDay, today, inbox, twoMinuteTasks, tomorrow
 
         /// `planDate` is only meaningful for `.tomorrow` — the day right
         /// after whichever day was picked in Choose Day, not
@@ -57,6 +61,7 @@ struct NightlyReviewView: View {
             case .chooseDay: return "Which Day?"
             case .today: return "Review Schedule"
             case .inbox: return "Sort Your Inbox"
+            case .twoMinuteTasks: return "2-Minute Tasks"
             case .tomorrow:
                 let formatter = DateFormatter()
                 formatter.dateFormat = "EEE MMMM d, yyyy"
@@ -85,6 +90,7 @@ struct NightlyReviewView: View {
                 case .chooseDay: chooseDayStep
                 case .today: todayStep
                 case .inbox: inboxStep
+                case .twoMinuteTasks: twoMinuteTasksStep
                 case .tomorrow: tomorrowStep
                 }
             }
@@ -171,7 +177,23 @@ struct NightlyReviewView: View {
         if next == .inbox {
             startAttributeReviewSession()
         }
+        if next == .twoMinuteTasks {
+            let pending = (twoMinuteShelf?.tasks ?? []).filter { !$0.isCompleted && $0.isEligibleToStart(on: reviewDate) }
+            twoMinuteReviewTaskIDs = Set(pending.map(\.id))
+        }
         if next == .tomorrow, let todayViewModel, let tomorrowViewModel {
+            // Any habit occurrence the Today review showed but never got
+            // checked off — timed or not — is done being reviewable the
+            // moment the day is handed off to tomorrow's plan, so it's
+            // marked missed right here, synchronously, before any of the
+            // async cleanup below. Deliberately not folded into
+            // `clearIncompletePastBlocks` itself (used here too, just
+            // below) — that function is also what the plain intra-day
+            // Regenerate flow calls, where a passed-but-undone habit
+            // should still get a fresh shot later *today*, not be
+            // written off; only Nightly Review's own end-of-day handoff
+            // means "no more chances left."
+            markUnresolvedHabitOccurrencesAsMissed()
             Task {
                 // Whatever's still unchecked from the Today step is freed
                 // up here — unscheduled from its stale block so it's a
@@ -188,9 +210,15 @@ struct NightlyReviewView: View {
                 // happens (see `purgeCompletedBlocks`); a plain regenerate
                 // leaves a completed block faded in place instead.
                 await tomorrowViewModel.purgeCompletedBlocks()
-                if tomorrowViewModel.blocks.isEmpty {
-                    await tomorrowViewModel.generateProposedSchedule(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
-                }
+                // Always re-run, not just when `blocks` is still empty —
+                // the Inbox step just above this can route tasks onto a
+                // shelf moments before this runs, and those need to be
+                // considered as real candidates for tomorrow's plan too.
+                // `regenerateSingleDay` only touches non-approved,
+                // non-locked blocks on `targetDate` itself (never walking
+                // to later days), so this stays safe and cheap to call
+                // every time rather than only on the very first pass.
+                await tomorrowViewModel.regenerateSingleDay(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
             }
         }
     }
@@ -258,33 +286,143 @@ struct NightlyReviewView: View {
         return min(.now, dayEnd)
     }
 
-    /// Every block (complete or not) up through `reviewCutoff`, so a
+    /// Every block (complete or not) up through `reviewCutoff`, plus any
+    /// block already marked complete no matter how far out it's dated — a
+    /// task knocked out ahead of its scheduled day shouldn't have to wait
+    /// for that future day's own review to get checked off here. So a
     /// backlog left over from a busy week doesn't just quietly pile up
-    /// unreviewed, but a review for a past day never leaks in blocks from
-    /// today or later. `markComplete` isn't actually scoped to
-    /// `todayViewModel`'s own `targetDate` internally, so reusing it here
-    /// for a block from any earlier day is safe.
+    /// unreviewed, but a review for a past day never leaks in an
+    /// *incomplete* block from today or later. `markComplete` isn't
+    /// actually scoped to `todayViewModel`'s own `targetDate` internally,
+    /// so reusing it here for a block from any earlier or later day is safe.
     private var reviewableBlocks: [ScheduledBlock] {
         allBlocks
-            .filter { $0.startTime < reviewCutoff }
+            .filter { $0.startTime < reviewCutoff || $0.isCompleted }
             .sorted { $0.startTime < $1.startTime }
+    }
+
+    /// Blocks and open habit occurrences mixed into one list, organized by
+    /// time within each day — see `ReviewItem`/`OverdueBlocksReviewList`.
+    private var reviewItems: [ReviewItem] {
+        reviewableBlocks.map { .block($0) } + openHabitOccurrencesForReview.map { .habit($0) }
     }
 
     @ViewBuilder
     private var todayStep: some View {
         if let todayViewModel {
-            OverdueBlocksReviewList(blocks: reviewableBlocks) { block in
-                todayViewModel.toggleComplete(block)
+            OverdueBlocksReviewList(items: reviewItems) { item in
+                switch item {
+                case .block(let block):
+                    todayViewModel.toggleComplete(block)
+                case .habit(let occurrence):
+                    toggleHabitReviewOccurrence(habit: occurrence.habit, index: occurrence.index, isCompleted: occurrence.isCompleted, day: occurrence.targetTime)
+                }
             }
         } else {
             ProgressView()
         }
     }
 
+    /// Stand-in minutes-since-midnight for an AM/Midday/PM occurrence,
+    /// same idea as `Habit.nextTargetDate`'s own fallback times but with
+    /// its own explicit values here, since this list's ordering was asked
+    /// for by exact time rather than reusing that property.
+    private func targetMinutes(for mode: HabitOccurrenceTimeMode) -> Int {
+        switch mode {
+        case .am: return 6 * 60
+        case .midday: return 12 * 60
+        case .pm: return 21 * 60
+        case .specific: return 0
+        }
+    }
+
+    /// An AM/Midday/PM habit occurrence (see `HabitOccurrenceTimeMode`)
+    /// never gets a `ScheduledBlock` at all, so it'd otherwise be
+    /// invisible to `reviewableBlocks` — a Specific-Time occurrence
+    /// doesn't need this, it already shows up as a real block. `targetTime`
+    /// is what lets `OverdueBlocksReviewList` sort (and group by day)
+    /// these in among the real blocks instead of a separate section.
+    ///
+    /// Walks backward from `reviewDate` day by day — same reasoning as
+    /// `reviewableBlocks` pulling in backlog from any earlier day, so an
+    /// AM/Midday/PM habit left unchecked yesterday (or further back)
+    /// still turns up tonight instead of quietly aging out unreviewed.
+    /// Only genuinely still-open (`.none`) occurrences ever show, on
+    /// `reviewDate` or any earlier day alike — one already marked
+    /// complete, missed, or excused is already resolved and drops off
+    /// the list the moment it is (see `toggleHabitReviewOccurrence`).
+    /// Bounded by the habit's own `startDate`, capped at 400 days back so
+    /// a very old habit can't turn this into an unbounded scan.
+    private var openHabitOccurrencesForReview: [HabitReviewOccurrence] {
+        let calendar = Calendar.current
+        let reviewDay = calendar.startOfDay(for: reviewDate)
+        var result: [HabitReviewOccurrence] = []
+        for habit in allHabits {
+            let earliestDay = calendar.startOfDay(for: habit.startDate)
+            let cutoffDay = calendar.date(byAdding: .day, value: -400, to: reviewDay) ?? earliestDay
+            let boundedEarliestDay = max(earliestDay, cutoffDay)
+            guard boundedEarliestDay <= reviewDay else { continue }
+
+            var cursor = reviewDay
+            while cursor >= boundedEarliestDay {
+                if habit.isApplicable(on: cursor, calendar: calendar) {
+                    for index in 0..<max(habit.timesPerDay, 1) {
+                        let mode = habit.timeMode(for: index)
+                        guard mode != .specific else { continue }
+                        guard habit.occurrenceStatus(index, on: cursor, calendar: calendar) == .none else { continue }
+                        let targetTime = calendar.date(byAdding: .minute, value: targetMinutes(for: mode), to: cursor) ?? cursor
+                        let id = "\(habit.id)-\(index)-\(Int(cursor.timeIntervalSince1970))"
+                        result.append(HabitReviewOccurrence(id: id, habit: habit, index: index, isCompleted: false, targetTime: targetTime, modeLabel: mode.label))
+                    }
+                }
+                guard let previousDay = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
+                cursor = previousDay
+            }
+        }
+        return result
+    }
+
+    /// Mirrors `DayTimelineGridView.toggleHabitOccurrence` — both
+    /// directions (checking and un-checking) — scoped to the occurrence's
+    /// own day (`occurrence.targetTime`, backlog or not) rather than
+    /// always `reviewDate`, now that `openHabitOccurrencesForReview` can
+    /// surface an occurrence from an earlier day.
+    private func toggleHabitReviewOccurrence(habit: Habit, index: Int, isCompleted: Bool, day: Date) {
+        habitLog(for: habit, on: day).setOccurrence(index, to: isCompleted ? .none : .complete)
+    }
+
+    /// Finds (or creates) the `HabitLog` for `habit` on `day` — shared by
+    /// `toggleHabitReviewOccurrence` and `markUnresolvedHabitOccurrencesAsMissed`.
+    private func habitLog(for habit: Habit, on day: Date) -> HabitLog {
+        let calendar = Calendar.current
+        let normalizedDay = calendar.startOfDay(for: day)
+        if let existing = habit.log(on: normalizedDay, calendar: calendar) {
+            return existing
+        }
+        let newLog = HabitLog(habit: habit, date: normalizedDay)
+        modelContext.insert(newLog)
+        return newLog
+    }
+
+    /// Marks every still-open (`.none`) habit occurrence the Today review
+    /// showed — timed (a `reviewableBlocks` habit block left incomplete)
+    /// or untimed (`openHabitOccurrencesForReview`) — as missed. See the
+    /// call site in `advance()` for why this only happens here rather
+    /// than in the shared block-clearing helpers.
+    private func markUnresolvedHabitOccurrencesAsMissed() {
+        for block in reviewableBlocks {
+            guard let habit = block.habit, !block.isCompleted else { continue }
+            habitLog(for: habit, on: block.date).setOccurrence(block.habitOccurrenceIndex, to: .missed)
+        }
+        for occurrence in openHabitOccurrencesForReview where !occurrence.isCompleted {
+            habitLog(for: occurrence.habit, on: occurrence.targetTime).setOccurrence(occurrence.index, to: .missed)
+        }
+    }
+
     // MARK: - Step 2: Inbox (walks TaskCardSheet, one task at a time)
 
     private var routableInboxShelves: [Shelf] {
-        allShelves.filter { !$0.isPantry }
+        allShelves.filter { !$0.isKitchen }
     }
 
     /// Leaving Today (see `advance()`) auto-launches `TaskReviewQueueSheet`
@@ -312,14 +450,95 @@ struct NightlyReviewView: View {
     /// there's nothing to review, so leaving Today doesn't pop an empty
     /// sheet.
     private func startAttributeReviewSession() {
-        let unsortedTasks = allTasks.filter { $0.shelf == nil && !$0.attributeReviewExcluded }
-        let shelfTasks = allTasks.filter { $0.shelf != nil && !($0.shelf!.isPantry) && $0.isMissingAttributes && !$0.attributeReviewExcluded }
+        // Excludes anything already marked complete — including a task the
+        // Today step above just checked off, moments before this queue
+        // gets built (see `advance()`) — so finishing something during
+        // Today doesn't turn around and ask you to fill in its attributes
+        // right after.
+        let unsortedTasks = allTasks.filter { $0.shelf == nil && !$0.isCompleted && !$0.isSnoozedFromAttributeReview }
+        // A task also lands here once its own "Remind Me In" timer is up
+        // (see `TaskItem.isDueForFutureReminder`) — independent of
+        // `isMissingAttributes`, since a reminder can be set on an
+        // otherwise fully-filled-out task that just needs a future
+        // second look.
+        let shelfTasks = allTasks.filter {
+            $0.shelf != nil && !($0.shelf!.isKitchen) && !$0.isCompleted && !$0.isSnoozedFromAttributeReview
+                && ($0.isMissingAttributes || $0.isDueForFutureReminder)
+        }
         let queue = unsortedTasks + shelfTasks
         guard !queue.isEmpty else { return }
         attributeReviewSession = AttributeReviewSession(queue: queue)
     }
 
-    // MARK: - Step 3: Tomorrow
+    // MARK: - Step 3: 2-Minute Tasks
+
+    private var twoMinuteShelf: Shelf? {
+        allShelves.first { $0.isTwoMinuteTasks }
+    }
+
+    /// The tasks snapshotted into `twoMinuteReviewTaskIDs` when this step
+    /// was entered, oldest first — a fixed list for the duration of the
+    /// step so checking one off doesn't yank it out from under the user.
+    private var twoMinuteReviewTasks: [TaskItem] {
+        allTasks
+            .filter { twoMinuteReviewTaskIDs.contains($0.id) }
+            .sorted { $0.createdAt < $1.createdAt }
+    }
+
+    @ViewBuilder
+    private var twoMinuteTasksStep: some View {
+        if twoMinuteShelf == nil {
+            ContentUnavailableView {
+                Label("No 2-Minute Task Shelf", systemImage: "2.circle")
+            } description: {
+                Text("Mark a shelf as your permanent 2-Minute Task shelf (from its settings) to use this step.")
+            }
+        } else if twoMinuteReviewTasks.isEmpty {
+            ContentUnavailableView {
+                Label("All Clear", systemImage: "checkmark.circle")
+            } description: {
+                Text("No 2-minute tasks left. Tap Next to continue.")
+            }
+        } else {
+            List {
+                Section {
+                    ForEach(twoMinuteReviewTasks) { task in
+                        twoMinuteTaskRow(task)
+                    }
+                } footer: {
+                    Text("Knock these out right now and check them off. Anything still unchecked goes to the very top of tomorrow's schedule — ahead of everything else, habits included.")
+                }
+            }
+        }
+    }
+
+    private func twoMinuteTaskRow(_ task: TaskItem) -> some View {
+        HStack(spacing: 12) {
+            twoMinuteSelectionCircle(isSelected: task.isCompleted)
+                .contentShape(Rectangle())
+                .onTapGesture { task.setCompleted(!task.isCompleted, in: modelContext) }
+            Text(task.title)
+                .strikethrough(task.isCompleted)
+            Spacer()
+        }
+        .opacity(task.isCompleted ? 0.5 : 1)
+    }
+
+    private func twoMinuteSelectionCircle(isSelected: Bool) -> some View {
+        ZStack {
+            Circle()
+                .fill(isSelected ? Color.green : Color.clear)
+                .overlay(Circle().strokeBorder(isSelected ? Color.green : Color.secondary.opacity(0.5), lineWidth: 1.5))
+            if isSelected {
+                Image(systemName: "checkmark")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.white)
+            }
+        }
+        .frame(width: 22, height: 22)
+    }
+
+    // MARK: - Step 4: Tomorrow
 
     /// Same real time-grid as `ScheduleReviewView` — drag to move, tap to
     /// mark complete/push/delete/replace, tap a calendar event to edit it —
@@ -346,13 +565,13 @@ struct NightlyReviewView: View {
                 DayTimelineGridView(
                     rows: ScheduleReviewViewModel.timelineRows(blocks: tomorrowViewModel.blocks, calendarEvents: tomorrowViewModel.calendarEvents),
                     eligibleHoursWindows: eligibleHoursWindows,
-                    namedSchedules: namedSchedules,
                     targetDate: tomorrowViewModel.targetDate,
                     lockedStore: lockedStore,
                     viewModel: tomorrowViewModel,
                     isToday: Calendar.current.isDateInToday(tomorrowViewModel.targetDate),
                     allTasks: allTasks,
                     allShelves: allShelves,
+                    allHabits: allHabits,
                     onSaveEvent: { updated in tomorrowViewModel.saveEventEdit(updated) },
                     onDeleteBlock: { block in tomorrowViewModel.deleteBlock(block) },
                     onPickReplacement: { block in pickerTarget = block }
@@ -439,10 +658,10 @@ struct TaskReviewCard: View {
     /// doesn't remove it from the Inbox on its own — only a shelf
     /// assignment does).
     let onNext: () -> Void
-    /// Only `TaskCardSheet` passes these — nil elsewhere hides the button
-    /// entirely, so Nightly Review and Task Attribute Review are unchanged.
-    let isExcludedFromAttributeReview: Bool
-    let onToggleExcludeFromAttributeReview: (() -> Void)?
+    /// `nil` days = clear an existing snooze; otherwise the number of days
+    /// from right now to exclude this task from Task Attribute Review and
+    /// Nightly Review's attribute-cleanup step.
+    let onSnooze: ((Int?) -> Void)?
     /// True when a queue-cycling caller (`TaskReviewQueueSheet`) swapped
     /// this card in as the next one in line — starts it off-screen to the
     /// left so it slides into place instead of just appearing, completing
@@ -464,6 +683,10 @@ struct TaskReviewCard: View {
     /// the settled state (scrim gone, square at rest). See `showToast`.
     @State private var toastVisible = false
     @State private var isShowingDatePicker = false
+    @State private var isShowingStartDatePicker = false
+    @State private var isShowingRecurrenceEndDatePicker = false
+    @State private var isShowingSnoozeWheel = false
+    @State private var snoozeDays = 1
     /// Captured once this card's edits settle in after appearing (past any
     /// one-time backfill), so the action button can tell "nothing's been
     /// touched" (Skip) apart from "something's actually been edited" (Save
@@ -477,8 +700,32 @@ struct TaskReviewCard: View {
     /// control dismisses it on tap, see each control's action below.
     @FocusState private var focusedField: Field?
 
-    private static let durationOptions = [0, 5, 15, 30, 45, 60, 90, 120, 240, 480]
-    private static let divisibleSegmentOptions = [0, 15, 30, 45, 60, 90]
+    /// The short, curated list — not every 15-minute increment, just the
+    /// sizes actually worth picking from directly. See `durationWheelOptions`
+    /// below for why this alone isn't always enough.
+    private static let durationOptions = [15, 30, 45, 60, 90, 120, 240, 480]
+    /// Not a uniform step — these are the actual chunk sizes worth
+    /// offering for a divisible task's minimum segment.
+    private static let divisibleSegmentOptions = [15, 30, 45, 60, 90, 120, 240]
+
+    /// `durationOptions`, plus the task's own current value slotted in if
+    /// it isn't already one of them — a divisible task's remaining time
+    /// after part of it's already been scheduled (4 hours minus a
+    /// 30-minute chunk = 3h 30m) is arithmetic, not a pick from the
+    /// curated list, and would otherwise land on a value the wheel
+    /// doesn't have, which is exactly what broke the picker before.
+    /// Keeping the option list short everywhere else while still
+    /// guaranteeing the current value is always selectable.
+    private var durationWheelOptions: [Int] {
+        var options = Self.durationOptions
+        if !options.contains(2) {
+            options.insert(2, at: 0)
+        }
+        guard task.estimatedMinutes > 0, !options.contains(task.estimatedMinutes) else {
+            return options
+        }
+        return (options + [task.estimatedMinutes]).sorted()
+    }
 
     init(
         task: TaskItem,
@@ -487,8 +734,7 @@ struct TaskReviewCard: View {
         onSkip: @escaping () -> Void,
         onMove: @escaping (Shelf) -> Void,
         onNext: @escaping () -> Void,
-        isExcludedFromAttributeReview: Bool = false,
-        onToggleExcludeFromAttributeReview: (() -> Void)? = nil,
+        onSnooze: ((Int?) -> Void)? = nil,
         entersFromLeft: Bool = false
     ) {
         self.task = task
@@ -497,8 +743,7 @@ struct TaskReviewCard: View {
         self.onSkip = onSkip
         self.onMove = onMove
         self.onNext = onNext
-        self.isExcludedFromAttributeReview = isExcludedFromAttributeReview
-        self.onToggleExcludeFromAttributeReview = onToggleExcludeFromAttributeReview
+        self.onSnooze = onSnooze
         self.entersFromLeft = entersFromLeft
         _dragOffset = State(initialValue: entersFromLeft ? CGSize(width: -500, height: 0) : .zero)
     }
@@ -526,7 +771,6 @@ struct TaskReviewCard: View {
             }
         )
     }
-
 
     var body: some View {
         VStack(spacing: 14) {
@@ -582,6 +826,24 @@ struct TaskReviewCard: View {
                     dragOffset = .zero
                 }
             }
+            syncEligibilityWithFit()
+        }
+        .onChange(of: task.estimatedMinutes) { _, _ in syncEligibilityWithFit() }
+        .onChange(of: task.isDivisible) { _, _ in syncEligibilityWithFit() }
+    }
+
+    /// Auto-clears eligibility for any rule this task can no longer ever
+    /// fit (see `SchedulingRule.canEverFit`) — a duration edit that pushes
+    /// a task's estimated (or, if divisible, minimum-segment) time past
+    /// what a rule could ever hold shouldn't leave that rule's row faded
+    /// but still toggled on; the stored eligibility itself needs to
+    /// actually clear, not just look disabled.
+    private func syncEligibilityWithFit() {
+        guard let rules = previewedShelf?.schedulingRules else { return }
+        for rule in rules where task.isEligible(for: rule) {
+            if !rule.canEverFit(minutesNeeded: task.estimatedMinutes, isDivisible: task.isDivisible) {
+                task.setEligible(false, for: rule)
+            }
         }
     }
 
@@ -606,6 +868,14 @@ struct TaskReviewCard: View {
                 toastVisible = false
             }
         }
+    }
+
+    /// Whole days remaining until `until`, rounded up so "snoozed until
+    /// 11pm tomorrow" still reads as "1d" rather than "0d" a minute after
+    /// snoozing — same rounding `InboxView.snoozeRemainingText` uses.
+    private func snoozeDaysRemainingLabel(_ until: Date) -> String {
+        let days = max(1, Int(ceil(until.timeIntervalSince(.now) / 86400)))
+        return "\(days)d"
     }
 
     /// The shelf whose color/schedules the card previews — whichever one is
@@ -637,6 +907,40 @@ struct TaskReviewCard: View {
     /// Same idea as `dueDatesAllowed`, for the Priority section.
     private var priorityAllowed: Bool {
         previewedShelf?.effectiveTracksPriority ?? true
+    }
+
+    /// Same idea as `dueDatesAllowed`, for "Remind Me In" — defaults to
+    /// off (rather than on) for a task with no shelf yet, since this is
+    /// an opt-in-per-shelf feature (`Shelf.tracksFutureReminder` starts
+    /// false) rather than an on-by-default attribute the way the others
+    /// are.
+    private var futureReminderAllowed: Bool {
+        previewedShelf?.effectiveTracksFutureReminder ?? false
+    }
+
+    /// Priority collapsed to a plain Yes/No question — `.medium` is still
+    /// a storable/orderable value (existing data, and `AISchedulingService`'s
+    /// own ranking, both still recognize it), it's just never reachable
+    /// from this toggle anymore: "No" answers as `.low`, same as it
+    /// always ranked below `.high`.
+    private var highPriorityAnswer: Binding<Bool?> {
+        Binding(
+            get: {
+                switch task.priority {
+                case .unset: return nil
+                case .high: return true
+                case .low, .medium: return false
+                }
+            },
+            set: { newValue in
+                focusedField = nil
+                switch newValue {
+                case .some(true): task.priority = .high
+                case .some(false): task.priority = .low
+                case .none: task.priority = .unset
+                }
+            }
+        )
     }
 
     /// Title + Next step — stays fixed at the top of the card regardless
@@ -685,6 +989,135 @@ struct TaskReviewCard: View {
         .padding(.bottom, 0)
     }
 
+    /// Replaces the normal Yes/No Due Date section whenever the top-level
+    /// "Recurring?" toggle is on — there's no separate "Has due date"
+    /// question, a recurring task always has one, by definition. No date
+    /// question here either: Start Date doubles as the anchor every
+    /// occurrence steps forward from (`task.dueDate`, kept in sync with
+    /// `task.startDate` — see the "Recurring?" toggle and Start Date
+    /// picker in `cardScrollBody`), so there's nothing left for this
+    /// section to ask beyond the interval/end-date questions below. No
+    /// time-of-day question either — every occurrence still lands at a
+    /// fixed time on the calendar (see `TaskItem.recurringOccurrenceTime`),
+    /// it just isn't user-picked; see `combiningDate(_:withTimeFrom:)`.
+    private var recurringSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if task.isRecurring {
+                HStack(spacing: 8) {
+                    Text("Every")
+                        .font(.body)
+                        .lineLimit(1)
+                        .fixedSize()
+                    Spacer()
+                    // Same +/- Stepper + dropdown shape as "Remind In" —
+                    // `.fixedSize()` keeps both compact on the trailing
+                    // side instead of each expanding to fill the row.
+                    Stepper(
+                        value: Binding(
+                            get: { task.recurrenceIntervalCount },
+                            set: { task.recurrenceIntervalCount = max(1, $0) }
+                        ),
+                        in: 1...365
+                    ) {
+                        Text("\(task.recurrenceIntervalCount)")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(minWidth: 20)
+                    }
+                    .fixedSize()
+
+                    Picker("Repeat every", selection: Binding(
+                        get: { task.recurrenceUnit },
+                        set: { task.recurrenceUnit = $0 }
+                    )) {
+                        ForEach(RecurrenceUnit.allCases) { unit in
+                            Text(unit.label(for: task.recurrenceIntervalCount).capitalized).tag(unit)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .fixedSize()
+                }
+
+                Toggle("Ends on a date", isOn: Binding(
+                    get: { task.recurrenceEndDate != nil },
+                    set: { newValue in
+                        task.recurrenceEndDate = newValue
+                            ? (task.recurrenceEndDate ?? Calendar.current.date(byAdding: .month, value: 1, to: task.dueDate ?? .now))
+                            : nil
+                    }
+                ))
+
+                if task.recurrenceEndDate != nil {
+                    HStack {
+                        Text("Until")
+                        Spacer()
+                        Button {
+                            focusedField = nil
+                            isShowingRecurrenceEndDatePicker = true
+                        } label: {
+                            Text((task.recurrenceEndDate ?? .now).formatted(date: .abbreviated, time: .omitted))
+                                .font(.headline)
+                                .foregroundStyle(Color.accentColor)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .fill(Color.secondary.opacity(0.15))
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .popover(isPresented: $isShowingRecurrenceEndDatePicker) {
+                            DatePicker(
+                                "Until",
+                                selection: Binding(
+                                    get: { task.recurrenceEndDate ?? .now },
+                                    set: { task.recurrenceEndDate = $0 }
+                                ),
+                                in: (task.dueDate ?? .now)...,
+                                displayedComponents: [.date]
+                            )
+                            .datePickerStyle(.graphical)
+                            .labelsHidden()
+                            .padding(8)
+                            .frame(width: 320)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .presentationCompactAdaptation(.popover)
+                        }
+                    }
+                } else {
+                    Text("Repeats indefinitely.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    /// The stand-in time-of-day a recurring task's anchor gets the first
+    /// time it needs one (turning "Recurring?" on, or opening the Date
+    /// picker before that's happened) — there's no time picker to ask the
+    /// user directly anymore, so this is just a reasonable default rather
+    /// than whatever second `.now` happens to land on.
+    private static func defaultRecurringAnchorTime(asOf referenceDate: Date = .now) -> Date {
+        Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: referenceDate) ?? referenceDate
+    }
+
+    /// Folds a newly-picked day (from the date-only picker in
+    /// `recurringSection`, which only ever returns midnight of that day)
+    /// onto whatever time-of-day the anchor already carried — so picking
+    /// a new date never silently resets the time every future occurrence
+    /// reuses (see `TaskItem.recurringOccurrenceTime`) back to midnight.
+    private static func combiningDate(_ newDay: Date, withTimeFrom existing: Date?) -> Date {
+        let calendar = Calendar.current
+        var components = calendar.dateComponents([.year, .month, .day], from: newDay)
+        let timeSource = existing ?? defaultRecurringAnchorTime(asOf: newDay)
+        let timeComponents = calendar.dateComponents([.hour, .minute], from: timeSource)
+        components.hour = timeComponents.hour
+        components.minute = timeComponents.minute
+        components.second = 0
+        return calendar.date(from: components) ?? newDay
+    }
+
     /// Everything past Next step — due date through Eligible Schedules —
     /// in its own scroll region so a task with a lot filled in never pushes
     /// the header or the action row off-screen.
@@ -693,93 +1126,211 @@ struct TaskReviewCard: View {
             VStack(alignment: .leading, spacing: 10) {
             Divider()
 
-            YesNoToggle(title: "Has due date", answer: dueDatesAllowed ? dueDateAnswer : .constant(false))
-                .disabled(!dueDatesAllowed)
-                .opacity(dueDatesAllowed ? 1 : 0.4)
-                .animation(.easeInOut(duration: 0.15), value: task.dueDateDecided)
-                .animation(.easeInOut(duration: 0.15), value: dueDatesAllowed)
-            if dueDatesAllowed, dueDateAnswer.wrappedValue == true {
-                HStack {
-                    Button {
-                        focusedField = nil
-                        isShowingDatePicker = true
-                    } label: {
-                        Text(task.dueDatePicked ? (task.dueDate ?? .now).formatted(date: .complete, time: .omitted) : "Select Date")
-                            .font(.headline)
-                            .foregroundStyle(Color.accentColor)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(Color.secondary.opacity(0.15))
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .popover(isPresented: $isShowingDatePicker) {
-                        DatePicker(
-                            "Due",
-                            selection: Binding(
-                                get: { task.dueDate ?? .now },
-                                set: { newValue in
-                                    task.dueDatePicked = true
-                                    task.dueDate = newValue
-                                    isShowingDatePicker = false
-                                }
-                            ),
-                            displayedComponents: [.date]
+            HStack {
+                Text("Start Date")
+                Spacer()
+                Button {
+                    focusedField = nil
+                    isShowingStartDatePicker = true
+                } label: {
+                    Text((task.startDate ?? .now).formatted(date: .complete, time: .omitted))
+                        .font(.headline)
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(Color.secondary.opacity(0.15))
                         )
-                        .datePickerStyle(.graphical)
-                        .labelsHidden()
-                        .padding(8)
-                        .frame(width: 320)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .presentationCompactAdaptation(.popover)
-                    }
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $isShowingStartDatePicker) {
+                    DatePicker(
+                        "Start",
+                        selection: Binding(
+                            get: { task.startDate ?? .now },
+                            set: { newValue in
+                                task.startDate = newValue
+                                // While recurring, Start Date doubles as
+                                // the anchor every occurrence steps
+                                // forward from — see the "Recurring?"
+                                // toggle below — so it stays synced live
+                                // if tweaked after the fact, rather than
+                                // needing a second date picker.
+                                if task.isRecurring {
+                                    task.dueDate = Self.combiningDate(newValue, withTimeFrom: task.dueDate)
+                                    task.dueDateDecided = true
+                                    task.dueDatePicked = true
+                                }
+                                isShowingStartDatePicker = false
+                            }
+                        ),
+                        in: Calendar.current.startOfDay(for: .now)...,
+                        displayedComponents: [.date]
+                    )
+                    .datePickerStyle(.graphical)
+                    .labelsHidden()
+                    .padding(8)
+                    .frame(width: 320)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .presentationCompactAdaptation(.popover)
                 }
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Priority")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                HStack(spacing: 8) {
-                    ForEach([Priority.low, .medium, .high]) { priority in
-                        // Forced unselected (and disabled below) whenever
-                        // the previewed/actual shelf doesn't track
-                        // priority — the real stored answer is untouched.
-                        let isSelected = priorityAllowed && task.priority == priority
+            Toggle("Recurring?", isOn: Binding(
+                get: { task.isRecurring },
+                set: { newValue in
+                    task.isRecurring = newValue
+                    if newValue {
+                        // Start Date is the anchor here — no separate
+                        // date question inside `recurringSection`. Falls
+                        // back to today if Start Date was never touched,
+                        // same default its own button already shows.
+                        let anchorDay = task.startDate ?? Calendar.current.startOfDay(for: .now)
+                        task.startDate = anchorDay
+                        task.dueDate = Self.combiningDate(anchorDay, withTimeFrom: task.dueDate)
+                        task.dueDateDecided = true
+                        task.dueDatePicked = true
+                        // The Recurring Tasks shelf is the only valid move
+                        // target once this is on (see
+                        // `eligibleShelvesForMove`) — preview it right
+                        // away so every other shelf-gated question (Due
+                        // Date, Duration, Priority, Future Reminder, ...)
+                        // reflects *that* shelf's own settings immediately,
+                        // same as tapping its icon in `shelfRow` would.
+                        if let recurringShelf = shelves.first(where: { $0.isRecurringTasks }) {
+                            selectedShelf = recurringShelf
+                            task.includedSchedulingRuleIDs = (recurringShelf.schedulingRules ?? []).filter(\.isEnabled).map(\.id)
+                        }
+                    } else if selectedShelf?.isRecurringTasks == true {
+                        // Flip side — drop the auto-preview so the card
+                        // goes back to reading `task.shelf`'s own settings
+                        // (or whatever the user had actually tapped)
+                        // instead of staying stuck on the Recurring Tasks
+                        // shelf's.
+                        selectedShelf = nil
+                    }
+                }
+            ))
+            .animation(.easeInOut(duration: 0.15), value: task.isRecurring)
+
+            if task.isRecurring {
+                recurringSection
+            } else {
+                YesNoToggle(title: "Has due date", answer: dueDatesAllowed ? dueDateAnswer : .constant(false))
+                    .disabled(!dueDatesAllowed)
+                    .opacity(dueDatesAllowed ? 1 : 0.4)
+                    .animation(.easeInOut(duration: 0.15), value: task.dueDateDecided)
+                    .animation(.easeInOut(duration: 0.15), value: dueDatesAllowed)
+                if dueDatesAllowed, dueDateAnswer.wrappedValue == true {
+                    HStack {
                         Button {
                             focusedField = nil
-                            task.priority = isSelected ? .unset : priority
+                            isShowingDatePicker = true
                         } label: {
-                            Text(priority.label)
-                                .font(.subheadline.weight(.semibold))
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 9)
-                                .background(isSelected ? Color.accentColor : Color.secondary.opacity(0.15))
-                                .foregroundStyle(isSelected ? Color.white : Color.primary)
-                                .clipShape(Capsule())
+                            Text(task.dueDatePicked ? (task.dueDate ?? .now).formatted(date: .complete, time: .omitted) : "Select Date")
+                                .font(.headline)
+                                .foregroundStyle(Color.accentColor)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .fill(Color.secondary.opacity(0.15))
+                                )
                         }
                         .buttonStyle(.plain)
+                        .popover(isPresented: $isShowingDatePicker) {
+                            DatePicker(
+                                "Due",
+                                selection: Binding(
+                                    get: { task.dueDate ?? .now },
+                                    set: { newValue in
+                                        task.dueDatePicked = true
+                                        task.dueDate = newValue
+                                        isShowingDatePicker = false
+                                    }
+                                ),
+                                in: Calendar.current.startOfDay(for: .now)...,
+                                displayedComponents: [.date]
+                            )
+                            .datePickerStyle(.graphical)
+                            .labelsHidden()
+                            .padding(8)
+                            .frame(width: 320)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .presentationCompactAdaptation(.popover)
+                        }
                     }
                 }
             }
-            .padding(.top, 4)
-            .disabled(!priorityAllowed)
-            .opacity(priorityAllowed ? 1 : 0.4)
-            .animation(.easeInOut(duration: 0.15), value: priorityAllowed)
+
+            YesNoToggle(title: "High Priority?", answer: priorityAllowed ? highPriorityAnswer : .constant(false))
+                .padding(.top, 4)
+                .disabled(!priorityAllowed)
+                .opacity(priorityAllowed ? 1 : 0.4)
+                .animation(.easeInOut(duration: 0.15), value: priorityAllowed)
+
+            if futureReminderAllowed {
+                HStack(spacing: 8) {
+                    Text("Remind In")
+                        .font(.body)
+                        .lineLimit(1)
+                        .fixedSize()
+                    Spacer()
+                    // +/- Stepper instead of a wheel — a count this small
+                    // (0-90) doesn't need a wheel's full sweep, just a way
+                    // to nudge it up or down. `.fixedSize()` keeps it (and
+                    // the dropdown next to it) from each greedily
+                    // expanding to fill the row, so both sit compactly on
+                    // the trailing side alongside the label instead of
+                    // stacking onto their own lines.
+                    Stepper(
+                        value: Binding(
+                            get: { task.remindInCount },
+                            set: { newValue in
+                                task.remindInCount = max(0, newValue)
+                                task.applyRemindIn()
+                            }
+                        ),
+                        in: 0...90
+                    ) {
+                        Text("\(task.remindInCount)")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(minWidth: 20)
+                    }
+                    .fixedSize()
+
+                    Picker("Unit", selection: Binding(
+                        get: { task.remindInUnit },
+                        set: { newValue in
+                            task.remindInUnit = newValue
+                            task.applyRemindIn()
+                        }
+                    )) {
+                        ForEach(RecurrenceUnit.allCases) { unit in
+                            Text(unit.label(for: task.remindInCount).capitalized)
+                                .tag(unit)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                .padding(.top, 4)
+            }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Duration")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                // Forced to "No" (and disabled below) whenever the
+                // previewed/actual shelf doesn't track duration — the
+                // real stored answer is untouched so it comes back if
+                // the shelf preview is cancelled.
+                let isYesSelected = durationAllowed && task.durationDecided && task.durationAnsweredYes
+                let isNoSelected = !durationAllowed || (task.durationDecided && !task.durationAnsweredYes)
+
                 HStack(spacing: 8) {
-                    // Forced to "No" (and disabled below) whenever the
-                    // previewed/actual shelf doesn't track duration — the
-                    // real stored answer is untouched so it comes back if
-                    // the shelf preview is cancelled.
-                    let isYesSelected = durationAllowed && task.durationDecided && task.durationAnsweredYes
-                    let isNoSelected = !durationAllowed || (task.durationDecided && !task.durationAnsweredYes)
+                    Text("Duration")
+
+                    Spacer()
 
                     Button {
                         focusedField = nil
@@ -792,11 +1343,17 @@ struct TaskReviewCard: View {
                         } else {
                             task.durationDecided = true
                             task.durationAnsweredYes = true
+                            // The wheel needs a value actually in its own
+                            // range to show a real selection instead of
+                            // landing on nothing.
+                            if task.estimatedMinutes <= 0 {
+                                task.estimatedMinutes = 2
+                            }
                         }
                     } label: {
                         Text("Yes")
                             .font(.subheadline.weight(.semibold))
-                            .frame(minWidth: 64)
+                            .frame(minWidth: 48)
                             .padding(.vertical, 9)
                             .background(isYesSelected ? Color.accentColor : Color.secondary.opacity(0.15))
                             .foregroundStyle(isYesSelected ? Color.white : Color.primary)
@@ -816,7 +1373,7 @@ struct TaskReviewCard: View {
                     } label: {
                         Text("No")
                             .font(.subheadline.weight(.semibold))
-                            .frame(minWidth: 64)
+                            .frame(minWidth: 48)
                             .padding(.vertical, 9)
                             .background(isNoSelected ? Color.accentColor : Color.secondary.opacity(0.15))
                             .foregroundStyle(isNoSelected ? Color.white : Color.primary)
@@ -826,14 +1383,17 @@ struct TaskReviewCard: View {
 
                     if isYesSelected {
                         Picker("Duration", selection: $task.estimatedMinutes) {
-                            ForEach(Self.durationOptions, id: \.self) { minutes in
-                                Text(TaskItem.durationLabel(for: minutes)).tag(minutes)
+                            ForEach(durationWheelOptions, id: \.self) { minutes in
+                                Text(minutes == 2 ? "≤2 min" : TaskItem.durationLabel(for: minutes))
+                                    .font(.subheadline.weight(.semibold))
+                                    .tag(minutes)
                             }
                         }
-                        .font(.subheadline.weight(.semibold))
-                        .tint(Color.accentColor)
+                        .pickerStyle(.wheel)
+                        .labelsHidden()
+                        .frame(width: 110, height: 40)
+                        .clipped()
                         .onChange(of: task.estimatedMinutes) { _, _ in
-                            focusedField = nil
                             task.durationDecided = true
                             task.syncScheduledBlockDuration()
                         }
@@ -847,12 +1407,13 @@ struct TaskReviewCard: View {
             .animation(.easeInOut(duration: 0.15), value: durationAllowed)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Divisible")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                let isDivisibleYesSelected = durationAllowed && task.isDivisibleDecided && task.isDivisible
+                let isDivisibleNoSelected = !durationAllowed || (task.isDivisibleDecided && !task.isDivisible)
+
                 HStack(spacing: 8) {
-                    let isDivisibleYesSelected = durationAllowed && task.isDivisibleDecided && task.isDivisible
-                    let isDivisibleNoSelected = !durationAllowed || (task.isDivisibleDecided && !task.isDivisible)
+                    Text("Divisible")
+
+                    Spacer()
 
                     Button {
                         focusedField = nil
@@ -865,11 +1426,16 @@ struct TaskReviewCard: View {
                         } else {
                             task.isDivisibleDecided = true
                             task.isDivisible = true
+                            // Same reasoning as the Duration wheel above —
+                            // needs a value actually in its own range.
+                            if task.minimumSegmentMinutes <= 0 {
+                                task.minimumSegmentMinutes = Self.divisibleSegmentOptions.first ?? 15
+                            }
                         }
                     } label: {
                         Text("Yes")
                             .font(.subheadline.weight(.semibold))
-                            .frame(minWidth: 64)
+                            .frame(minWidth: 48)
                             .padding(.vertical, 9)
                             .background(isDivisibleYesSelected ? Color.accentColor : Color.secondary.opacity(0.15))
                             .foregroundStyle(isDivisibleYesSelected ? Color.white : Color.primary)
@@ -889,7 +1455,7 @@ struct TaskReviewCard: View {
                     } label: {
                         Text("No")
                             .font(.subheadline.weight(.semibold))
-                            .frame(minWidth: 64)
+                            .frame(minWidth: 48)
                             .padding(.vertical, 9)
                             .background(isDivisibleNoSelected ? Color.accentColor : Color.secondary.opacity(0.15))
                             .foregroundStyle(isDivisibleNoSelected ? Color.white : Color.primary)
@@ -900,14 +1466,15 @@ struct TaskReviewCard: View {
                     if isDivisibleYesSelected {
                         Picker("Minimum Segment", selection: $task.minimumSegmentMinutes) {
                             ForEach(Self.divisibleSegmentOptions, id: \.self) { minutes in
-                                Text(TaskItem.durationLabel(for: minutes)).tag(minutes)
+                                Text(TaskItem.durationLabel(for: minutes))
+                                    .font(.subheadline.weight(.semibold))
+                                    .tag(minutes)
                             }
                         }
-                        .font(.subheadline.weight(.semibold))
-                        .tint(Color.accentColor)
-                        .onChange(of: task.minimumSegmentMinutes) { _, _ in
-                            focusedField = nil
-                        }
+                        .pickerStyle(.wheel)
+                        .labelsHidden()
+                        .frame(width: 110, height: 40)
+                        .clipped()
                     }
                 }
             }
@@ -1072,10 +1639,32 @@ struct TaskReviewCard: View {
         }
     }
 
+    /// Which of `shelves` `shelfRow` actually offers as a move target. A
+    /// recurring task (see `TaskItem.isRecurring`) can only go to the
+    /// Recurring Tasks shelf — nowhere else knows how to place its
+    /// occurrences on the calendar. A task whose duration is decided at 2
+    /// minutes or less can only go to the 2-Minute Task shelf, the one
+    /// place that treats it as an untimed checklist item instead of a
+    /// calendar block. Outside both of those cases, the two special
+    /// shelves are hidden entirely rather than shown as options that
+    /// don't actually fit this task.
+    private var eligibleShelvesForMove: [Shelf] {
+        if task.isRecurring {
+            return shelves.filter { $0.isRecurringTasks }
+        }
+        if task.durationDecided, task.durationAnsweredYes, task.estimatedMinutes > 0, task.estimatedMinutes <= 2 {
+            return shelves.filter { $0.isTwoMinuteTasks }
+        }
+        return shelves.filter { !$0.isTwoMinuteTasks && !$0.isRecurringTasks }
+    }
+
+    /// A wrapping grid rather than a horizontal scroll — every shelf is
+    /// visible up front instead of some sitting off-screen to the side,
+    /// and `.adaptive` columns keep every icon the same evenly-spaced
+    /// width whether there's one row or several.
     private var shelfRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 16) {
-                ForEach(shelves) { shelf in
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 70), spacing: 16)], alignment: .center, spacing: 12) {
+                ForEach(eligibleShelvesForMove) { shelf in
                     let isCurrent = task.shelf?.id == shelf.id
                     let isSelected = selectedShelf?.id == shelf.id
                     Button {
@@ -1099,41 +1688,48 @@ struct TaskReviewCard: View {
                                 // (see `onMove`, which no longer re-seeds
                                 // this itself).
                                 task.includedSchedulingRuleIDs = (shelf.schedulingRules ?? []).filter(\.isEnabled).map(\.id)
+                                syncEligibilityWithFit()
                             }
                         }
                     } label: {
-                        Image(systemName: shelf.systemImage)
-                            .font(.body)
-                            .frame(width: 38, height: 38)
-                            .background(shelf.color.opacity(isSelected ? 0.5 : 0.2))
-                            .clipShape(Circle())
-                            .overlay {
-                                if isSelected {
-                                    Circle().stroke(shelf.color, lineWidth: 3)
-                                } else if isCurrent {
-                                    Circle().stroke(shelf.color.opacity(0.6), lineWidth: 1.5)
+                        VStack(spacing: 4) {
+                            Image(systemName: shelf.systemImage)
+                                .font(.body)
+                                .frame(width: 38, height: 38)
+                                .background(shelf.color.opacity(isSelected ? 0.5 : 0.2))
+                                .clipShape(Circle())
+                                .overlay {
+                                    if isSelected {
+                                        Circle().stroke(shelf.color, lineWidth: 3)
+                                    } else if isCurrent {
+                                        Circle().stroke(shelf.color.opacity(0.6), lineWidth: 1.5)
+                                    }
                                 }
-                            }
-                            .overlay(alignment: .topTrailing) {
-                                if isCurrent && !isSelected {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.caption2)
-                                        .symbolRenderingMode(.palette)
-                                        .foregroundStyle(.white, shelf.color)
-                                        .background(Circle().fill(.background))
-                                        .offset(x: 2, y: -2)
+                                .overlay(alignment: .topTrailing) {
+                                    if isCurrent && !isSelected {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.caption2)
+                                            .symbolRenderingMode(.palette)
+                                            .foregroundStyle(.white, shelf.color)
+                                            .background(Circle().fill(.background))
+                                            .offset(x: 2, y: -2)
+                                    }
                                 }
-                            }
-                            .scaleEffect(isSelected ? 1.1 : 1.0)
-                            .animation(.easeInOut(duration: 0.15), value: isSelected)
+                                .scaleEffect(isSelected ? 1.1 : 1.0)
+                                .animation(.easeInOut(duration: 0.15), value: isSelected)
+                            Text(shelf.name)
+                                .font(.caption2)
+                                .foregroundStyle(isSelected ? shelf.color : .secondary)
+                                .multilineTextAlignment(.center)
+                                .frame(width: 60)
+                        }
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(shelf.name)
                 }
-            }
-            .padding(.vertical, 4)
-            .padding(.leading, 20)
         }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 20)
     }
 
     private var actionRow: some View {
@@ -1159,32 +1755,70 @@ struct TaskReviewCard: View {
                 Text(task.title.isEmpty ? "This can't be undone." : "\"\(task.title)\" can't be recovered after this.")
             }
 
-            // Silencing only means something once this task has a shelf to
-            // be reviewed on — hidden for a plain Inbox task, but reappears
-            // the moment one's previewed via `shelfRow`, since committing
-            // that move is exactly what makes it apply.
-            if let onToggleExcludeFromAttributeReview, task.shelf != nil || selectedShelf != nil {
+            // Available for an unsorted Inbox task too, not just a shelf
+            // one — both `InboxView.startAttributeReview` and
+            // `NightlyReviewView.startAttributeReviewSession` already
+            // filter their unsorted-task queue on
+            // `isSnoozedFromAttributeReview` the same way they filter the
+            // shelf-task one.
+            if let onSnooze {
                 Button {
                     focusedField = nil
-                    onToggleExcludeFromAttributeReview()
-                    showToast(
-                        task.attributeReviewExcluded
-                            ? "Excluded from Task Attribute Review"
-                            : "Included in Task Attribute Review again"
-                    )
-                } label: {
-                    if isExcludedFromAttributeReview {
-                        Image(systemName: "bell.slash.circle.fill")
-                            .font(.system(size: 36))
-                            .foregroundStyle(Color.gray.opacity(0.5))
+                    if task.isSnoozedFromAttributeReview {
+                        onSnooze(nil)
+                        showToast("Un-snoozed")
                     } else {
-                        Image(systemName: "bell.circle.fill")
-                            .font(.system(size: 36))
+                        snoozeDays = 1
+                        isShowingSnoozeWheel = true
+                    }
+                } label: {
+                    if task.isSnoozedFromAttributeReview {
+                        Image(systemName: "zzz")
+                            .font(.system(size: 30))
+                            .foregroundStyle(Color.gray)
+                            .overlay(alignment: .topTrailing) {
+                                if let until = task.attributeReviewSnoozedUntil {
+                                    Text(snoozeDaysRemainingLabel(until))
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(Color.gray, in: Capsule())
+                                        .offset(x: 14, y: -6)
+                                }
+                            }
+                    } else {
+                        Image(systemName: "moon.zzz.fill")
+                            .font(.system(size: 30))
                             .symbolRenderingMode(.palette)
                             .foregroundStyle(.black, Color(red: 0.79, green: 0.64, blue: 0.14))
                     }
                 }
                 .buttonStyle(.plain)
+                .popover(isPresented: $isShowingSnoozeWheel) {
+                    VStack(spacing: 12) {
+                        Text("Snooze for")
+                            .font(.headline)
+                        Picker("Days", selection: $snoozeDays) {
+                            ForEach(1...30, id: \.self) { day in
+                                Text("\(day) day\(day == 1 ? "" : "s")").tag(day)
+                            }
+                        }
+                        .pickerStyle(.wheel)
+                        .labelsHidden()
+                        .frame(height: 140)
+
+                        Button("Snooze") {
+                            onSnooze(snoozeDays)
+                            isShowingSnoozeWheel = false
+                            showToast("Snoozed \(snoozeDays) day\(snoozeDays == 1 ? "" : "s")")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .padding()
+                    .frame(width: 240)
+                    .presentationCompactAdaptation(.popover)
+                }
             }
 
             Spacer()
