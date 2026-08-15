@@ -47,6 +47,15 @@ struct ScheduleReviewView: View {
     /// threshold.
     @State private var dateDragOffset: CGFloat = 0
     @State private var isCollapsingEmptyPeriods = false
+    /// Bumped to force a full re-collapse — see
+    /// `DayTimelineGridView.collapseResetToken`.
+    @State private var collapseResetToken = 0
+    /// Kept in sync via `DayTimelineGridView.onCollapsedGapChange` —
+    /// false once every gap's been individually expanded away, even with
+    /// `isCollapsingEmptyPeriods` still on. Drives
+    /// `collapseEmptyPeriodsButton`'s icon/action so it reads correctly
+    /// in that state instead of looking like tapping it does nothing.
+    @State private var isAnyPeriodCollapsed = false
 
     // AI scheduling itself is still mocked (that's a separate TODO: swap in
     // a real Claude API call). The calendar side is real — it hits Google
@@ -75,14 +84,6 @@ struct ScheduleReviewView: View {
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        isCollapsingEmptyPeriods.toggle()
-                    } label: {
-                        Image(systemName: isCollapsingEmptyPeriods ? "arrow.up.and.down.and.arrow.left.and.right" : "arrow.down.right.and.arrow.up.left")
-                    }
-                    .accessibilityLabel(isCollapsingEmptyPeriods ? "Expand Empty Periods" : "Collapse Empty Periods")
-                }
                 ToolbarItem(placement: .primaryAction) {
                     Button("Approve All") {
                         viewModel?.approveAll()
@@ -146,7 +147,9 @@ struct ScheduleReviewView: View {
                 onSaveEvent: { updated in viewModel.saveEventEdit(updated) },
                 onDeleteBlock: { block in viewModel.deleteBlock(block) },
                 onPickReplacement: { block in pickerTarget = block },
-                isCollapsingEmptyPeriods: isCollapsingEmptyPeriods
+                isCollapsingEmptyPeriods: isCollapsingEmptyPeriods,
+                collapseResetToken: collapseResetToken,
+                onCollapsedGapChange: { isAnyPeriodCollapsed = $0 }
             )
             .refreshable {
                 await viewModel.loadCalendarEvents()
@@ -215,13 +218,20 @@ struct ScheduleReviewView: View {
     /// as the page's actual title, not a compact nav-bar label — the
     /// chevrons/Approve All/Edit stay in the toolbar above it.
     private var header: some View {
-        VStack(spacing: 2) {
-            Text(relativeDayLabel)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            dateStack
-                .frame(maxWidth: .infinity)
-                .clipped()
+        ZStack {
+            VStack(spacing: 2) {
+                Text(relativeDayLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                dateStack
+                    .frame(maxWidth: .infinity)
+                    .clipped()
+            }
+
+            HStack {
+                Spacer()
+                collapseEmptyPeriodsButton
+            }
         }
         .padding(.horizontal, 20)
         .padding(.top, 12)
@@ -255,6 +265,34 @@ struct ScheduleReviewView: View {
                     }
                 }
         )
+    }
+
+    /// True only when collapsing is on *and* something's actually shown
+    /// collapsed right now — if every gap's been individually tapped
+    /// open, this reads as false even though `isCollapsingEmptyPeriods`
+    /// itself never changed, so the button falls back to its "collapse"
+    /// icon instead of an "expand" icon with nothing left to expand.
+    private var isEffectivelyCollapsed: Bool {
+        isCollapsingEmptyPeriods && isAnyPeriodCollapsed
+    }
+
+    private var collapseEmptyPeriodsButton: some View {
+        Button {
+            if isEffectivelyCollapsed {
+                isCollapsingEmptyPeriods = false
+            } else {
+                // Also covers the "every gap manually expanded" case:
+                // `isCollapsingEmptyPeriods` may already be `true` (so
+                // setting it again is a no-op), but bumping the reset
+                // token forces every segment to drop its manual
+                // expansions and actually re-collapse.
+                isCollapsingEmptyPeriods = true
+                collapseResetToken += 1
+            }
+        } label: {
+            Image(systemName: isEffectivelyCollapsed ? "arrow.up.and.down.and.arrow.left.and.right" : "arrow.down.right.and.arrow.up.left")
+        }
+        .accessibilityLabel(isEffectivelyCollapsed ? "Expand Empty Periods" : "Collapse Empty Periods")
     }
 
     /// Frozen above the tab bar, separate from the date/label up top — not

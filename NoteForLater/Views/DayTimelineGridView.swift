@@ -65,6 +65,22 @@ struct DayTimelineGridView: View {
     /// see `DayTimelineSegment.isCollapsingEmptyPeriods` for what this
     /// actually does.
     var isCollapsingEmptyPeriods: Bool = false
+    /// Bumped to force every segment to drop its own manually-expanded
+    /// gaps (see `DayTimelineSegment.manuallyExpandedGapKeys`) and fall
+    /// back to the default collapsed state — used when the toolbar
+    /// button is tapped while every gap has already been individually
+    /// expanded, so `isCollapsingEmptyPeriods` itself has nothing to
+    /// toggle (it's already `true`) but the day still needs to actually
+    /// re-collapse.
+    var collapseResetToken: Int = 0
+    /// Reports whether *any* segment currently has at least one gap
+    /// actually shown collapsed — false once every gap's been manually
+    /// expanded away, even with `isCollapsingEmptyPeriods` still on. Lets
+    /// `ScheduleReviewView`'s toolbar button fall back to showing the
+    /// "collapse" icon in that case, rather than reading as broken
+    /// because tapping "expand" again does nothing (there'd be nothing
+    /// left to expand).
+    var onCollapsedGapChange: (Bool) -> Void = { _ in }
 
     private let pointsPerMinute: CGFloat = 1.6
 
@@ -97,6 +113,13 @@ struct DayTimelineGridView: View {
     @State private var isMorningInteracting = false
     @State private var isAfternoonInteracting = false
     @State private var isSingleInteracting = false
+    /// One per possible segment, mirroring the `isXInteracting` trio above
+    /// — whichever's actually showing reports whether it currently has a
+    /// gap collapsed; `hasAnyCollapsedGap` (fed to `onCollapsedGapChange`)
+    /// just ORs whichever of these are in play.
+    @State private var morningHasCollapsedGap = false
+    @State private var afternoonHasCollapsedGap = false
+    @State private var singleHasCollapsedGap = false
     /// Bumped by `toggleHabitOccurrence` right after it mutates a
     /// `HabitLog` — a plain `@State` write always forces this view's
     /// `body` to re-run, which is what actually guarantees the tapped
@@ -342,7 +365,9 @@ struct DayTimelineGridView: View {
                         viewportHeight: viewportHeight,
                         scrollOffsetY: scrollOffsetY,
                         isInteracting: $isMorningInteracting,
-                        isCollapsingEmptyPeriods: isCollapsingEmptyPeriods
+                        isCollapsingEmptyPeriods: isCollapsingEmptyPeriods,
+                        collapseResetToken: collapseResetToken,
+                        hasCollapsedGap: $morningHasCollapsedGap
                     )
 
                     habitOccurrenceSection(title: "Midday Habits", occurrences: middayOccurrences)
@@ -376,7 +401,9 @@ struct DayTimelineGridView: View {
                         viewportHeight: viewportHeight,
                         scrollOffsetY: scrollOffsetY,
                         isInteracting: $isAfternoonInteracting,
-                        isCollapsingEmptyPeriods: isCollapsingEmptyPeriods
+                        isCollapsingEmptyPeriods: isCollapsingEmptyPeriods,
+                        collapseResetToken: collapseResetToken,
+                        hasCollapsedGap: $afternoonHasCollapsedGap
                     )
                 } else {
                     DayTimelineSegment(
@@ -397,7 +424,9 @@ struct DayTimelineGridView: View {
                         viewportHeight: viewportHeight,
                         scrollOffsetY: scrollOffsetY,
                         isInteracting: $isSingleInteracting,
-                        isCollapsingEmptyPeriods: isCollapsingEmptyPeriods
+                        isCollapsingEmptyPeriods: isCollapsingEmptyPeriods,
+                        collapseResetToken: collapseResetToken,
+                        hasCollapsedGap: $singleHasCollapsedGap
                     )
                 }
 
@@ -414,6 +443,9 @@ struct DayTimelineGridView: View {
         // ScrollView's own bounds.
         .scrollClipDisabled()
         .scrollDisabled(isMorningInteracting || isAfternoonInteracting || isSingleInteracting)
+        .onChange(of: morningHasCollapsedGap || afternoonHasCollapsedGap || singleHasCollapsedGap, initial: true) { _, newValue in
+            onCollapsedGapChange(newValue)
+        }
         .scrollPosition($scrollPosition)
         .onScrollGeometryChange(for: CGFloat.self) { geometry in
             geometry.containerSize.height
@@ -656,13 +688,20 @@ private struct DayTimelineSegment: View {
     /// When on, a stretch of `quarterRange` with nothing in it (and
     /// nothing within `collapseBufferQuarters` of it) collapses down to a
     /// single compact divider instead of rendering every empty
-    /// quarter-hour at full height — see `displaySegments`. Purely
-    /// visual: dragging a block and long-press-to-insert are both
-    /// disabled while this is on (see `dragGesture`/`emptySlotGesture`),
-    /// so nothing needs an inverse (pixel → time) mapping for the
-    /// compacted space, only the forward one `displayOffset(forMinutes:)`
-    /// already provides.
+    /// quarter-hour at full height — see `displaySegments`. Dragging a
+    /// block and long-press-to-insert are disabled whenever
+    /// `hasAnyGapSegment` is true (see `dragGesture`/`emptySlotGesture`),
+    /// since only then does the compacted space lack an inverse
+    /// (pixel → time) mapping — this flag alone isn't enough to gate on,
+    /// since it can stay on with every individual gap manually expanded
+    /// back to nothing actually collapsed (see `manuallyExpandedGapKeys`).
     let isCollapsingEmptyPeriods: Bool
+    /// Bumped by the parent to force `manuallyExpandedGapKeys` back to
+    /// empty — see `DayTimelineGridView.collapseResetToken`.
+    let collapseResetToken: Int
+    /// Kept in sync with `hasAnyGapSegment` — see
+    /// `DayTimelineGridView.onCollapsedGapChange`.
+    @Binding var hasCollapsedGap: Bool
 
     private let pointsPerMinute: CGFloat = 1.6
     private let hourLabelWidth: CGFloat = 52
@@ -736,6 +775,11 @@ private struct DayTimelineSegment: View {
     /// finger's still down — combined with `draggingRowID`, controls when
     /// the shared ScrollView is disabled (via `isInteracting`).
     @State private var isEmptySlotArmed = false
+    /// Raw gap keys (see `DisplaySegment.gapKey`) that have been manually
+    /// expanded by tapping their collapsed divider — checked in
+    /// `displaySegments` so only that specific gap stays expanded, not
+    /// every gap on the day.
+    @State private var manuallyExpandedGapKeys = Set<Int>()
 
     private var visibleStartMinutes: Int { quarterRange.start * 15 }
 
@@ -747,18 +791,32 @@ private struct DayTimelineSegment: View {
         /// Exclusive.
         let endQuarter: Int
         let isGap: Bool
+        /// How much free time this segment's divider labels, in minutes.
+        /// For a collapsed gap this is the *raw* stretch of free time
+        /// (before `collapseBufferQuarters` trims a sliver off each edge
+        /// into its own always-visible segment) — otherwise a 1-hour raw
+        /// gap flanked by events on both sides would only ever show
+        /// "30m free" once the buffer's been carved out of it.
+        let rawGapMinutes: Int
+        /// Identifies the underlying raw gap this segment came from
+        /// (its un-buffered start quarter) — tapping a collapsed divider
+        /// records this key in `manuallyExpandedGapKeys` so *only* that
+        /// gap expands, not every gap on the day.
+        let gapKey: Int
         var quarterCount: Int { endQuarter - startQuarter }
     }
 
-    /// How many quarter-hours of real content (or near-content) get kept
-    /// expanded around a populated stretch before a gap is considered
-    /// worth collapsing — an hour of buffer on each side, so a block
-    /// never reads as jammed right up against a collapsed divider.
-    private static let collapseBufferQuarters = 4
-    /// A gap has to be at least this long to bother collapsing — folding
-    /// away 15 or 30 idle minutes would save almost nothing and just add
-    /// visual noise.
-    private static let minCollapsibleGapQuarters = 6
+    /// How many quarter-hours of real content get kept expanded right at
+    /// the edge of a collapsed gap, so a block never reads as jammed
+    /// directly against the divider. Kept small relative to
+    /// `minCollapsibleGapQuarters` — a big buffer on both edges of an
+    /// exactly-one-hour gap would eat the whole thing and leave nothing
+    /// left to actually collapse.
+    private static let collapseBufferQuarters = 1
+    /// A gap has to be at least this long (its raw length, before the
+    /// buffer above trims its edges) to bother collapsing — "compact any
+    /// free slot of an hour or more."
+    private static let minCollapsibleGapQuarters = 4
     private static let compactGapHeight: CGFloat = 40
 
     /// `quarterRange` broken into alternating populated/gap runs when
@@ -769,7 +827,7 @@ private struct DayTimelineSegment: View {
     /// disagree about where a gap actually is.
     private var displaySegments: [DisplaySegment] {
         guard isCollapsingEmptyPeriods else {
-            return [DisplaySegment(startQuarter: quarterRange.start, endQuarter: quarterRange.end, isGap: false)]
+            return [DisplaySegment(startQuarter: quarterRange.start, endQuarter: quarterRange.end, isGap: false, rawGapMinutes: 0, gapKey: quarterRange.start)]
         }
         var populated = Set<Int>()
         for row in rows {
@@ -780,27 +838,47 @@ private struct DayTimelineSegment: View {
             }
         }
         guard !populated.isEmpty else {
-            return [DisplaySegment(startQuarter: quarterRange.start, endQuarter: quarterRange.end, isGap: true)]
-        }
-        var keep = Set<Int>()
-        for quarter in populated {
-            for delta in -Self.collapseBufferQuarters...Self.collapseBufferQuarters {
-                let candidate = quarter + delta
-                if candidate >= quarterRange.start, candidate < quarterRange.end {
-                    keep.insert(candidate)
-                }
-            }
+            let rawLength = quarterRange.end - quarterRange.start
+            let isGap = rawLength >= Self.minCollapsibleGapQuarters && !manuallyExpandedGapKeys.contains(quarterRange.start)
+            return [DisplaySegment(startQuarter: quarterRange.start, endQuarter: quarterRange.end, isGap: isGap, rawGapMinutes: rawLength * 15, gapKey: quarterRange.start)]
         }
         var segments: [DisplaySegment] = []
         var cursor = quarterRange.start
         while cursor < quarterRange.end {
-            let keepThis = keep.contains(cursor)
+            if populated.contains(cursor) {
+                var end = cursor + 1
+                while end < quarterRange.end, populated.contains(end) {
+                    end += 1
+                }
+                segments.append(DisplaySegment(startQuarter: cursor, endQuarter: end, isGap: false, rawGapMinutes: 0, gapKey: cursor))
+                cursor = end
+                continue
+            }
             var end = cursor + 1
-            while end < quarterRange.end, keep.contains(end) == keepThis {
+            while end < quarterRange.end, !populated.contains(end) {
                 end += 1
             }
-            let longEnoughToCollapse = !keepThis && (end - cursor) >= Self.minCollapsibleGapQuarters
-            segments.append(DisplaySegment(startQuarter: cursor, endQuarter: end, isGap: longEnoughToCollapse))
+            // Raw free run is [cursor, end). `end`'s own quarter is
+            // populated whenever end < quarterRange.end (the inner loop
+            // above only stops early for that reason) — same logic for
+            // whether a populated quarter precedes `cursor`.
+            let hasLeadingNeighbor = cursor > quarterRange.start
+            let hasTrailingNeighbor = end < quarterRange.end
+            let rawLength = end - cursor
+            let gapKey = cursor
+            if rawLength >= Self.minCollapsibleGapQuarters, !manuallyExpandedGapKeys.contains(gapKey) {
+                let bufferStart = hasLeadingNeighbor ? min(cursor + Self.collapseBufferQuarters, end) : cursor
+                let bufferEnd = hasTrailingNeighbor ? max(end - Self.collapseBufferQuarters, bufferStart) : end
+                if bufferStart > cursor {
+                    segments.append(DisplaySegment(startQuarter: cursor, endQuarter: bufferStart, isGap: false, rawGapMinutes: 0, gapKey: gapKey))
+                }
+                segments.append(DisplaySegment(startQuarter: bufferStart, endQuarter: bufferEnd, isGap: true, rawGapMinutes: rawLength * 15, gapKey: gapKey))
+                if bufferEnd < end {
+                    segments.append(DisplaySegment(startQuarter: bufferEnd, endQuarter: end, isGap: false, rawGapMinutes: 0, gapKey: gapKey))
+                }
+            } else {
+                segments.append(DisplaySegment(startQuarter: cursor, endQuarter: end, isGap: false, rawGapMinutes: rawLength * 15, gapKey: gapKey))
+            }
             cursor = end
         }
         return segments
@@ -812,6 +890,31 @@ private struct DayTimelineSegment: View {
 
     private var dayHeight: CGFloat {
         displaySegments.reduce(0) { $0 + heightForSegment($1) }
+    }
+
+    /// Whether this segment currently has at least one gap actually shown
+    /// collapsed — false once every one of its gaps has been manually
+    /// expanded away (or there were never any long enough to collapse in
+    /// the first place). Fed up to `hasCollapsedGap`.
+    private var hasAnyGapSegment: Bool {
+        displaySegments.contains(where: \.isGap)
+    }
+
+    /// The collapsed gap segment (if any) currently rendered at grid-local
+    /// `y` — used to auto-expand whichever gap a block gets dragged onto,
+    /// so dragging works everywhere instead of being blocked outright by
+    /// `hasAnyGapSegment` any time a collapsed gap exists anywhere on the
+    /// day.
+    private func gapSegment(atY y: CGFloat) -> DisplaySegment? {
+        var offset: CGFloat = 0
+        for segment in displaySegments {
+            let height = heightForSegment(segment)
+            if y < offset + height {
+                return segment.isGap ? segment : nil
+            }
+            offset += height
+        }
+        return nil
     }
 
     /// Maps a real minute-of-day to its Y offset in the (possibly
@@ -928,8 +1031,13 @@ private struct DayTimelineSegment: View {
             // fires for genuinely open space.
             // Long-press-to-insert needs an inverse (pixel → time)
             // mapping this view deliberately doesn't build for the
-            // collapsed timeline — see `isCollapsingEmptyPeriods`.
-            if !isCollapsingEmptyPeriods {
+            // collapsed timeline — see `isCollapsingEmptyPeriods`. Gated
+            // on `hasAnyGapSegment`, not the raw toggle: once every gap's
+            // been manually expanded away, the mapping is 1:1 again even
+            // though `isCollapsingEmptyPeriods` itself is still on, and
+            // gating on the toggle alone left this permanently disabled
+            // in that state with nothing on screen to explain why.
+            if !hasAnyGapSegment {
                 Color.clear
                     .contentShape(Rectangle())
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -943,6 +1051,28 @@ private struct DayTimelineSegment: View {
         .padding(.trailing, contentTrailingPadding)
         .onChange(of: draggingRowID) { _, newValue in
             isInteracting = (newValue != nil) || isEmptySlotArmed
+        }
+        // Manually-expanded gaps otherwise stick around forever — once a
+        // gap's key is in `manuallyExpandedGapKeys` nothing normally clears
+        // it, so re-collapsing the whole day and turning collapsing back
+        // on would leave that one gap permanently stuck open, reading as
+        // if the toolbar toggle had stopped working for it. Turning
+        // collapsing off is the natural "reset" moment — everything's
+        // already fully expanded at that point anyway.
+        .onChange(of: isCollapsingEmptyPeriods) { _, newValue in
+            if !newValue {
+                manuallyExpandedGapKeys.removeAll()
+            }
+        }
+        // Bumped specifically for the case above's counterpart: every gap
+        // manually expanded away while `isCollapsingEmptyPeriods` stayed
+        // on the whole time, so there's no `false` transition to piggyback
+        // a reset on — the toolbar button bumps this token instead.
+        .onChange(of: collapseResetToken) { _, _ in
+            manuallyExpandedGapKeys.removeAll()
+        }
+        .onChange(of: hasAnyGapSegment, initial: true) { _, newValue in
+            hasCollapsedGap = newValue
         }
         .onChange(of: isEmptySlotArmed) { _, newValue in
             isInteracting = newValue || (draggingRowID != nil)
@@ -1107,19 +1237,25 @@ private struct DayTimelineSegment: View {
     }
 
     /// The compact divider shown in place of a collapsed empty stretch —
-    /// just how much free time is being hidden there. Not individually
-    /// tappable to re-expand; the whole day collapses/expands together
-    /// via the toolbar toggle (see `ScheduleReviewView`).
+    /// tapping it expands just that one gap (recorded in
+    /// `manuallyExpandedGapKeys` by `gapKey`), leaving every other
+    /// collapsed gap on the day untouched.
     private func collapsedGapRow(_ segment: DisplaySegment) -> some View {
-        HStack(spacing: 6) {
-            Rectangle().fill(Color.secondary.opacity(0.15)).frame(height: 1)
-            Text(freeTimeLabel(forMinutes: segment.quarterCount * 15))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .fixedSize()
-            Rectangle().fill(Color.secondary.opacity(0.15)).frame(height: 1)
+        Button {
+            manuallyExpandedGapKeys.insert(segment.gapKey)
+        } label: {
+            HStack(spacing: 6) {
+                Rectangle().fill(Color.secondary.opacity(0.15)).frame(height: 1)
+                Text(freeTimeLabel(forMinutes: segment.rawGapMinutes))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                Rectangle().fill(Color.secondary.opacity(0.15)).frame(height: 1)
+            }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .padding(.leading, hourLabelWidth + 8)
         .padding(.trailing, contentTrailingPadding)
     }
@@ -1160,13 +1296,13 @@ private struct DayTimelineSegment: View {
     }
 
     /// Enabled windows that apply to `targetDate`'s weekday, outlined so a
-    /// drag has a visible target before you let go — hidden entirely
-    /// while collapsing empty periods, since dragging is disabled then
-    /// anyway (see `isCollapsingEmptyPeriods`) and a window spanning a
-    /// collapsed gap has no single real position to draw it at.
+    /// drag has a visible target before you let go — hidden while any gap
+    /// is actually shown collapsed, since dragging is disabled then
+    /// anyway (see `hasAnyGapSegment`) and a window spanning a collapsed
+    /// gap has no single real position to draw it at.
     @ViewBuilder
     private var eligibleHoursOverlay: some View {
-        if !isCollapsingEmptyPeriods {
+        if !hasAnyGapSegment {
         let weekday = Calendar.current.component(.weekday, from: targetDate)
         ForEach(eligibleHoursWindows.filter { $0.isEnabled && $0.daysOfWeek.contains(weekday) }) { window in
             let startMinutes = window.startHour * 60 + window.startMinute
@@ -1331,9 +1467,10 @@ private struct DayTimelineSegment: View {
                 // open, or this row is already mid-swipe — otherwise you
                 // could pick up an unrelated block right out from under
                 // it, or start a vertical move partway through a delete
-                // swipe. And while collapsing empty periods — see
-                // `isCollapsingEmptyPeriods`.
-                guard !isCollapsingEmptyPeriods, !isLocked, emptySlotTime == nil, swipingRowID == nil else { return }
+                // swipe. Dragging into a collapsed gap is fine — see
+                // `gapSegment(atY:)` in `onChanged` below, which expands
+                // one the moment the drag actually reaches it.
+                guard !isLocked, emptySlotTime == nil, swipingRowID == nil else { return }
                 draggingRowID = row.id
                 dragOriginY = point.y
                 dragOriginX = point.x
@@ -1345,6 +1482,9 @@ private struct DayTimelineSegment: View {
                 dragTranslation = snappedTranslation(point.y - dragOriginY, for: row)
                 dragTranslationX = point.x - dragOriginX
                 dragPointY = point.y
+                if let gap = gapSegment(atY: point.y) {
+                    manuallyExpandedGapKeys.insert(gap.gapKey)
+                }
             },
             onEnded: { _ in
                 guard draggingRowID == row.id else { return }

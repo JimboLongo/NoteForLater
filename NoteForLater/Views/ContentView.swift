@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var dailyDigestLaunchState = DailyDigestLaunchState.shared
     @State private var dailyDigestSettings = DailyDigestSettings.shared
     @State private var moreNavigationPath = NavigationPath()
+    @State private var moreResetToken = 0
     @State private var inboxNavigationPath = NavigationPath()
     @State private var inboxResetToken = 0
     @State private var shelvesNavigationPath = NavigationPath()
@@ -47,6 +48,7 @@ struct ContentView: View {
                 .tag(AppTab.shelves)
 
             MoreView(navigationPath: $moreNavigationPath)
+                .id(moreResetToken)
                 .tabItem { Label("More", systemImage: "ellipsis.circle") }
                 .tag(AppTab.more)
         }
@@ -114,6 +116,14 @@ struct ContentView: View {
             set: { newValue in
                 if newValue == .more {
                     moreNavigationPath = NavigationPath()
+                    // A path reset alone leaves any of MoreView's own
+                    // @State (e.g. `isShowingTutorial`, if a sheet were
+                    // left open) untouched — same gap `inboxResetToken`
+                    // exists to close for the Inbox carousel below. The
+                    // `.id()` this drives forces MoreView to be torn down
+                    // and rebuilt from scratch, so re-selecting More is a
+                    // genuinely clean landing on its root list every time.
+                    moreResetToken += 1
                 }
                 if newValue == .inbox {
                     inboxNavigationPath = NavigationPath()

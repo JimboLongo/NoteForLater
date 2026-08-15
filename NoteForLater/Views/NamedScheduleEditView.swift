@@ -56,13 +56,11 @@ struct NamedScheduleEditView: View {
                     Text("Start")
                     Spacer()
                     QuarterHourDatePicker(date: startTimeBinding)
-                        .fixedSize()
                 }
                 HStack {
                     Text("End")
                     Spacer()
                     QuarterHourDatePicker(date: endTimeBinding)
-                        .fixedSize()
                 }
             }
 
@@ -164,6 +162,15 @@ private struct QuarterHourDatePicker: UIViewRepresentable {
         if uiView.date != date {
             uiView.date = date
         }
+    }
+
+    /// Without this, SwiftUI sizes the representable off `intrinsicContentSize`
+    /// — which for a `.compact`-style `UIDatePicker` can still read as zero
+    /// the first time SwiftUI asks (before UIKit's own internal layout pass
+    /// has run), rendering it invisible. Asking the picker to fit itself
+    /// directly sidesteps that timing gap.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UIDatePicker, context: Context) -> CGSize? {
+        uiView.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
