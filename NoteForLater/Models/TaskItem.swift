@@ -42,8 +42,19 @@ final class TaskItem {
     /// task.
     var startDate: Date?
     var nextStep: String = ""
-    /// 0 means "no duration set" — see `durationLabel(for:)`.
+    /// 0 means "no duration set" — see `durationLabel(for:)`. The user's
+    /// stated size; never written by the scheduler. Compare against
+    /// `remainingMinutes` for what's actually left to place.
     var estimatedMinutes: Int = 0
+    /// What's left to place — initialized to `estimatedMinutes`, decremented
+    /// by `AISchedulingService.pack()` as segments of a divisible task get
+    /// placed, and restored by `ScheduleReviewViewModel
+    /// .clearIncompletePastBlocks` when a partial placement is freed back
+    /// up. Kept separate from `estimatedMinutes` so a partially-scheduled
+    /// divisible task doesn't have its own stated duration silently shrink
+    /// — the task card always shows `estimatedMinutes`, with "X of Y
+    /// scheduled" once this drops below it.
+    var remainingMinutes: Int = 0
     /// Same idea as `dueDateDecided`, for "Has duration."
     var durationDecided: Bool = false
     /// Which pill "Has duration" landed on, independent of
@@ -265,6 +276,7 @@ final class TaskItem {
         self.dueDate = dueDate
         self.nextStep = nextStep
         self.estimatedMinutes = estimatedMinutes
+        self.remainingMinutes = estimatedMinutes
         self.tags = tags
         self.priorityRaw = priority.rawValue
         self.isScheduled = false

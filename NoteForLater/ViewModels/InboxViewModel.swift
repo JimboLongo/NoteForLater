@@ -33,6 +33,7 @@ final class InboxViewModel {
     func route(_ task: TaskItem, to shelf: Shelf) {
         task.shelf = shelf
         task.estimatedMinutes = shelf.resolvedDuration(candidateMinutes: task.estimatedMinutes)
+        task.remainingMinutes = task.estimatedMinutes
         if !shelf.effectiveTracksDuration {
             task.isDivisible = false
             task.minimumSegmentMinutes = 0

@@ -34,6 +34,13 @@ struct TaskCardSheet: View {
                 onMove: { shelf in
                     task.shelf = shelf
                     task.estimatedMinutes = shelf.resolvedDuration(candidateMinutes: task.estimatedMinutes)
+                    // Set explicitly rather than relying on `TaskReviewCard`'s
+                    // own `.onChange(of: task.estimatedMinutes)` — that's
+                    // reliable in practice, but this closure calls `dismiss()`
+                    // on the very next line, and a duration reset that only
+                    // sometimes lands depending on view-teardown timing isn't
+                    // worth the risk when setting it directly costs nothing.
+                    task.remainingMinutes = task.estimatedMinutes
                     if !shelf.effectiveTracksDuration {
                         task.isDivisible = false
                         task.minimumSegmentMinutes = 0
@@ -112,6 +119,7 @@ struct TaskEditSnapshot: Equatable {
     let dueDatePicked: Bool
     let priority: Priority
     let estimatedMinutes: Int
+    let remainingMinutes: Int
     let durationDecided: Bool
     let durationAnsweredYes: Bool
     let isDivisible: Bool
@@ -135,6 +143,7 @@ struct TaskEditSnapshot: Equatable {
         dueDatePicked = task.dueDatePicked
         priority = task.priority
         estimatedMinutes = task.estimatedMinutes
+        remainingMinutes = task.remainingMinutes
         durationDecided = task.durationDecided
         durationAnsweredYes = task.durationAnsweredYes
         isDivisible = task.isDivisible
@@ -159,6 +168,7 @@ struct TaskEditSnapshot: Equatable {
         task.dueDatePicked = dueDatePicked
         task.priority = priority
         task.estimatedMinutes = estimatedMinutes
+        task.remainingMinutes = remainingMinutes
         task.durationDecided = durationDecided
         task.durationAnsweredYes = durationAnsweredYes
         task.isDivisible = isDivisible

@@ -46,6 +46,34 @@ struct NoteForLaterApp: App {
         Self.renamePantryShelfToKitchenIfNeeded(container: sharedModelContainer)
         Self.unscheduleTwoMinuteTaskBlocksIfNeeded(container: sharedModelContainer)
         Self.cancelLegacyIndividualReminderNotificationsIfNeeded()
+        Self.backfillRemainingMinutesIfNeeded(container: sharedModelContainer)
+    }
+
+    /// One-time launch migration: `TaskItem.remainingMinutes` is new — a
+    /// task that existed before this shipped gets the field's own default
+    /// (`0`) on schema migration, not a value derived from its existing
+    /// `estimatedMinutes`. Left alone, every pre-existing task would read
+    /// as fully consumed ("0 of Y scheduled") the moment this update
+    /// lands, even one that was never touched by the scheduler at all.
+    /// Backfills every task to `remainingMinutes = estimatedMinutes`
+    /// exactly once; a task created after this migration already gets
+    /// that from `TaskItem.init` itself.
+    private static func backfillRemainingMinutesIfNeeded(container: ModelContainer) {
+        let flagKey = "didBackfillRemainingMinutes.v1"
+        guard !UserDefaults.standard.bool(forKey: flagKey) else { return }
+
+        let context = ModelContext(container)
+        guard let tasks = try? context.fetch(FetchDescriptor<TaskItem>()) else { return }
+        for task in tasks {
+            task.remainingMinutes = task.estimatedMinutes
+        }
+        do {
+            try context.save()
+            UserDefaults.standard.set(true, forKey: flagKey)
+        } catch {
+            // Leave the flag unset so this retries next launch instead of
+            // silently leaving every existing task's remaining minutes at 0.
+        }
     }
 
     /// One-time launch cleanup: the old per-habit (`HabitNotificationService`)

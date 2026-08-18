@@ -849,7 +849,17 @@ struct TaskReviewCard: View {
             }
             syncEligibilityWithFit()
         }
-        .onChange(of: task.estimatedMinutes) { _, _ in syncEligibilityWithFit() }
+        .onChange(of: task.estimatedMinutes) { _, newValue in
+            syncEligibilityWithFit()
+            // A duration edit is a fresh stated size — whatever partial
+            // placement `remainingMinutes` was tracking against the *old*
+            // size no longer means anything. Attached here (the always-
+            // mounted card body) rather than on the Duration Picker
+            // itself, which only exists in the view hierarchy while "Yes"
+            // is selected and would miss the "No" / untap-"Yes" resets
+            // that also write `estimatedMinutes` directly.
+            task.remainingMinutes = newValue
+        }
         .onChange(of: task.isDivisible) { _, _ in syncEligibilityWithFit() }
         .onChange(of: task.minimumSegmentMinutes) { _, _ in syncEligibilityWithFit() }
     }
@@ -1421,6 +1431,17 @@ struct TaskReviewCard: View {
                             task.syncScheduledBlockDuration()
                         }
                     }
+                }
+
+                // `estimatedMinutes` itself never changes from a partial
+                // placement (see `TaskItem.remainingMinutes`) — this is
+                // the one place that surfaces the difference, rather than
+                // the duration silently reading as the task's full size
+                // while some of it is actually still sitting unplaced.
+                if isYesSelected, task.remainingMinutes < task.estimatedMinutes {
+                    Text("\(TaskItem.durationLabel(for: task.estimatedMinutes - task.remainingMinutes)) of \(TaskItem.durationLabel(for: task.estimatedMinutes)) scheduled")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(.top, 4)

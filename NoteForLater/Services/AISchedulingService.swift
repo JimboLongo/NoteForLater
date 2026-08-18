@@ -393,7 +393,12 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             if rule.fillStrategy == .maxDuration, rule.maxDurationTaskCountEnabled, taskCount >= rule.maxTaskCount { break }
 
             let isEstimated = task.estimatedMinutes <= 0
-            let baseMinutes = isEstimated ? guessedMinutes(for: rule) : task.estimatedMinutes
+            // `remainingMinutes`, not `estimatedMinutes` — a task already
+            // partially placed by an earlier pack() call has less left to
+            // offer than its original stated size, and `estimatedMinutes`
+            // itself is never touched by the scheduler (see `TaskItem
+            // .remainingMinutes`'s doc comment).
+            let baseMinutes = isEstimated ? guessedMinutes(for: rule) : task.remainingMinutes
 
             let minutesNeeded: Int
             switch rule.fillStrategy {
@@ -457,10 +462,11 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             totalMinutesUsed += actualMinutes
             taskCount += 1
 
-            if isEstimated || actualMinutes >= task.estimatedMinutes {
+            if isEstimated || actualMinutes >= task.remainingMinutes {
                 task.isScheduled = true
+                task.remainingMinutes = 0
             } else {
-                task.estimatedMinutes -= actualMinutes
+                task.remainingMinutes -= actualMinutes
             }
         }
 

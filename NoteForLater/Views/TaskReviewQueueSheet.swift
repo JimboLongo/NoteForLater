@@ -66,6 +66,7 @@ struct TaskReviewQueueSheet: View {
                         onMove: { shelf in
                             currentTask.shelf = shelf
                             currentTask.estimatedMinutes = shelf.resolvedDuration(candidateMinutes: currentTask.estimatedMinutes)
+                            currentTask.remainingMinutes = currentTask.estimatedMinutes
                             if !shelf.effectiveTracksDuration {
                                 currentTask.isDivisible = false
                                 currentTask.minimumSegmentMinutes = 0

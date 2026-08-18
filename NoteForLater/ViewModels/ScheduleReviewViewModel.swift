@@ -418,6 +418,7 @@ final class ScheduleReviewViewModel {
         var survivingBlocks = allBlocks
         for block in allBlocks where block.approvalStatus != .approved && !block.isLocked && !block.isCompleted && block.startTime >= cutoff {
             block.task?.isScheduled = false
+            restoreRemainingMinutes(for: block)
             // Explicitly clears the task/habit's to-one inverse before the
             // delete, rather than letting SwiftData's delete-rule nullify
             // sort it out on its own — otherwise a task picked up by a
@@ -1103,6 +1104,7 @@ final class ScheduleReviewViewModel {
                     task.isScheduled = false
                 }
             }
+            restoreRemainingMinutes(for: block)
             if let eventID = block.googleEventID {
                 try? await calendarService.deleteEvent(eventID: eventID)
             }
@@ -1272,6 +1274,24 @@ final class ScheduleReviewViewModel {
         return (eventRows + proposedRows).sorted { $0.startTime < $1.startTime }
     }
 
+    /// Gives back exactly what `block` was holding, capped at the task's
+    /// own `estimatedMinutes` so bookkeeping drift (or a task whose
+    /// duration was edited down after this block was placed) can never
+    /// push `remainingMinutes` past the task's own stated size. A no-op
+    /// for a completed block (its task is either being deleted right
+    /// alongside it or intentionally left alone — see the two callers)
+    /// or one with no task at all. Shared by every place that frees an
+    /// *incomplete* block without the task ever finishing it —
+    /// `clearIncompletePastBlocks`, `regenerateFromNow`'s own
+    /// forward-looking clear, and `clearBlocksBeforeToday` — so a
+    /// partially-scheduled divisible task never permanently shrinks just
+    /// because its block got cleared instead of finished. See
+    /// `TaskItem.remainingMinutes`'s doc comment for the bug this closes.
+    private func restoreRemainingMinutes(for block: ScheduledBlock) {
+        guard let task = block.task, !block.isCompleted else { return }
+        task.remainingMinutes = min(task.estimatedMinutes, task.remainingMinutes + block.durationMinutes)
+    }
+
     /// "Assume Not Completed" — the fast alternative to reviewing each
     /// overdue block one at a time: unschedules every one of them (same as
     /// swiping it away in the review list) so a following
@@ -1300,6 +1320,7 @@ final class ScheduleReviewViewModel {
         for block in toClear {
             block.task?.isScheduled = false
             block.task?.pushedCount += 1
+            restoreRemainingMinutes(for: block)
             if let eventID = block.googleEventID {
                 try? await calendarService.deleteEvent(eventID: eventID)
             }
