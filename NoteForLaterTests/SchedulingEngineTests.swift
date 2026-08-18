@@ -2,10 +2,14 @@ import XCTest
 import SwiftData
 @testable import NoteForLater
 
-/// Phase 1 of the scheduling engine spec (docs/NoteForLater-Scheduling-Spec.md):
-/// `TaskItem.remainingMinutes` + packing floor fixes. Covers §12 test cases
+/// Scheduling engine spec (docs/NoteForLater-Scheduling-Spec.md).
+/// Phase 1: `TaskItem.remainingMinutes` + packing floor fixes — §12 cases
 /// 7-9, plus two cases for the init/clamp behavior `remainingMinutes`
 /// depends on.
+/// Phase 2: `SchedulingRule.fitStatus`/`canEverFit`, `TaskItem
+/// .isEffectivelyEligible`, `syncEligibilityWithFit` removal — §12 cases
+/// 1-6 (fit checking) and 10 (Tier-3-removal regression, now against the
+/// `isEffectivelyEligible` filter).
 final class SchedulingEngineTests: XCTestCase {
     private var container: ModelContainer!
     private var context: ModelContext!
@@ -214,5 +218,104 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertEqual(placedMinutes, 120)
         XCTAssertEqual(task.remainingMinutes, 0)
         XCTAssertTrue(task.isScheduled)
+    }
+
+    // MARK: - §12.1-4 — SchedulingRule.fitStatus / canEverFit
+
+    /// §12.1 — divisible @ 60min, maxTaskCount rule capped at 15min/task.
+    func test_fitStatus_divisibleChunkExceedsMaxTaskCountCap() {
+        let shelf = Shelf(name: "Test Shelf")
+        let rule = SchedulingRule(shelf: shelf, fillStrategy: .maxTaskCount, maxMinutesPerTask: 15)
+        XCTAssertEqual(rule.fitStatus(estimatedMinutes: 240, isDivisible: true, minimumSegmentMinutes: 60), .exceedsConstraint)
+        XCTAssertFalse(rule.canEverFit(estimatedMinutes: 240, isDivisible: true, minimumSegmentMinutes: 60))
+    }
+
+    /// §12.2 — same task, maxDuration rule with 120min total: the segment
+    /// (60min) fits even though the whole task (240min) wouldn't.
+    func test_fitStatus_divisibleChunkFitsMaxDurationBudget() {
+        let shelf = Shelf(name: "Test Shelf")
+        let rule = SchedulingRule(shelf: shelf, fillStrategy: .maxDuration, maxTotalMinutes: 120)
+        XCTAssertEqual(rule.fitStatus(estimatedMinutes: 240, isDivisible: true, minimumSegmentMinutes: 60), .fits)
+        XCTAssertTrue(rule.canEverFit(estimatedMinutes: 240, isDivisible: true, minimumSegmentMinutes: 60))
+    }
+
+    /// §12.3 — divisible, minimumSegmentMinutes == 0 ("Not Selected").
+    func test_fitStatus_divisibleWithNoMinimumSegment_needsMinimumSegment() {
+        let shelf = Shelf(name: "Test Shelf")
+        let rule = SchedulingRule(shelf: shelf, fillStrategy: .maxDuration, maxTotalMinutes: 120)
+        XCTAssertEqual(rule.fitStatus(estimatedMinutes: 240, isDivisible: true, minimumSegmentMinutes: 0), .needsMinimumSegment)
+        XCTAssertFalse(rule.canEverFit(estimatedMinutes: 240, isDivisible: true, minimumSegmentMinutes: 0))
+    }
+
+    /// §12.4 — estimatedMinutes == 0, even under fillToFit (no cap at all).
+    func test_fitStatus_zeroDuration_needsDuration() {
+        let shelf = Shelf(name: "Test Shelf")
+        let rule = SchedulingRule(shelf: shelf, fillStrategy: .fillToFit)
+        XCTAssertEqual(rule.fitStatus(estimatedMinutes: 0, isDivisible: false, minimumSegmentMinutes: 0), .needsDuration)
+        XCTAssertFalse(rule.canEverFit(estimatedMinutes: 0, isDivisible: false, minimumSegmentMinutes: 0))
+    }
+
+    // MARK: - §12.5-6 — isEffectivelyEligible never writes to includedSchedulingRuleIDs
+
+    /// §12.5 — a task explicitly toggled eligible for a rule it can't fit
+    /// keeps that toggle (`isEligible` stays `true`, the ID stays in the
+    /// array) even though it isn't effectively eligible right now.
+    func test_isEffectivelyEligible_falseWhenTaskEligibleButCannotFit() {
+        let (shelf, rule) = makeShelf(fillStrategy: .maxDuration, maxTotalMinutes: 10)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+
+        XCTAssertTrue(task.isEligible(for: rule))
+        XCTAssertFalse(task.isEffectivelyEligible(for: rule))
+        XCTAssertTrue(task.includedSchedulingRuleIDs.contains(rule.id))
+    }
+
+    /// §12.6 — loosening the rule afterward flips `isEffectivelyEligible`
+    /// back to `true` with no user action. Also the direct regression
+    /// guard for `syncEligibilityWithFit`'s removal: asserts the rule ID
+    /// is still present in `includedSchedulingRuleIDs` both immediately
+    /// after the fit failure *and* after loosening — not just that the
+    /// derived Bool flips. If anything ever reintroduces a write-on-fit-
+    /// failure (the exact bug `syncEligibilityWithFit` had), this catches
+    /// it: the ID would already be gone by the time the rule loosens, and
+    /// `isEffectivelyEligible` would stay `false` even though the fit
+    /// itself would now pass.
+    func test_isEffectivelyEligible_trueAfterLooseningRule_idNeverStripped() {
+        let (shelf, rule) = makeShelf(fillStrategy: .maxDuration, maxTotalMinutes: 10)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+
+        XCTAssertFalse(task.isEffectivelyEligible(for: rule))
+        XCTAssertTrue(task.includedSchedulingRuleIDs.contains(rule.id), "a fit failure must never strip the rule ID")
+
+        rule.maxTotalMinutes = 90 // loosened — no call to setEligible, no user action
+
+        XCTAssertTrue(task.isEffectivelyEligible(for: rule))
+        XCTAssertTrue(task.includedSchedulingRuleIDs.contains(rule.id), "still present after loosening — proves nothing was ever destructively written during the failure window")
+    }
+
+    // MARK: - §12.10 — Tier-3-removal regression, against isEffectivelyEligible
+
+    /// A task never toggled eligible for the shelf's only rule is never
+    /// placed, even with hours of free time and nothing else competing
+    /// for it — proves there's no leftover-budget fallback sweeping in an
+    /// unmarked task just because a `fillToFit` window has room to spare.
+    func test_ineligibleTask_neverPlaced_evenWithRoomToSpare() async throws {
+        let testDay = day(2026, 1, 5)
+        let (shelf, _) = makeShelf(fillStrategy: .fillToFit)
+        let task = TaskItem(title: "Ineligible Task", shelf: shelf, estimatedMinutes: 30)
+        // Deliberately never made eligible for the shelf's rule — that's the point.
+        context.insert(task)
+        shelf.tasks = (shelf.tasks ?? []) + [task]
+
+        let blocks = try await service.generateProposedSchedule(
+            shelves: [shelf],
+            habits: [],
+            freeSlots: [businessHoursSlot(on: testDay)],
+            eligibleHoursWindows: [],
+            date: testDay,
+            existingBlocks: []
+        )
+
+        XCTAssertTrue(blocks.isEmpty)
+        XCTAssertFalse(task.isScheduled)
     }
 }

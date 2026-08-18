@@ -847,10 +847,8 @@ struct TaskReviewCard: View {
                     dragOffset = .zero
                 }
             }
-            syncEligibilityWithFit()
         }
         .onChange(of: task.estimatedMinutes) { _, newValue in
-            syncEligibilityWithFit()
             // A duration edit is a fresh stated size — whatever partial
             // placement `remainingMinutes` was tracking against the *old*
             // size no longer means anything. Attached here (the always-
@@ -860,22 +858,25 @@ struct TaskReviewCard: View {
             // that also write `estimatedMinutes` directly.
             task.remainingMinutes = newValue
         }
-        .onChange(of: task.isDivisible) { _, _ in syncEligibilityWithFit() }
-        .onChange(of: task.minimumSegmentMinutes) { _, _ in syncEligibilityWithFit() }
     }
 
-    /// Auto-clears eligibility for any rule this task can no longer ever
-    /// fit (see `SchedulingRule.canEverFit`) — a duration edit that pushes
-    /// a task's estimated (or, if divisible, minimum-segment) time past
-    /// what a rule could ever hold shouldn't leave that rule's row faded
-    /// but still toggled on; the stored eligibility itself needs to
-    /// actually clear, not just look disabled.
-    private func syncEligibilityWithFit() {
-        guard let rules = previewedShelf?.schedulingRules else { return }
-        for rule in rules where task.isEligible(for: rule) {
-            if !rule.canEverFit(minutesNeeded: task.estimatedMinutes, isDivisible: task.isDivisible, minimumSegmentMinutes: task.minimumSegmentMinutes) {
-                task.setEligible(false, for: rule)
-            }
+    /// The Eligible Schedules row's own subtitle — one distinct caption
+    /// per non-`.fits` `SchedulingFitStatus`, naming the actual blocker
+    /// instead of a single flat "Exceeds time constraint" that used to
+    /// read as permanent (and, for the two "not ready yet" cases, was
+    /// simply wrong — nothing about those tasks is actually too big for
+    /// anything). `nil` for `.fits` — no caption, toggle just reads
+    /// enabled.
+    private func eligibleScheduleCaption(for status: SchedulingFitStatus) -> String? {
+        switch status {
+        case .needsDuration:
+            return "Set a duration first."
+        case .needsMinimumSegment:
+            return "Set a minimum segment first"
+        case .exceedsConstraint:
+            return "Exceeds time constraint — will re-enable if this changes"
+        case .fits:
+            return nil
         }
     }
 
@@ -1598,7 +1599,8 @@ struct TaskReviewCard: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     ForEach(rules.sorted { $0.sortOrder < $1.sortOrder }) { rule in
-                        let fits = rule.canEverFit(minutesNeeded: task.estimatedMinutes, isDivisible: task.isDivisible, minimumSegmentMinutes: task.minimumSegmentMinutes)
+                        let status = task.fitStatus(for: rule)
+                        let fits = status == .fits
                         HStack(spacing: 10) {
                             Toggle(
                                 isOn: Binding(
@@ -1626,8 +1628,8 @@ struct TaskReviewCard: View {
                                             .truncationMode(.tail)
                                     }
                                 }
-                                if !fits {
-                                    Text("Exceeds time constraint")
+                                if let caption = eligibleScheduleCaption(for: status) {
+                                    Text(caption)
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
                                 }
@@ -1750,7 +1752,6 @@ struct TaskReviewCard: View {
                                 // (see `onMove`, which no longer re-seeds
                                 // this itself).
                                 task.includedSchedulingRuleIDs = (shelf.schedulingRules ?? []).filter(\.isEnabled).map(\.id)
-                                syncEligibilityWithFit()
                             }
                         }
                     } label: {

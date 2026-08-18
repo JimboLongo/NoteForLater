@@ -21,6 +21,23 @@ enum FillStrategy: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// Whether — and if not, why not — a rule could ever place a task with a
+/// given duration/divisibility. See `SchedulingRule.fitStatus`.
+enum SchedulingFitStatus {
+    /// No duration set at all — nothing to compare against the rule's
+    /// cap yet, so no fit judgment is possible either way.
+    case needsDuration
+    /// Divisible, but no minimum segment chosen yet ("Not Selected") —
+    /// same idea as `needsDuration`, for the divisible/segment question
+    /// instead of the duration one.
+    case needsMinimumSegment
+    /// Genuinely too big for anything this rule could ever offer —
+    /// duration/segment vs. the rule's own cap, a real comparison.
+    case exceedsConstraint
+    /// Fits — comfortably within whatever the rule allows.
+    case fits
+}
+
 /// One "pull window" for a shelf: which days, what time range, and how much
 /// to pull into it. A shelf can have several — e.g. Personal To-Do might
 /// have a weekday-evening rule, a weekend rule, and a lunch-break rule, all
@@ -113,34 +130,44 @@ final class SchedulingRule {
         name.isEmpty ? (namedSchedule?.name ?? "") : name
     }
 
-    /// Whether this rule could ever place something needing `minutesNeeded`
-    /// at all, given its divisibility and this rule's fill-strategy cap —
-    /// independent of the per-task "Eligible Schedules" checkbox. A
-    /// non-divisible item longer than what the rule could ever hand it
-    /// (a single-task cap, or the rule's whole budget) can never actually
-    /// be pulled by this rule no matter how that checkbox is set. Takes
-    /// plain values rather than a TaskItem so it also works for an
-    /// unsorted task that hasn't been routed to a shelf yet (see
-    /// NightlyReviewView's TaskReviewCard).
-    /// `minimumSegmentMinutes` (default 0, meaning "not decided yet") is
-    /// a divisible task's own hard floor on any one placement — a rule
-    /// can only ever place a divisible task if that floor itself fits
-    /// within whatever the rule's own cap allows in one go (the packer
-    /// enforces this same floor per-placement; see `AISchedulingService
-    /// .pack`). A minimum of 0 is treated as "not decided yet" rather
-    /// than "impossible" — same as the packer's own handling — so an
-    /// incomplete field doesn't get reported as a fit failure.
-    func canEverFit(minutesNeeded: Int, isDivisible: Bool, minimumSegmentMinutes: Int = 0) -> Bool {
+    /// Whether — and if not, *why* — this rule could ever place something
+    /// with the given duration/divisibility, independent of the per-task
+    /// "Eligible Schedules" checkbox. Two genuinely different reasons a
+    /// task can't be placed collapse to the same `false` under a plain
+    /// `Bool`: "blocked by a real constraint" (the rule's cap is just too
+    /// small) and "not ready to evaluate yet" (no duration, or no minimum
+    /// segment, chosen). Conflating them either makes an unfinished
+    /// task's toggle look wrongly enabled, or shows "Exceeds time
+    /// constraint" on a task that isn't actually too big for anything —
+    /// it just hasn't been fully configured. `.needsDuration` and
+    /// `.needsMinimumSegment` map 1:1 onto `TaskItem.durationMissing`/
+    /// `divisibleMissing` for exactly this reason.
+    func fitStatus(estimatedMinutes: Int, isDivisible: Bool, minimumSegmentMinutes: Int) -> SchedulingFitStatus {
+        guard estimatedMinutes > 0 else { return .needsDuration }
+        if isDivisible, minimumSegmentMinutes <= 0 { return .needsMinimumSegment }
+        // Divisible cases use the *segment* size, not the whole task's —
+        // a recurring window drains a large divisible task across many
+        // occurrences, so testing the whole task here would gray out
+        // most large projects and defeat divisibility, and would flicker
+        // as `remainingMinutes` drains even for ones it doesn't.
+        let minutesToCheck = isDivisible ? minimumSegmentMinutes : estimatedMinutes
         switch fillStrategy {
         case .fillToFit:
-            return true
+            return .fits
         case .maxDuration:
-            guard isDivisible else { return minutesNeeded <= maxTotalMinutes }
-            return minimumSegmentMinutes <= 0 || minimumSegmentMinutes <= maxTotalMinutes
+            return minutesToCheck <= maxTotalMinutes ? .fits : .exceedsConstraint
         case .maxTaskCount:
-            guard isDivisible else { return minutesNeeded <= maxMinutesPerTask }
-            return minimumSegmentMinutes <= 0 || minimumSegmentMinutes <= maxMinutesPerTask
+            return minutesToCheck <= maxMinutesPerTask ? .fits : .exceedsConstraint
         }
+    }
+
+    /// Convenience for every call site that only needs a yes/no, not the
+    /// reason — see `fitStatus(estimatedMinutes:isDivisible:minimumSegmentMinutes:)`.
+    /// Takes plain values rather than a `TaskItem` so it also works for
+    /// an unsorted task that hasn't been routed to a shelf yet (see
+    /// `NightlyReviewView`'s `TaskReviewCard`).
+    func canEverFit(estimatedMinutes: Int, isDivisible: Bool, minimumSegmentMinutes: Int) -> Bool {
+        fitStatus(estimatedMinutes: estimatedMinutes, isDivisible: isDivisible, minimumSegmentMinutes: minimumSegmentMinutes) == .fits
     }
 
     static let dayLabels: [(weekday: Int, short: String)] = [

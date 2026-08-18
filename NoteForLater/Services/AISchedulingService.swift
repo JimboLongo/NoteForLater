@@ -73,24 +73,21 @@ protocol AISchedulingServiceProtocol: AnyObject {
 /// shelves with overlapping windows on the same day never double-book the
 /// same slot.
 ///
-/// Each rule's own pass covers two tiers, in order, both pulling from
-/// that same rule's window, that same rule's fill-strategy budget, and
-/// only tasks explicitly marked eligible for this specific rule (never
-/// anywhere else — a task never lands outside a shelf's own
-/// eligible-schedule hours just because there was leftover time somewhere
-/// else in the day, and never under a rule it wasn't opted into just
-/// because that rule had room left):
-///   1. Shelf task, has a real duration, eligible for this rule — today's
-///      baseline behavior.
-///   2. Same, but no duration set — guessed (see `guessedMinutes`) rather
-///      than left unscheduled forever.
+/// Each rule's own pass pulls only from that same rule's window, that
+/// same rule's fill-strategy budget, and only tasks that are both
+/// explicitly marked eligible for this specific rule *and* actually able
+/// to fit it (`TaskItem.isEffectivelyEligible` — never anywhere else: a
+/// task never lands outside a shelf's own eligible-schedule hours just
+/// because there was leftover time somewhere else in the day, never
+/// under a rule it wasn't opted into just because that rule had room
+/// left, and never guessed a duration it was never given — a
+/// duration-less task simply isn't effectively eligible for anything
+/// (see `SchedulingRule.fitStatus`'s `.needsDuration` case), so `pack()`
+/// never has to guess one on its behalf the way an earlier version did.
 /// Inbox tasks (no shelf at all) are deliberately never auto-scheduled —
 /// they're surfaced for the user to sort or explicitly place instead (see
 /// ScheduleReviewView's pre-generate "Review Inbox" prompt and the
 /// timeline's long-press-to-insert picker).
-/// Within every rule, ordering (`tieredOrdering`) puts a real duration
-/// before a guessed one — so a guess only ever fills time nothing
-/// better-specified wanted.
 final class MockAISchedulingService: AISchedulingServiceProtocol {
     func generateProposedSchedule(
         shelves: [Shelf],
@@ -157,11 +154,14 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
                 // it just sits out this day's packing entirely rather
                 // than counting as unschedulable.
                 .filter { !$0.isScheduled && !$0.isRecurring && !scheduledTaskIDs.contains($0.id) && $0.isEligibleToStart(on: date, calendar: calendar) }
-                // A task never toggled eligible for this specific rule
-                // simply isn't a candidate for it, full stop — see this
-                // method's doc comment.
-                .filter { $0.isEligible(for: rule) }
-                .sorted { tieredOrdering($0, $1) }
+                // A task never toggled eligible for this specific rule,
+                // or one that is but could never actually fit it (no
+                // duration, no minimum segment, or genuinely too big —
+                // see `TaskItem.isEffectivelyEligible`), simply isn't a
+                // candidate for it, full stop — see this method's doc
+                // comment.
+                .filter { $0.isEffectivelyEligible(for: rule) }
+                .sorted { taskOrdering($0, $1) }
 
             // Every task block already sitting inside this rule's own
             // window — whichever call actually placed it — counts against
@@ -187,8 +187,18 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
                 startingTaskCount: startingTaskCount,
                 startingMinutesUsed: startingMinutesUsed
             )
-            for (task, start, end, isEstimated) in placed {
-                blocks.append(ScheduledBlock(date: date, startTime: start, endTime: end, task: task, isEstimatedDuration: isEstimated))
+            for (task, start, end) in placed {
+                // `isEstimatedDuration` defaults to `false` — every
+                // candidate reaching `pack()` is `isEffectivelyEligible`,
+                // which already guarantees a real `estimatedMinutes > 0`
+                // (see `SchedulingFitStatus.needsDuration`), so the
+                // packer itself never guesses a duration anymore. The
+                // field and its "(Est Duration)" display stay in use
+                // elsewhere — `ScheduleReviewViewModel.insertBlock`'s own
+                // manual-timeline-insert fallback, and
+                // `placeHabitsAndRecurringTasks`'s own recurring-task
+                // fallback, both still write it.
+                blocks.append(ScheduledBlock(date: date, startTime: start, endTime: end, task: task))
                 scheduledTaskIDs.insert(task.id)
             }
 
@@ -359,28 +369,28 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
     ///
     /// When a divisible task only gets part of its time placed (truncated
     /// by a maxDuration budget or a maxTaskCount per-task cap), its
-    /// `estimatedMinutes` is reduced by exactly what got scheduled and it's
-    /// left unscheduled — the remainder stays on the shelf, eligible to be
-    /// picked up again by another rule or a future night. Only a task whose
-    /// *entire* remaining time gets placed is marked scheduled.
+    /// `remainingMinutes` is reduced by exactly what got scheduled and
+    /// it's left unscheduled — the remainder stays on the shelf, eligible
+    /// to be picked up again by another rule or a future night.
+    /// `estimatedMinutes` itself is never touched (see `TaskItem
+    /// .remainingMinutes`'s doc comment). Only a task whose *entire*
+    /// remaining time gets placed is marked scheduled.
     ///
-    /// A task with no duration set at all (`estimatedMinutes <= 0`, e.g.
-    /// "Duration: No" on its card) would otherwise never clear the
-    /// `minutesNeeded > 0` guard below and sit unscheduled forever —
-    /// instead it gets a guessed duration (see `guessedMinutes`) just for
-    /// this placement. `task.estimatedMinutes` itself is left untouched
-    /// (still 0/unset), so the caller can tell it was a guess and mark the
-    /// resulting block's duration with "~" rather than presenting it as a
-    /// real commitment.
+    /// Every candidate here already passed `isEffectivelyEligible`
+    /// upstream (see `generateProposedSchedule`'s own candidate filter),
+    /// which guarantees `estimatedMinutes > 0` — a task with no duration
+    /// set is never effectively eligible for anything (`SchedulingFitStatus
+    /// .needsDuration`), so this never has to guess one on a task's
+    /// behalf the way an earlier version did.
     private func pack(
         candidates: [TaskItem],
         into slots: [TimeSlot],
         rule: SchedulingRule,
         startingTaskCount: Int = 0,
         startingMinutesUsed: Int = 0
-    ) -> (placed: [(task: TaskItem, start: Date, end: Date, isEstimated: Bool)], remainingSlots: [TimeSlot]) {
+    ) -> (placed: [(task: TaskItem, start: Date, end: Date)], remainingSlots: [TimeSlot]) {
         var slots = slots.sorted { $0.start < $1.start }
-        var results: [(TaskItem, Date, Date, Bool)] = []
+        var results: [(TaskItem, Date, Date)] = []
         var totalMinutesUsed = startingMinutesUsed
         var taskCount = startingTaskCount
 
@@ -392,13 +402,10 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             // `maxTaskCount` tasks are already in.
             if rule.fillStrategy == .maxDuration, rule.maxDurationTaskCountEnabled, taskCount >= rule.maxTaskCount { break }
 
-            let isEstimated = task.estimatedMinutes <= 0
             // `remainingMinutes`, not `estimatedMinutes` — a task already
             // partially placed by an earlier pack() call has less left to
-            // offer than its original stated size, and `estimatedMinutes`
-            // itself is never touched by the scheduler (see `TaskItem
-            // .remainingMinutes`'s doc comment).
-            let baseMinutes = isEstimated ? guessedMinutes(for: rule) : task.remainingMinutes
+            // offer than its original stated size.
+            let baseMinutes = task.remainingMinutes
 
             let minutesNeeded: Int
             switch rule.fillStrategy {
@@ -448,7 +455,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             ) else { continue }
 
             for (start, end) in placement {
-                results.append((task, start, end, isEstimated))
+                results.append((task, start, end))
             }
             slots = updatedSlots(after: placement, in: slots)
             // Not always equal to `minutesNeeded` — `place` rounds a
@@ -462,7 +469,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             totalMinutesUsed += actualMinutes
             taskCount += 1
 
-            if isEstimated || actualMinutes >= task.remainingMinutes {
+            if actualMinutes >= task.remainingMinutes {
                 task.isScheduled = true
                 task.remainingMinutes = 0
             } else {
@@ -471,23 +478,6 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
         }
 
         return (results, slots)
-    }
-
-    /// A flat 30-minute default — the same fallback `ScheduleReviewViewModel
-    /// .insertBlock` already uses for a duration-less task added manually
-    /// from the timeline — capped to whatever the rule itself allows, so
-    /// the guess never busts a rule's own per-task or total-minutes cap
-    /// (e.g. a "≤15 min each" rule never gets a 30-minute guess).
-    private func guessedMinutes(for rule: SchedulingRule) -> Int {
-        let defaultGuess = 30
-        switch rule.fillStrategy {
-        case .maxTaskCount:
-            return rule.maxMinutesPerTask > 0 ? min(defaultGuess, rule.maxMinutesPerTask) : defaultGuess
-        case .maxDuration:
-            return rule.maxTotalMinutes > 0 ? min(defaultGuess, rule.maxTotalMinutes) : defaultGuess
-        case .fillToFit:
-            return defaultGuess
-        }
     }
 
     /// Tries a single contiguous slot first; falls back to splitting across
@@ -563,27 +553,6 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
     }
 
     // MARK: - Ordering
-
-    /// Every candidate here has already passed the eligible-for-`rule`
-    /// filter (see `generateProposedSchedule`'s per-rule loop), so the
-    /// only tier left to break ties on is duration.
-    private func tieredOrdering(_ lhs: TaskItem, _ rhs: TaskItem) -> Bool {
-        return durationTieredOrdering(lhs, rhs)
-    }
-
-    /// A real duration always sorts before a guessed one (see `pack`'s
-    /// `isEstimated` handling) — within each tier, so a task that never
-    /// had its duration set only ever fills time nothing better-specified
-    /// wanted first, rather than potentially crowding out a properly-
-    /// estimated task on `taskOrdering` priority/age alone.
-    private func durationTieredOrdering(_ lhs: TaskItem, _ rhs: TaskItem) -> Bool {
-        let lhsHasDuration = lhs.estimatedMinutes > 0
-        let rhsHasDuration = rhs.estimatedMinutes > 0
-        if lhsHasDuration != rhsHasDuration {
-            return lhsHasDuration && !rhsHasDuration
-        }
-        return taskOrdering(lhs, rhs)
-    }
 
     /// Nearing due date first, then priority (high before low), then
     /// whichever task has been sitting on the shelf longest (oldest

@@ -303,6 +303,28 @@ final class TaskItem {
         }
     }
 
+    /// This task's own three properties handed to `rule.fitStatus` — the
+    /// convenience every read site actually wants instead of repeating
+    /// the same triple of arguments.
+    func fitStatus(for rule: SchedulingRule) -> SchedulingFitStatus {
+        rule.fitStatus(estimatedMinutes: estimatedMinutes, isDivisible: isDivisible, minimumSegmentMinutes: minimumSegmentMinutes)
+    }
+
+    /// The one thing the scheduler (and anything else deciding whether
+    /// this task can actually be placed) should read instead of raw
+    /// `isEligible(for:)` — both the user's own opt-in *and* a real check
+    /// that the task could ever fit. Explicitly toggled eligible for a
+    /// rule it can't currently fit still reads `isEligible == true` (see
+    /// `isEligible(for:)`) — that's the user's stored choice, unchanged —
+    /// but is never `isEffectivelyEligible` until it also fits. Nothing
+    /// here ever writes to `includedSchedulingRuleIDs`; a fit failure is
+    /// read-only, so loosening the rule later (or the task's own
+    /// duration/segment changing) makes this flip back to `true` with no
+    /// user action needed — the toggle itself was never touched.
+    func isEffectivelyEligible(for rule: SchedulingRule) -> Bool {
+        isEligible(for: rule) && rule.canEverFit(estimatedMinutes: estimatedMinutes, isDivisible: isDivisible, minimumSegmentMinutes: minimumSegmentMinutes)
+    }
+
     /// Marks this task complete with the exact same effects as checking
     /// it off on the calendar (see `ScheduleReviewViewModel.toggleComplete`)
     /// — every active scheduled block behind it is marked complete too,

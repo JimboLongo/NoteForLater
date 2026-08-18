@@ -543,17 +543,23 @@ final class ScheduleReviewViewModel {
     /// going for, so today running out of room pushes the overflow to
     /// tomorrow, and the day after that, and so on, until every real task
     /// is placed. Scoped to "eligible for one of the shelf's rules, and
-    /// could ever fit it" (see `SchedulingRule.canEverFit`) on purpose —
-    /// every rule requires explicit eligibility now (no tier-3 catch-all
-    /// left to sweep in an unmarked task), and a task that could never
-    /// fit any of its own eligible rules (its estimate, or divisible
-    /// minimum, too big for what any of them ever offer) would otherwise
-    /// keep this true forever, walking the day cap for nothing. Leaving
-    /// it out of "remaining work" is exactly what lets `regenerateFromNow`
-    /// walk without an artificial day cap for tasks that actually can be
-    /// placed, while a genuinely-unplaceable one just stays put,
-    /// unscheduled, for the user to notice and fix (a duration too big, a
-    /// rule too narrow) rather than silently consuming the walk's time.
+    /// could still fit it" on purpose — every rule requires explicit
+    /// eligibility now (no tier-3 catch-all left to sweep in an unmarked
+    /// task), and a task that could never fit any of its own eligible
+    /// rules (its remaining size, or divisible minimum, too big for what
+    /// any of them ever offer) would otherwise keep this true forever,
+    /// walking the day cap for nothing. Leaving it out of "remaining
+    /// work" is exactly what lets `regenerateFromNow` walk without an
+    /// artificial day cap for tasks that actually can be placed, while a
+    /// genuinely-unplaceable one just stays put, unscheduled, for the
+    /// user to notice and fix (a duration too big, a rule too narrow)
+    /// rather than silently consuming the walk's time.
+    ///
+    /// Checks `remainingMinutes`, not `TaskItem.isEffectivelyEligible`'s
+    /// own `estimatedMinutes` — a divisible task already partially placed
+    /// elsewhere has less left to offer than its original stated size,
+    /// and it's that leftover amount that determines whether *this* rule
+    /// could still take it, not the task's full original size.
     private func hasRemainingSchedulableWork(shelves: [Shelf]) -> Bool {
         shelves.contains { shelf in
             let rules = (shelf.schedulingRules ?? []).filter(\.isEnabled)
@@ -562,7 +568,7 @@ final class ScheduleReviewViewModel {
                 guard !task.isScheduled else { return false }
                 return rules.contains { rule in
                     task.isEligible(for: rule)
-                        && rule.canEverFit(minutesNeeded: task.estimatedMinutes, isDivisible: task.isDivisible, minimumSegmentMinutes: task.minimumSegmentMinutes)
+                        && rule.canEverFit(estimatedMinutes: task.remainingMinutes, isDivisible: task.isDivisible, minimumSegmentMinutes: task.minimumSegmentMinutes)
                 }
             }
         }
