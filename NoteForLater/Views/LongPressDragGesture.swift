@@ -28,6 +28,19 @@ import UIKit
 /// scrolling normally).
 struct LongPressDragGesture: UIGestureRecognizerRepresentable {
     var minimumDuration: TimeInterval
+    /// Setting this rather than conditionally attaching `.gesture(...)`
+    /// at the SwiftUI call site matters: `.gesture(_:isEnabled:)` only
+    /// has an overload for a real `Gesture`, not a
+    /// `UIGestureRecognizerRepresentable` like this one, and even a
+    /// SwiftUI-level workaround wouldn't remove the underlying
+    /// `UILongPressGestureRecognizer` from the touch path — a *disabled*
+    /// recognizer is still attached and, per `shouldRecognizeSimultaneouslyWith`
+    /// below, still eligible to compete for every touch that lands in
+    /// this view, which is exactly what made a habit row's `completeCircle`
+    /// tap feel delayed even though this gesture could never actually
+    /// activate for it. Setting `UIGestureRecognizer.isEnabled = false`
+    /// instead removes it from touch delivery entirely.
+    var isEnabled: Bool = true
     var onBegan: (CGPoint) -> Void
     var onChanged: (CGPoint) -> Void
     var onEnded: (CGPoint) -> Void
@@ -36,12 +49,14 @@ struct LongPressDragGesture: UIGestureRecognizerRepresentable {
     func makeUIGestureRecognizer(context: Context) -> UILongPressGestureRecognizer {
         let recognizer = UILongPressGestureRecognizer()
         recognizer.minimumPressDuration = minimumDuration
+        recognizer.isEnabled = isEnabled
         recognizer.delegate = context.coordinator
         return recognizer
     }
 
     func updateUIGestureRecognizer(_ recognizer: UILongPressGestureRecognizer, context: Context) {
         recognizer.minimumPressDuration = minimumDuration
+        recognizer.isEnabled = isEnabled
     }
 
     func handleUIGestureRecognizerAction(_ recognizer: UILongPressGestureRecognizer, context: Context) {

@@ -22,6 +22,12 @@ struct HabitDetailView: View {
     // Remaining follow the exact same rule — see `cachedRollingStats`.
     @State private var cachedStats: HabitStats?
     @State private var cachedRollingStats: HabitRollingStats?
+    /// Same idle debounce `HabitsTodayView.displayedHabits` uses — a day
+    /// cell's own color still updates the instant you tap it (`setDay`
+    /// mutates the model directly), but this stats grid stays frozen
+    /// until 3 seconds pass with no further edit anywhere, instead of
+    /// recomputing a full history walk after every single tap.
+    @State private var refreshCoordinator = HabitStatsRefreshCoordinator.shared
 
     private let calendar = Calendar.current
 
@@ -56,22 +62,29 @@ struct HabitDetailView: View {
         }
         .onAppear {
             deduplicateLogs()
-            cachedStats = habit.stats(calendar: calendar, logs: habitLogs)
+            recomputeStats()
+        }
+        .onChange(of: refreshCoordinator.idleRefreshTick) { _, _ in
+            recomputeStats()
+        }
+    }
 
-            let windowLogsByDay = habit.logsByDay(from: windowLogs, calendar: calendar)
-            let rolling = computeHabitRollingStats(
-                status: { day in habit.status(on: day, asOf: .now, calendar: calendar, logsByDay: windowLogsByDay) },
-                schedule: { habit.isApplicable(on: $0, calendar: calendar) },
-                creationDate: habit.startDate,
-                today: .now,
-                threshold: habit.missThreshold,
-                calendar: calendar
-            )
-            cachedRollingStats = rolling
-            if rolling.isRecordEligible {
-                let candidate = HabitRollingRecord(completedDays: rolling.completedDays, scheduledDays: rolling.scheduledDays)
-                habit.rolling30Record = nextHabitRolling30Record(current: habit.rolling30Record, candidate: candidate)
-            }
+    private func recomputeStats() {
+        cachedStats = habit.stats(calendar: calendar, logs: habitLogs)
+
+        let windowLogsByDay = habit.logsByDay(from: windowLogs, calendar: calendar)
+        let rolling = computeHabitRollingStats(
+            status: { day in habit.status(on: day, asOf: .now, calendar: calendar, logsByDay: windowLogsByDay) },
+            schedule: { habit.isApplicable(on: $0, calendar: calendar) },
+            creationDate: habit.startDate,
+            today: .now,
+            threshold: habit.missThreshold,
+            calendar: calendar
+        )
+        cachedRollingStats = rolling
+        if rolling.isRecordEligible {
+            let candidate = HabitRollingRecord(completedDays: rolling.completedDays, scheduledDays: rolling.scheduledDays)
+            habit.rolling30Record = nextHabitRolling30Record(current: habit.rolling30Record, candidate: candidate)
         }
     }
 
@@ -338,6 +351,7 @@ struct HabitDetailView: View {
                 modelContext.insert(newLog)
             }
         }
+        refreshCoordinator.habitLogsChanged()
     }
 }
 

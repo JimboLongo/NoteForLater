@@ -34,20 +34,6 @@ struct InboxView: View {
     /// normal Inbox list below.
     @State private var searchQuery = ""
 
-    /// Task Attribute Review — a single persistent `TaskReviewQueueSheet`
-    /// (see that file) rather than a new sheet per task, both because
-    /// nesting a second sheet inside this one made cards fail to advance
-    /// reliably, and so the queue can swap cards in place for the
-    /// Tinder-style slide instead of each task popping up as its own
-    /// fresh sheet. Presented via `.sheet(item:)` with the queue riding
-    /// along on the item itself (`AttributeReviewSession`), rather than a
-    /// bool plus a separate array — two independent state writes could
-    /// present before the queue array's write had landed, so the very
-    /// first tap sometimes showed "All Caught Up" against a still-empty
-    /// queue.
-    @State private var attributeReviewSession: AttributeReviewSession?
-    @State private var showingAllCaughtUpAlert = false
-
     /// The Kitchen shelf (Pantry + Cookbook) is never a routing
     /// destination for arbitrary Inbox brain-dumps — Pantry is
     /// ingredients-only, filled by hand or a receipt scan.
@@ -127,14 +113,6 @@ struct InboxView: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-
-                    Button {
-                        startAttributeReview()
-                    } label: {
-                        Label("Task Attribute Review", systemImage: "checklist.checked")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
                 }
 
                 searchBar
@@ -155,14 +133,6 @@ struct InboxView: View {
             NavigationStack {
                 HabitEditView(habit: habit)
             }
-        }
-        .sheet(item: $attributeReviewSession) { session in
-            TaskReviewQueueSheet(shelves: routableShelves, queue: session.queue)
-        }
-        .alert("All Caught Up", isPresented: $showingAllCaughtUpAlert) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("Every shelf task has its details filled in, and nothing's left to sort.")
         }
         .onChange(of: speechCapture.transcript) { _, newValue in
             draftText = newValue
@@ -286,26 +256,6 @@ struct InboxView: View {
                 scrollProxy?.scrollTo(item.id, anchor: .bottom)
             }
         }
-    }
-
-    /// Unsilenced shelf tasks still missing details first, then unsilenced
-    /// Inbox tasks oldest-added first — matches `allTasks`'s
-    /// `createdAt`-ascending order within each group.
-    private func startAttributeReview() {
-        // A task also lands here once its own "Remind Me In" timer is up
-        // (see `TaskItem.isDueForFutureReminder`) — independent of
-        // `isMissingAttributes`, matching `NightlyReviewView.startAttributeReviewSession`.
-        let shelfTasks = allTasks.filter {
-            $0.shelf != nil && !($0.shelf!.isKitchen) && !$0.isSnoozedFromAttributeReview
-                && ($0.isMissingAttributes || $0.isDueForFutureReminder)
-        }
-        let unsortedTasks = allTasks.filter { $0.shelf == nil && !$0.isSnoozedFromAttributeReview }
-        let queue = shelfTasks + unsortedTasks
-        guard !queue.isEmpty else {
-            showingAllCaughtUpAlert = true
-            return
-        }
-        attributeReviewSession = AttributeReviewSession(queue: queue)
     }
 
     private func daysSittingText(_ item: TaskItem) -> String {

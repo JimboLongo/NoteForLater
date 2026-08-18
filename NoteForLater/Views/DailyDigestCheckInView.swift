@@ -130,6 +130,7 @@ struct DailyDigestCheckInView: View {
         }) {
             block.isCompleted = true
         }
+        HabitStatsRefreshCoordinator.shared.habitLogsChanged()
     }
 
     private func timeRangeText(_ block: ScheduledBlock) -> String {

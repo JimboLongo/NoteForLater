@@ -27,6 +27,11 @@ struct NightlyReviewView: View {
     /// not calendar-tomorrow-from-right-now — reviewing yesterday's
     /// schedule this morning should plan *today*, not tomorrow.
     @State private var reviewDate: Date = Calendar.current.startOfDay(for: .now)
+    /// Guards the one-time default-to-Yesterday nudge in `chooseDayStep`'s
+    /// `.onAppear` — set the instant that runs, so it never overrides a
+    /// choice the user made themselves (including navigating Back to this
+    /// step and re-picking Today).
+    @State private var hasAppliedDefaultReviewDate = false
     @State private var todayViewModel: ScheduleReviewViewModel?
     @State private var tomorrowViewModel: ScheduleReviewViewModel?
     /// Drives the Inbox step — presenting `TaskReviewQueueSheet` (the same
@@ -40,6 +45,14 @@ struct NightlyReviewView: View {
     /// checking a task off leaves it in the list, strikethrough, instead of
     /// yanking it out from under the user mid-review.
     @State private var twoMinuteReviewTaskIDs: Set<UUID> = []
+    /// Every habit occurrence id toggled complete during the Today step —
+    /// passed as `alsoInclude` to `openHabitOccurrencesForReview` so
+    /// checking one off leaves it in the list, faded and struck through,
+    /// the same reasoning as `twoMinuteReviewTaskIDs` just above (and
+    /// `ScheduleReviewView`'s own copy of this same pattern) instead of it
+    /// vanishing the instant its status leaves `.none`. Reset whenever a
+    /// different day gets picked, since it's meaningless for any other one.
+    @State private var pastReviewCompletedHabitOccurrenceIDs = Set<String>()
     /// Drives the Plan step's Replace-Task sheet — same
     /// `ReplacementPickerSheet` the regular calendar view uses (see
     /// `ScheduleReviewView`).
@@ -194,6 +207,15 @@ struct NightlyReviewView: View {
             // written off; only Nightly Review's own end-of-day handoff
             // means "no more chances left."
             markUnresolvedHabitOccurrencesAsMissed()
+            // Closes `reviewDate` out for `ScheduleReviewViewModel
+            // .autoPlaceEligibleTasks`'s own live auto-place walk — once
+            // tonight's review has actually run, today's remaining free
+            // hours stop being fair game for a brand-new task to land on,
+            // same as if the day had already ended. Set synchronously,
+            // right alongside the habit sweep above, not buried in the
+            // Task below — this is the moment today is actually closed,
+            // not an incidental side effect of the async cleanup.
+            NightlyReviewCompletionState.shared.markReviewed(day: reviewDate)
             Task {
                 // Whatever's still unchecked from the Today step is freed
                 // up here — unscheduled from its stale block so it's a
@@ -214,45 +236,70 @@ struct NightlyReviewView: View {
                 // the Inbox step just above this can route tasks onto a
                 // shelf moments before this runs, and those need to be
                 // considered as real candidates for tomorrow's plan too.
-                // `regenerateSingleDay` only touches non-approved,
-                // non-locked blocks on `targetDate` itself (never walking
-                // to later days), so this stays safe and cheap to call
-                // every time rather than only on the very first pass.
-                await tomorrowViewModel.regenerateSingleDay(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+                // `regenerateFromNow`, not `regenerateSingleDay` — today's
+                // (and any prior day's) unfinished tasks were just freed
+                // up above, and they need an actual following day to land
+                // on, not just a chance at tomorrow specifically: if
+                // tomorrow's own rule windows are already full, whatever
+                // doesn't fit has to trickle further out, bumping
+                // non-approved/non-locked blocks already sitting on later
+                // days to make room the same way `regenerateFromNow`
+                // always has, walking forward until everything schedulable
+                // has a real slot. A locked block, on any day, is never
+                // touched by any of this.
+                await tomorrowViewModel.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
             }
         }
     }
 
     // MARK: - Step 0: Choose Day
 
+    /// Any incomplete task block or open habit occurrence dated strictly
+    /// before today — what decides whether Yesterday is even worth
+    /// offering as a choice (see `hasAppliedDefaultReviewDate`'s use of
+    /// this) and whether its button is enabled at all.
+    private var hasAnythingToReviewBeforeToday: Bool {
+        let startOfToday = Calendar.current.startOfDay(for: .now)
+        let hasBlocks = allBlocks.contains { !$0.isCompleted && $0.startTime < startOfToday }
+        let hasHabits = ScheduleReviewViewModel.hasOpenHabitOccurrences(habits: allHabits, upTo: startOfToday)
+        return hasBlocks || hasHabits
+    }
+
     private var chooseDayStep: some View {
         Form {
             Section {
-                Button {
-                    reviewDate = Calendar.current.startOfDay(for: .now)
-                } label: {
-                    HStack {
-                        Text("Today")
-                        Spacer()
-                        if Calendar.current.isDateInToday(reviewDate) {
-                            Image(systemName: "checkmark").foregroundStyle(.tint)
-                        }
-                    }
-                }
                 Button {
                     let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: .now) ?? .now
                     reviewDate = Calendar.current.startOfDay(for: yesterday)
                 } label: {
                     HStack {
                         Text("Yesterday")
+                            .foregroundStyle(hasAnythingToReviewBeforeToday ? .white : .secondary)
                         Spacer()
                         if Calendar.current.isDateInYesterday(reviewDate) {
                             Image(systemName: "checkmark").foregroundStyle(.tint)
                         }
                     }
                 }
+                .disabled(!hasAnythingToReviewBeforeToday)
+                Button {
+                    reviewDate = Calendar.current.startOfDay(for: .now)
+                } label: {
+                    HStack {
+                        Text("Today")
+                            .foregroundStyle(.white)
+                        Spacer()
+                        if Calendar.current.isDateInToday(reviewDate) {
+                            Image(systemName: "checkmark").foregroundStyle(.tint)
+                        }
+                    }
+                }
             } header: {
                 Text("Which day are you reviewing?")
+            } footer: {
+                if !hasAnythingToReviewBeforeToday {
+                    Text("Nothing left to review from before today.")
+                }
             }
 
             Section {
@@ -268,6 +315,19 @@ struct NightlyReviewView: View {
             } footer: {
                 Text("Doing this in the morning for a day that already ended? Pick that day here — \"Plan Tomorrow\" will still mean the day right after it.")
             }
+        }
+        .onChange(of: reviewDate) { _, _ in
+            pastReviewCompletedHabitOccurrenceIDs = []
+        }
+        .onAppear {
+            // Only ever applied once — after this, whatever the user
+            // picked (including manually re-selecting Today) sticks, even
+            // if they navigate back to this step later.
+            guard !hasAppliedDefaultReviewDate else { return }
+            hasAppliedDefaultReviewDate = true
+            guard hasAnythingToReviewBeforeToday else { return }
+            let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: .now) ?? .now
+            reviewDate = Calendar.current.startOfDay(for: yesterday)
         }
     }
 
@@ -315,6 +375,7 @@ struct NightlyReviewView: View {
                 case .block(let block):
                     todayViewModel.toggleComplete(block)
                 case .habit(let occurrence):
+                    pastReviewCompletedHabitOccurrenceIDs.insert(occurrence.id)
                     toggleHabitReviewOccurrence(habit: occurrence.habit, index: occurrence.index, isCompleted: occurrence.isCompleted, day: occurrence.targetTime)
                 }
             }
@@ -323,63 +384,21 @@ struct NightlyReviewView: View {
         }
     }
 
-    /// Stand-in minutes-since-midnight for an AM/Midday/PM occurrence,
-    /// same idea as `Habit.nextTargetDate`'s own fallback times but with
-    /// its own explicit values here, since this list's ordering was asked
-    /// for by exact time rather than reusing that property.
-    private func targetMinutes(for mode: HabitOccurrenceTimeMode) -> Int {
-        switch mode {
-        case .am: return 6 * 60
-        case .midday: return 12 * 60
-        case .pm: return 21 * 60
-        case .specific: return 0
-        }
-    }
-
     /// An AM/Midday/PM habit occurrence (see `HabitOccurrenceTimeMode`)
     /// never gets a `ScheduledBlock` at all, so it'd otherwise be
     /// invisible to `reviewableBlocks` — a Specific-Time occurrence
-    /// doesn't need this, it already shows up as a real block. `targetTime`
-    /// is what lets `OverdueBlocksReviewList` sort (and group by day)
-    /// these in among the real blocks instead of a separate section.
-    ///
-    /// Walks backward from `reviewDate` day by day — same reasoning as
-    /// `reviewableBlocks` pulling in backlog from any earlier day, so an
-    /// AM/Midday/PM habit left unchecked yesterday (or further back)
-    /// still turns up tonight instead of quietly aging out unreviewed.
-    /// Only genuinely still-open (`.none`) occurrences ever show, on
-    /// `reviewDate` or any earlier day alike — one already marked
-    /// complete, missed, or excused is already resolved and drops off
-    /// the list the moment it is (see `toggleHabitReviewOccurrence`).
-    /// Bounded by the habit's own `startDate`, capped at 400 days back so
-    /// a very old habit can't turn this into an unbounded scan.
+    /// doesn't need this, it already shows up as a real block. See
+    /// `ScheduleReviewViewModel.openHabitOccurrencesForReview` (this just
+    /// supplies `reviewCutoff` — same cutoff `reviewableBlocks` already
+    /// uses — and `pastReviewCompletedHabitOccurrenceIDs`, so a just-
+    /// checked-off occurrence stays visible, faded and struck through,
+    /// instead of vanishing the instant it leaves `.none`).
     private var openHabitOccurrencesForReview: [HabitReviewOccurrence] {
-        let calendar = Calendar.current
-        let reviewDay = calendar.startOfDay(for: reviewDate)
-        var result: [HabitReviewOccurrence] = []
-        for habit in allHabits {
-            let earliestDay = calendar.startOfDay(for: habit.startDate)
-            let cutoffDay = calendar.date(byAdding: .day, value: -400, to: reviewDay) ?? earliestDay
-            let boundedEarliestDay = max(earliestDay, cutoffDay)
-            guard boundedEarliestDay <= reviewDay else { continue }
-
-            var cursor = reviewDay
-            while cursor >= boundedEarliestDay {
-                if habit.isApplicable(on: cursor, calendar: calendar) {
-                    for index in 0..<max(habit.timesPerDay, 1) {
-                        let mode = habit.timeMode(for: index)
-                        guard mode != .specific else { continue }
-                        guard habit.occurrenceStatus(index, on: cursor, calendar: calendar) == .none else { continue }
-                        let targetTime = calendar.date(byAdding: .minute, value: targetMinutes(for: mode), to: cursor) ?? cursor
-                        let id = "\(habit.id)-\(index)-\(Int(cursor.timeIntervalSince1970))"
-                        result.append(HabitReviewOccurrence(id: id, habit: habit, index: index, isCompleted: false, targetTime: targetTime, modeLabel: mode.label))
-                    }
-                }
-                guard let previousDay = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
-                cursor = previousDay
-            }
-        }
-        return result
+        ScheduleReviewViewModel.openHabitOccurrencesForReview(
+            habits: allHabits,
+            upTo: reviewCutoff,
+            alsoInclude: pastReviewCompletedHabitOccurrenceIDs
+        )
     }
 
     /// Mirrors `DayTimelineGridView.toggleHabitOccurrence` — both
@@ -389,6 +408,7 @@ struct NightlyReviewView: View {
     /// surface an occurrence from an earlier day.
     private func toggleHabitReviewOccurrence(habit: Habit, index: Int, isCompleted: Bool, day: Date) {
         habitLog(for: habit, on: day).setOccurrence(index, to: isCompleted ? .none : .complete)
+        HabitStatsRefreshCoordinator.shared.habitLogsChanged()
     }
 
     /// Finds (or creates) the `HabitLog` for `habit` on `day` — shared by
@@ -417,6 +437,7 @@ struct NightlyReviewView: View {
         for occurrence in openHabitOccurrencesForReview where !occurrence.isCompleted {
             habitLog(for: occurrence.habit, on: occurrence.targetTime).setOccurrence(occurrence.index, to: .missed)
         }
+        HabitStatsRefreshCoordinator.shared.habitLogsChanged()
     }
 
     // MARK: - Step 2: Inbox (walks TaskCardSheet, one task at a time)
@@ -830,6 +851,7 @@ struct TaskReviewCard: View {
         }
         .onChange(of: task.estimatedMinutes) { _, _ in syncEligibilityWithFit() }
         .onChange(of: task.isDivisible) { _, _ in syncEligibilityWithFit() }
+        .onChange(of: task.minimumSegmentMinutes) { _, _ in syncEligibilityWithFit() }
     }
 
     /// Auto-clears eligibility for any rule this task can no longer ever
@@ -841,7 +863,7 @@ struct TaskReviewCard: View {
     private func syncEligibilityWithFit() {
         guard let rules = previewedShelf?.schedulingRules else { return }
         for rule in rules where task.isEligible(for: rule) {
-            if !rule.canEverFit(minutesNeeded: task.estimatedMinutes, isDivisible: task.isDivisible) {
+            if !rule.canEverFit(minutesNeeded: task.estimatedMinutes, isDivisible: task.isDivisible, minimumSegmentMinutes: task.minimumSegmentMinutes) {
                 task.setEligible(false, for: rule)
             }
         }
@@ -1122,6 +1144,7 @@ struct TaskReviewCard: View {
     /// in its own scroll region so a task with a lot filled in never pushes
     /// the header or the action row off-screen.
     private var cardScrollBody: some View {
+        ScrollViewReader { scrollProxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
             Divider()
@@ -1484,57 +1507,66 @@ struct TaskReviewCard: View {
             .animation(.easeInOut(duration: 0.15), value: task.isDivisibleDecided)
             .animation(.easeInOut(duration: 0.15), value: durationAllowed)
 
-            if !task.tags.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack {
-                        ForEach(task.tags, id: \.self) { tag in
-                            Text(tag)
-                                .font(.caption2)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(Color.accentColor.opacity(0.15))
-                                .clipShape(Capsule())
-                        }
-                    }
-                }
-            }
-            HStack {
-                Image(systemName: "tag")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                TextField("Add tag", text: $newTag)
-                    .submitLabel(.done)
-                    .onSubmit(addTag)
-                    .font(.subheadline)
-                    .focused($focusedField, equals: .tag)
-                Button("Add", action: addTag)
-                    .font(.subheadline.weight(.semibold))
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-            // Autocomplete against the saved tag box — tapping one adds it
-            // outright instead of just filling the field in.
-            if !tagSuggestions.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(tagSuggestions) { tag in
-                            Button {
-                                newTag = tag.name
-                                addTag()
-                            } label: {
-                                Text(tag.name)
+            // Grouped under one stable id (rather than tagging the
+            // suggestions row itself, which only exists conditionally) so
+            // `scrollTo("tagSection")` always has something to target —
+            // see the `.onChange`s below, which keep this scrolled into
+            // view as you type so the pre-populating suggestion chips
+            // don't end up hidden below the fold or the keyboard.
+            VStack(alignment: .leading, spacing: 10) {
+                if !task.tags.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack {
+                            ForEach(task.tags, id: \.self) { tag in
+                                Text(tag)
                                     .font(.caption2)
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 3)
-                                    .background(Color.secondary.opacity(0.15))
+                                    .background(Color.accentColor.opacity(0.15))
                                     .clipShape(Capsule())
                             }
-                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                HStack {
+                    Image(systemName: "tag")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    TextField("Add tag", text: $newTag)
+                        .submitLabel(.done)
+                        .onSubmit(addTag)
+                        .font(.subheadline)
+                        .focused($focusedField, equals: .tag)
+                    Button("Add", action: addTag)
+                        .font(.subheadline.weight(.semibold))
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                // Autocomplete against the saved tag box — tapping one adds
+                // it outright instead of just filling the field in.
+                if !tagSuggestions.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(tagSuggestions) { tag in
+                                Button {
+                                    newTag = tag.name
+                                    addTag()
+                                } label: {
+                                    Text(tag.name)
+                                        .font(.caption2)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 3)
+                                        .background(Color.secondary.opacity(0.15))
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
                 }
             }
+            .id("tagSection")
 
             Divider()
             shelfRow
@@ -1545,7 +1577,7 @@ struct TaskReviewCard: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     ForEach(rules.sorted { $0.sortOrder < $1.sortOrder }) { rule in
-                        let fits = rule.canEverFit(minutesNeeded: task.estimatedMinutes, isDivisible: task.isDivisible)
+                        let fits = rule.canEverFit(minutesNeeded: task.estimatedMinutes, isDivisible: task.isDivisible, minimumSegmentMinutes: task.minimumSegmentMinutes)
                         HStack(spacing: 10) {
                             Toggle(
                                 isOn: Binding(
@@ -1592,6 +1624,15 @@ struct TaskReviewCard: View {
         }
         .frame(maxHeight: .infinity)
         .scrollDismissesKeyboard(.interactively)
+        .onChange(of: focusedField) { _, newValue in
+            guard newValue == .tag else { return }
+            withAnimation { scrollProxy.scrollTo("tagSection", anchor: .bottom) }
+        }
+        .onChange(of: newTag) { _, _ in
+            guard focusedField == .tag else { return }
+            withAnimation { scrollProxy.scrollTo("tagSection", anchor: .bottom) }
+        }
+        }
     }
 
     /// The visible "Tinder card" — a fixed header on top and everything

@@ -43,7 +43,12 @@ final class TaskCompletionRecord {
     /// completion — shared by every "mark complete" entry point (the
     /// calendar's tap-to-complete circle, a task card's Mark Complete
     /// button, Task Attribute Review's) so they all feed the same stats.
+    /// A no-op for a task on a shelf with `effectiveTracksTaskStats` off
+    /// — those completions never contribute to (or show up on) the Task
+    /// Stats page at all, checked here rather than at each call site so
+    /// every "mark complete" path respects it automatically.
     static func upsert(for task: TaskItem, in modelContext: ModelContext) {
+        guard task.shelf?.effectiveTracksTaskStats ?? true else { return }
         let taskID = task.id
         let existing = try? modelContext.fetch(FetchDescriptor<TaskCompletionRecord>(
             predicate: #Predicate { $0.taskID == taskID }

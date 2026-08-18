@@ -122,14 +122,24 @@ final class SchedulingRule {
     /// plain values rather than a TaskItem so it also works for an
     /// unsorted task that hasn't been routed to a shelf yet (see
     /// NightlyReviewView's TaskReviewCard).
-    func canEverFit(minutesNeeded: Int, isDivisible: Bool) -> Bool {
+    /// `minimumSegmentMinutes` (default 0, meaning "not decided yet") is
+    /// a divisible task's own hard floor on any one placement — a rule
+    /// can only ever place a divisible task if that floor itself fits
+    /// within whatever the rule's own cap allows in one go (the packer
+    /// enforces this same floor per-placement; see `AISchedulingService
+    /// .pack`). A minimum of 0 is treated as "not decided yet" rather
+    /// than "impossible" — same as the packer's own handling — so an
+    /// incomplete field doesn't get reported as a fit failure.
+    func canEverFit(minutesNeeded: Int, isDivisible: Bool, minimumSegmentMinutes: Int = 0) -> Bool {
         switch fillStrategy {
         case .fillToFit:
             return true
         case .maxDuration:
-            return isDivisible || minutesNeeded <= maxTotalMinutes
+            guard isDivisible else { return minutesNeeded <= maxTotalMinutes }
+            return minimumSegmentMinutes <= 0 || minimumSegmentMinutes <= maxTotalMinutes
         case .maxTaskCount:
-            return isDivisible || minutesNeeded <= maxMinutesPerTask
+            guard isDivisible else { return minutesNeeded <= maxMinutesPerTask }
+            return minimumSegmentMinutes <= 0 || minimumSegmentMinutes <= maxMinutesPerTask
         }
     }
 

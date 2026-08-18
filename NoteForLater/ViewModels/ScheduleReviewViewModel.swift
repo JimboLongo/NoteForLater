@@ -58,7 +58,8 @@ final class ScheduleReviewViewModel {
                 habits: habits,
                 freeSlots: freeSlots,
                 eligibleHoursWindows: eligibleHoursWindows,
-                date: targetDate
+                date: targetDate,
+                existingBlocks: blocks
             )
             // The scheduler itself decides per-task whether to mark it fully
             // scheduled or just trim its remaining time (divisible tasks
@@ -72,67 +73,297 @@ final class ScheduleReviewViewModel {
         }
     }
 
-    /// Keeps habits and the Recurring Tasks shelf's own tasks (see
-    /// `Shelf.isRecurringTasks`) showing up on `targetDate` without the
-    /// user ever tapping Generate/Regenerate — see
-    /// `AISchedulingServiceProtocol.placeHabitsAndRecurringTasks`, the
-    /// same pass a full generate opens with, just without the rule-packing
-    /// or the wipe-and-rebuild `regenerateFromNow` does. Idempotent (a
-    /// habit occurrence or recurring-task occurrence already scheduled is
-    /// skipped by that same pass), so it's safe to call every time this
-    /// screen appears or the viewed day changes. Never touches a day
-    /// already in the past, and fails silently — a background top-up
+    /// Keeps `targetDate` fully populated — habits, the Recurring Tasks
+    /// shelf's own tasks (see `Shelf.isRecurringTasks`), *and* every other
+    /// shelf's rule-eligible tasks — without the user ever tapping
+    /// Generate/Regenerate. The calendar is meant to always reflect what
+    /// the current shelves/rules say should be there, live, the same way
+    /// it's always reflected a habit's own target time — Generate/
+    /// Regenerate no longer exists as its own concept; Nightly Review's
+    /// end-of-day handoff (`regenerateFromNow`, via `NightlyReviewView
+    /// .advance()`) is just the "review and re-optimize what's already
+    /// there" action now, not the only way a day ever gets anything on it
+    /// in the first place. Still fully governed by each
+    /// shelf's own SchedulingRules (window, days, fill strategy), and only
+    /// ever places a task a shelf's rule actually applies to — see
+    /// `AISchedulingServiceProtocol.generateProposedSchedule`'s doc
+    /// comment.
+    ///
+    /// Purely additive — inserts new blocks but never clears, moves, or
+    /// re-optimizes what's already on a day (that's still
+    /// `regenerateFromNow`'s job) — so it's safe
+    /// (and idempotent) to call every time this screen appears or the
+    /// viewed day changes: a task already `isScheduled`, or a habit/
+    /// recurring occurrence that already has a block for the day, is
+    /// simply skipped by the scheduler itself.
+    ///
+    /// Walks forward day by day starting at `targetDate`, same as
+    /// `regenerateFromNow`'s own walk, for exactly as long as
+    /// `hasRemainingSchedulableWork` says there's still a real,
+    /// eligible-and-fittable task left unplaced anywhere — so a backlog
+    /// that can't all fit in one day's rule windows keeps spilling
+    /// forward onto the next day, and the next, until every task that
+    /// *can* be scheduled *is*, without the user ever having to manually
+    /// flip through each future day themselves. A task that can never
+    /// fit any rule it's eligible for is already excluded from that
+    /// check (see its own doc comment), so it's never what keeps this
+    /// walking — only real, placeable backlog is. `taskSafetyCapDays` is
+    /// only a backstop against a genuine bug in that guarantee, not a
+    /// real limit this should ever hit in practice.
+    ///
+    /// Every block already on a given day (task or habit, proposed or
+    /// approved) has its time carved out of that day's `freeSlots`
+    /// manually first — real Google free/busy has no idea about a block
+    /// that hasn't been approved and pushed yet, and since this pass
+    /// never clears anything to make room, skipping that carve-out would
+    /// be free to hand that same slot to some other task entirely. Never
+    /// touches a day already in the past, and — once tonight's Nightly
+    /// Review has closed today out (see `NightlyReviewCompletionState`)
+    /// — never touches today's remaining hours either, starting the walk
+    /// at tomorrow instead; "today is over" the moment the review ran,
+    /// not just at midnight. Fails silently — a background top-up
     /// erroring out shouldn't pop an alert over a screen the user didn't
-    /// ask to regenerate. The 2-Minute Task shelf's tasks are deliberately
-    /// never placed here — see `ScheduleReviewView.twoMinuteTasksSection`,
-    /// an untimed checklist instead of a calendar block.
-    func autoPlaceHabitsAndRecurringTasks(shelves: [Shelf], habits: [Habit], eligibleHoursWindows: [EligibleHoursWindow]) async {
+    /// ask to regenerate. The 2-Minute Task shelf's tasks are
+    /// deliberately never placed here — see
+    /// `ScheduleReviewView.twoMinuteTasksSection`, an untimed checklist
+    /// instead of a calendar block.
+    func autoPlaceEligibleTasks(shelves: [Shelf], habits: [Habit], eligibleHoursWindows: [EligibleHoursWindow]) async {
         guard targetDate >= Calendar.current.startOfDay(for: .now) else { return }
-        removeStaleNonSpecificHabitBlocks()
-        guard let freeSlots = try? await calendarService.fetchFreeSlots(for: targetDate) else { return }
-        let (newBlocks, _) = schedulingService.placeHabitsAndRecurringTasks(
-            shelves: shelves,
-            habits: habits,
-            freeSlots: freeSlots,
-            eligibleHoursWindows: eligibleHoursWindows,
-            date: targetDate
-        )
-        guard !newBlocks.isEmpty else { return }
-        for block in newBlocks {
-            modelContext.insert(block)
+        removeStaleNonSpecificHabitBlocksAcrossFutureDays()
+        trimOverflowingRuleBlocksAcrossFutureDays(shelves: shelves)
+
+        let calendar = Calendar.current
+        var cursorDay = calendar.startOfDay(for: targetDate)
+        // Once tonight's Nightly Review has actually closed today out
+        // (see `NightlyReviewCompletionState`), today's remaining free
+        // hours stop being fair game for this walk to hand a brand-new
+        // task — "today is over" the moment the review ran, not just at
+        // midnight. Only ever bumps the *starting* day forward by one;
+        // a day already further out than today is completely unaffected.
+        if calendar.isDateInToday(cursorDay), NightlyReviewCompletionState.shared.isClosed(day: .now) {
+            cursorDay = calendar.date(byAdding: .day, value: 1, to: cursorDay) ?? cursorDay
         }
-        try? modelContext.save()
-        blocks = (blocks + newBlocks).sorted { $0.startTime < $1.startTime }
+        var dayIndex = 0
+        let taskSafetyCapDays = 365
+        var allBlocksNow = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        var anyInserted = false
+
+        while dayIndex == 0 || (dayIndex < taskSafetyCapDays && hasRemainingSchedulableWork(shelves: shelves)) {
+            guard var freeSlots = try? await calendarService.fetchFreeSlots(for: cursorDay) else { break }
+            let dayBlocks = allBlocksNow.filter { calendar.isDate($0.date, inSameDayAs: cursorDay) }
+            for existing in dayBlocks {
+                freeSlots = subtracting(existing.startTime..<existing.endTime, from: freeSlots)
+            }
+            if let newBlocks = try? await schedulingService.generateProposedSchedule(
+                shelves: shelves,
+                habits: habits,
+                freeSlots: freeSlots,
+                eligibleHoursWindows: eligibleHoursWindows,
+                date: cursorDay,
+                existingBlocks: dayBlocks
+            ), !newBlocks.isEmpty {
+                for block in newBlocks {
+                    modelContext.insert(block)
+                }
+                allBlocksNow += newBlocks
+                anyInserted = true
+                if calendar.isDate(cursorDay, inSameDayAs: targetDate) {
+                    blocks = (blocks + newBlocks).sorted { $0.startTime < $1.startTime }
+                }
+            }
+            cursorDay = calendar.date(byAdding: .day, value: 1, to: cursorDay) ?? cursorDay
+            dayIndex += 1
+        }
+
+        if anyInserted {
+            try? modelContext.save()
+        }
     }
 
-    /// Self-healing sweep for `targetDate`: an occurrence whose mode
-    /// isn't (or no longer is) Specific Time should never have a
-    /// `ScheduledBlock` at all (see
+    /// Self-healing sweep across every day, today forward — not just
+    /// `targetDate`: an occurrence whose mode isn't (or no longer is)
+    /// Specific Time should never have a `ScheduledBlock` at all (see
     /// `AISchedulingService.placeHabitsAndRecurringTasks`'s own guard on
     /// `HabitOccurrenceTimeMode`), but one changed away from Specific
     /// Time before `HabitEditView.removeStaleBlocks` existed to clean up
-    /// after it can still have a block left over from back then. This
-    /// catches those too, not just ones created going forward — same
-    /// scope as `removeStaleBlocks` itself: only a not-yet-completed
-    /// block, never a past or already-resolved one, so nothing about the
+    /// after it can still have a block left over from back then. Scoping
+    /// this to only `targetDate` used to mean a future day nobody had
+    /// actually flipped to yet — including one only ever glanced at
+    /// through `WeekTimelineView`, which reads `ScheduledBlock`s straight
+    /// from the store with no cleanup pass of its own — kept showing a
+    /// habit that had already stopped being Specific Time, right up until
+    /// the day it actually became `targetDate`. Same scope as
+    /// `removeStaleBlocks` itself otherwise: only a not-yet-completed
+    /// block, never a past or already-resolved one, so nothing about a
     /// day's actual history changes.
-    private func removeStaleNonSpecificHabitBlocks() {
-        let stale = blocks.filter { block in
-            guard let habit = block.habit, !block.isCompleted else { return false }
+    private func removeStaleNonSpecificHabitBlocksAcrossFutureDays() {
+        let calendar = Calendar.current
+        let startOfToday = calendar.startOfDay(for: .now)
+        let allBlocksNow = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        let stale = allBlocksNow.filter { block in
+            guard block.date >= startOfToday, let habit = block.habit, !block.isCompleted else { return false }
             return habit.timeMode(for: block.habitOccurrenceIndex) != .specific
         }
         guard !stale.isEmpty else { return }
+        let staleIDs = Set(stale.map(\.id))
         for block in stale {
             block.habit = nil
             modelContext.delete(block)
         }
-        let staleIDs = Set(stale.map(\.id))
-        blocks.removeAll { staleIDs.contains($0.id) }
         // Saved explicitly here rather than left to the caller's own
         // save below — that one's skipped entirely whenever there's
         // nothing new to place (`guard !newBlocks.isEmpty else { return }`),
         // which would otherwise leave this deletion sitting unsaved.
         try? modelContext.save()
+        loadExistingBlocks(allBlocksNow.filter { !staleIDs.contains($0.id) })
+    }
+
+    /// One-time cleanup for the accumulation two earlier bugs could leave
+    /// behind: before the `existingBlocks` seeding fix, every appear/
+    /// day-change re-filled a rule's budget from zero, so a "≤2 tasks"
+    /// window could end up with far more than 2 task blocks stacked up
+    /// over repeated visits; and before eligibility was made strict
+    /// everywhere (see `AISchedulingServiceProtocol.generateProposedSchedule`'s
+    /// doc comment), a task never toggled eligible for a rule could still
+    /// get swept into that rule's leftover budget by the old tier-3
+    /// fallback. Neither is possible going forward (both are fixed at the
+    /// source), but every day that already accumulated either still needs
+    /// it unwound once — not just whichever single day happens to be
+    /// `targetDate` right now. `regenerateFromNow`'s own walk (and Nightly
+    /// Review generally) populates many days ahead in one pass, so a day
+    /// the user hasn't actually flipped to yet can carry the exact same
+    /// leftover damage as today did. Swept across every day, today
+    /// forward, that actually has a task block sitting on it — no
+    /// artificial cutoff, since only days with real data to check cost
+    /// anything here (this is pure date math against what's already in
+    /// the model, no calendar network fetch involved).
+    private func trimOverflowingRuleBlocksAcrossFutureDays(shelves: [Shelf]) {
+        let calendar = Calendar.current
+        let startOfToday = calendar.startOfDay(for: .now)
+        let allBlocksNow = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        let blocksByDay = Dictionary(grouping: allBlocksNow.filter { $0.date >= startOfToday }) {
+            calendar.startOfDay(for: $0.date)
+        }
+
+        var didTrim = false
+        for (day, dayBlocks) in blocksByDay {
+            didTrim = trimOverflowingRuleBlocks(shelves: shelves, day: day, dayBlocks: dayBlocks, calendar: calendar) || didTrim
+        }
+
+        if didTrim {
+            try? modelContext.save()
+            loadExistingBlocks(allBlocksNow)
+        }
+    }
+
+    /// The actual per-day trim logic `trimOverflowingRuleBlocksAcrossFutureDays`
+    /// runs for each day it finds — pulled out so it can run against any
+    /// day's own blocks, not just `targetDate`'s. Only ever trims a task
+    /// block that's unlocked, unapproved, and incomplete — the same "safe
+    /// to touch" bar `regenerateFromNow`'s own clearing pass uses.
+    /// Deletes straight through `modelContext`
+    /// rather than touching `self.blocks` — the caller re-derives that
+    /// from a fresh fetch once every day's been swept, so a day other
+    /// than `targetDate` doesn't need its own bookkeeping here.
+    @discardableResult
+    private func trimOverflowingRuleBlocks(shelves: [Shelf], day: Date, dayBlocks: [ScheduledBlock], calendar: Calendar) -> Bool {
+        let weekday = calendar.component(.weekday, from: day)
+        let applicableRules: [SchedulingRule] = shelves
+            .flatMap { $0.schedulingRules ?? [] }
+            .filter { $0.isEnabled && $0.namedSchedule != nil && $0.effectiveDaysOfWeek.contains(weekday) }
+
+        var didTrim = false
+        for rule in applicableRules {
+            guard
+                let windowStart = calendar.date(bySettingHour: rule.effectiveStartHour, minute: rule.effectiveStartMinute, second: 0, of: day),
+                let windowEnd = calendar.date(bySettingHour: rule.effectiveEndHour, minute: rule.effectiveEndMinute, second: 0, of: day),
+                windowStart < windowEnd
+            else { continue }
+
+            let trimmable = dayBlocks.filter {
+                $0.task != nil && !$0.isLocked && !$0.isCompleted && $0.approvalStatus != .approved
+                    && $0.startTime >= windowStart && $0.startTime < windowEnd
+            }
+            guard !trimmable.isEmpty else { continue }
+
+            // A divisible task's several segments (see `TaskItem
+            // .isDivisible`/`minimumSegmentMinutes`) count as ONE task
+            // toward a rule's own per-task cap, same as `pack()` counts
+            // it, and are removed or kept together, never split apart —
+            // otherwise a survivor could end up missing a piece of its
+            // own placement, silently breaking its minimum-segment rule.
+            var groupsByTask: [UUID: [ScheduledBlock]] = [:]
+            for block in trimmable {
+                guard let taskID = block.task?.id else { continue }
+                groupsByTask[taskID, default: []].append(block)
+            }
+            var groups = groupsByTask.values
+                .map { segments in (segments: segments, earliestStart: segments.map(\.startTime).min()!) }
+                .sorted { $0.earliestStart < $1.earliestStart }
+
+            // A task never marked eligible for this specific rule (see
+            // `TaskItem.isEligible(for:)`) should never have a block
+            // sitting in this rule's window at all — a leftover from
+            // before eligibility was made strict everywhere. Removed
+            // outright, before the count/duration cap below even runs.
+            // Same treatment for a divisible task with a segment smaller
+            // than its own configured minimum chunk (`minimumSegmentMinutes`)
+            // — a leftover from before `pack()` enforced that floor
+            // itself (a rule capped at, say, 15 min per task used to
+            // happily chop a task with a 2-hour minimum into 15-minute
+            // slivers). Removed as a whole group, not just the offending
+            // segment — a partial removal would leave the survivor still
+            // short of the floor it was supposed to meet in one piece.
+            var eligibleGroups: [(segments: [ScheduledBlock], earliestStart: Date)] = []
+            for group in groups {
+                guard let task = group.segments.first?.task else { continue }
+                let violatesMinimumSegment = task.isDivisible && task.minimumSegmentMinutes > 0
+                    && group.segments.contains { Int($0.endTime.timeIntervalSince($0.startTime) / 60) < task.minimumSegmentMinutes }
+                guard task.isEligible(for: rule), !violatesMinimumSegment else {
+                    for block in group.segments {
+                        block.task?.isScheduled = false
+                        block.task = nil
+                        block.habit = nil
+                        modelContext.delete(block)
+                    }
+                    didTrim = true
+                    continue
+                }
+                eligibleGroups.append(group)
+            }
+            groups = eligibleGroups
+
+            let maxCount: Int?
+            let maxMinutes: Int?
+            switch rule.fillStrategy {
+            case .fillToFit:
+                maxCount = nil
+                maxMinutes = nil
+            case .maxTaskCount:
+                maxCount = rule.maxTaskCount
+                maxMinutes = nil
+            case .maxDuration:
+                maxCount = rule.maxDurationTaskCountEnabled ? rule.maxTaskCount : nil
+                maxMinutes = rule.maxTotalMinutes
+            }
+
+            func totalMinutes() -> Int {
+                groups.reduce(0) { $0 + $1.segments.reduce(0) { $0 + Int($1.endTime.timeIntervalSince($1.startTime) / 60) } }
+            }
+
+            while (maxCount.map { groups.count > $0 } ?? false) || (maxMinutes.map { totalMinutes() > $0 } ?? false) {
+                guard let excess = groups.popLast() else { break }
+                for block in excess.segments {
+                    block.task?.isScheduled = false
+                    block.task = nil
+                    block.habit = nil
+                    modelContext.delete(block)
+                }
+                didTrim = true
+            }
+        }
+
+        return didTrim
     }
 
     // MARK: - Regenerate (from now, across as many days as it takes)
@@ -152,7 +383,7 @@ final class ScheduleReviewViewModel {
     /// today where you're not even looking. A habit eligible for
     /// scheduling never "runs out" the way a shelf's task queue does — it
     /// recurs on every applicable day forever — so it keeps the walk going
-    /// out to the full `maxDays` horizon on its own, rather than stopping
+    /// out to the full `habitPopulationDays` horizon on its own, rather than stopping
     /// the moment shelves empty out: that's the difference between a habit
     /// only showing up on whatever day happened to get generated versus
     /// showing up on every eligible day as you scroll the calendar
@@ -210,12 +441,25 @@ final class ScheduleReviewViewModel {
 
         var cursorDay = calendar.startOfDay(for: cutoff)
         var dayIndex = 0
-        let maxDays = 30 // a sane cap on how far out a single regenerate walks — see doc comment.
+        // Habits recur forever by design (see doc comment above) — a
+        // habit alone never lets the walk stop on its own, so its own
+        // reason to keep going is capped at a sane rolling horizon.
+        // Tasks, on the other hand, actually run out: `hasRemainingSchedulableWork`
+        // only ever counts a task that's both eligible for one of its
+        // shelf's rules and genuinely able to fit it (see `SchedulingRule
+        // .canEverFit`), so it's guaranteed to go false once everything
+        // real is placed — a task that can never fit anywhere is already
+        // excluded, not counted as "remaining" forever. `taskSafetyCapDays`
+        // is only a backstop against a genuine bug in that guarantee, not
+        // a real limit this should ever hit.
+        let habitPopulationDays = 30
+        let taskSafetyCapDays = 365
         var newBlocks: [ScheduledBlock] = []
+        let keepWalkingForHabits = hasSchedulableHabits(habits: habits)
 
-        let keepWalking = hasSchedulableHabits(habits: habits)
-
-        while dayIndex == 0 || (dayIndex < maxDays && (keepWalking || hasRemainingSchedulableWork(shelves: shelves))) {
+        while dayIndex == 0
+            || (dayIndex < habitPopulationDays && keepWalkingForHabits)
+            || (dayIndex < taskSafetyCapDays && hasRemainingSchedulableWork(shelves: shelves)) {
             do {
                 var freeSlots = try await calendarService.fetchFreeSlots(for: cursorDay)
                 if dayIndex == 0 && calendar.isDateInToday(cursorDay) {
@@ -251,7 +495,8 @@ final class ScheduleReviewViewModel {
                     habits: habits,
                     freeSlots: freeSlots,
                     eligibleHoursWindows: eligibleHoursWindows,
-                    date: cursorDay
+                    date: cursorDay,
+                    existingBlocks: survivingBlocks.filter { calendar.isDate($0.date, inSameDayAs: cursorDay) }
                 )
                 for block in dayBlocks {
                     modelContext.insert(block)
@@ -274,78 +519,6 @@ final class ScheduleReviewViewModel {
         await loadCalendarEvents()
     }
 
-    /// Nightly Review's own version of `regenerateFromNow`, scoped to just
-    /// `targetDate` (tomorrow) instead of walking forward — used right
-    /// after the Inbox step (see `NightlyReviewView.advance()`) so a task
-    /// just routed onto a shelf moments earlier gets picked up as a real
-    /// candidate for tomorrow's plan, rather than the day silently
-    /// keeping whatever shape it already had before that routing
-    /// happened. Clears whatever non-approved, non-locked blocks already
-    /// sit on `targetDate` first (freeing their tasks back up, same
-    /// rationale as `regenerateFromNow`), then re-generates that single
-    /// day from scratch — approved/locked blocks are left untouched, and
-    /// a task already placed by a fresh call simply won't show up again
-    /// as a candidate (`generateProposedSchedule` only ever pulls from
-    /// `!task.isScheduled`). Deliberately doesn't walk to later days the
-    /// way `regenerateFromNow` does — that would mean a 30-day re-walk
-    /// (and 30 more calendar fetches) every single night just to pick up
-    /// one newly-sorted task.
-    func regenerateSingleDay(shelves: [Shelf], habits: [Habit], eligibleHoursWindows: [EligibleHoursWindow]) async {
-        isGenerating = true
-        errorMessage = nil
-        defer { isGenerating = false }
-
-        await clearBlocksBeforeToday()
-
-        let calendar = Calendar.current
-        let allBlocksNow = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
-        var survivingBlocks = allBlocksNow
-        // Completed blocks are deliberately left alone here, same as
-        // `regenerateFromNow` — they stay on the calendar (faded, struck
-        // through) until Nightly Review's own sweep actually clears them;
-        // see `purgeCompletedBlocks`.
-        for block in allBlocksNow where block.approvalStatus != .approved && !block.isLocked && !block.isCompleted && calendar.isDate(block.date, inSameDayAs: targetDate) {
-            block.task?.isScheduled = false
-            block.task = nil
-            block.habit = nil
-            modelContext.delete(block)
-            survivingBlocks.removeAll { $0.id == block.id }
-        }
-        try? modelContext.save()
-
-        await loadCalendarEvents()
-
-        do {
-            var freeSlots = try await calendarService.fetchFreeSlots(for: targetDate)
-            // Same reasoning as `regenerateFromNow` — a completed but
-            // still-unapproved survivor hasn't been pushed to the real
-            // calendar either, so its time needs the same manual carve-out
-            // a locked one gets.
-            let protectedSurviving = survivingBlocks.filter {
-                ($0.isLocked || $0.isCompleted) && $0.approvalStatus != .approved && calendar.isDate($0.date, inSameDayAs: targetDate)
-            }
-            for protected in protectedSurviving {
-                freeSlots = subtracting(protected.startTime..<protected.endTime, from: freeSlots)
-            }
-            let proposed = try await schedulingService.generateProposedSchedule(
-                shelves: shelves,
-                habits: habits,
-                freeSlots: freeSlots,
-                eligibleHoursWindows: eligibleHoursWindows,
-                date: targetDate
-            )
-            for block in proposed {
-                modelContext.insert(block)
-            }
-            try? modelContext.save()
-            blocks = (survivingBlocks + proposed)
-                .filter { calendar.isDate($0.date, inSameDayAs: targetDate) }
-                .sorted { $0.startTime < $1.startTime }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
     /// Carves `occupied` out of `slots`, splitting or trimming whichever
     /// slot(s) it overlaps — used to protect a locked-but-not-yet-approved
     /// block's time during `regenerateFromNow`, the same way an approved
@@ -364,21 +537,33 @@ final class ScheduleReviewViewModel {
         }.filter { $0.durationMinutes > 0 }
     }
 
-    /// Whether any shelf still has an unscheduled task — the condition
-    /// `regenerateFromNow` keeps walking forward for, so today running out
-    /// of room pushes the overflow to tomorrow, and the day after that, and
-    /// so on. Deliberately not scoped to "eligible for one of the shelf's
-    /// rules, and could ever fit it": `AISchedulingService`'s tier-3
-    /// catch-all pass will still pick up a task that was never marked
-    /// eligible for any specific rule, or one whose duration only just
-    /// fits once guessed — the walk needs to keep going for those too, not
-    /// just the narrower rule-matched case. A task that's flat-out too
-    /// long for a single day to ever hold isn't specially detected here
-    /// anymore; the `maxDays` cap is still what stops the walk from
-    /// running forever on something truly unplaceable.
+    /// Whether any shelf still has an unscheduled task actually worth
+    /// walking further days for — the condition `regenerateFromNow` keeps
+    /// going for, so today running out of room pushes the overflow to
+    /// tomorrow, and the day after that, and so on, until every real task
+    /// is placed. Scoped to "eligible for one of the shelf's rules, and
+    /// could ever fit it" (see `SchedulingRule.canEverFit`) on purpose —
+    /// every rule requires explicit eligibility now (no tier-3 catch-all
+    /// left to sweep in an unmarked task), and a task that could never
+    /// fit any of its own eligible rules (its estimate, or divisible
+    /// minimum, too big for what any of them ever offer) would otherwise
+    /// keep this true forever, walking the day cap for nothing. Leaving
+    /// it out of "remaining work" is exactly what lets `regenerateFromNow`
+    /// walk without an artificial day cap for tasks that actually can be
+    /// placed, while a genuinely-unplaceable one just stays put,
+    /// unscheduled, for the user to notice and fix (a duration too big, a
+    /// rule too narrow) rather than silently consuming the walk's time.
     private func hasRemainingSchedulableWork(shelves: [Shelf]) -> Bool {
         shelves.contains { shelf in
-            shelf.hasEnabledSchedulingRules && (shelf.tasks ?? []).contains { !$0.isScheduled }
+            let rules = (shelf.schedulingRules ?? []).filter(\.isEnabled)
+            guard !rules.isEmpty else { return false }
+            return (shelf.tasks ?? []).contains { task in
+                guard !task.isScheduled else { return false }
+                return rules.contains { rule in
+                    task.isEligible(for: rule)
+                        && rule.canEverFit(minutesNeeded: task.estimatedMinutes, isDivisible: task.isDivisible, minimumSegmentMinutes: task.minimumSegmentMinutes)
+                }
+            }
         }
     }
 
@@ -625,6 +810,41 @@ final class ScheduleReviewViewModel {
         }
     }
 
+    // MARK: - Week view: drag to a new day/time
+
+    /// `WeekTimelineView`'s own drag-to-reposition — simpler than the day
+    /// timeline's drag (`moveEntry`/the ripple reflow it drives): this
+    /// just relocates one block to a new day and time, with no reflow of
+    /// anything else on either the old or new day. A week glance is meant
+    /// for quick moves, not the same fine-grained same-day reordering the
+    /// day view does — overlaps are left for the user to notice and sort
+    /// out on the day view itself, same as a manually-placed block would.
+    /// Drops back to "proposed" if it was approved, same as any other
+    /// edit to an approved block. Keeps `blocks` (this ViewModel's own
+    /// `targetDate`-scoped cache) in sync either way: added if the block
+    /// just moved onto `targetDate`, removed if it just moved off it —
+    /// otherwise the day view, if you flip back to it without this
+    /// screen re-fetching first, would show a stale set.
+    func moveBlock(_ block: ScheduledBlock, toDayStart newDayStart: Date, startMinutes: Int) {
+        let calendar = Calendar.current
+        let duration = block.durationMinutes
+        let newStart = calendar.date(byAdding: .minute, value: startMinutes, to: newDayStart) ?? block.startTime
+        let newEnd = calendar.date(byAdding: .minute, value: duration, to: newStart) ?? block.endTime
+        block.date = newDayStart
+        block.startTime = newStart
+        block.endTime = newEnd
+        needsReapproval(block)
+
+        if calendar.isDate(newDayStart, inSameDayAs: targetDate) {
+            if !blocks.contains(where: { $0.id == block.id }) {
+                blocks.append(block)
+            }
+            blocks.sort { $0.startTime < $1.startTime }
+        } else {
+            blocks.removeAll { $0.id == block.id }
+        }
+    }
+
     // MARK: - Swipe left: delete, leave the slot open
 
     /// Removes the block entirely. The underlying task goes back to being
@@ -670,11 +890,22 @@ final class ScheduleReviewViewModel {
     // MARK: - Long-press: manually pick the replacement
 
     /// Explicit version of autoReplace where the user chose the specific
-    /// replacement task from a picker sheet.
+    /// replacement task from a picker sheet. `newTask` no longer has to be
+    /// unscheduled (see `replaceCandidates`) — if it already has its own
+    /// active block elsewhere, that block is freed (deleted) as part of
+    /// taking over this one, rather than left behind as a dangling
+    /// duplicate placement. A user who wants to keep that old slot
+    /// instead of freeing it wants Swap (`swapBlocks`), not Replace.
     func manualReplace(_ block: ScheduledBlock, with newTask: TaskItem) {
         let outgoing = block.task
         outgoing?.isScheduled = false
         outgoing?.pushedCount += 1
+
+        for oldBlock in (newTask.scheduledBlocks ?? []) where oldBlock.id != block.id && !oldBlock.isCompleted {
+            oldBlock.task = nil
+            modelContext.delete(oldBlock)
+            blocks.removeAll { $0.id == oldBlock.id }
+        }
 
         block.task = newTask
         newTask.isScheduled = true
@@ -682,6 +913,53 @@ final class ScheduleReviewViewModel {
 
         if let idx = blocks.firstIndex(where: { $0.id == block.id }) {
             blocks[idx] = block
+        }
+    }
+
+    /// The other option offered for a candidate that's already scheduled
+    /// somewhere else (see `replaceCandidates`): rather than freeing the
+    /// candidate's own slot the way Replace does, the two tasks trade
+    /// places — `block`'s task takes over the candidate's old time, and
+    /// the candidate takes over `block`'s time. Both stay scheduled
+    /// throughout, just each in the other's spot, so neither task's own
+    /// `isScheduled` flag needs to change.
+    func swapBlocks(_ block: ScheduledBlock, with task: TaskItem) {
+        guard let candidateBlock = (task.scheduledBlocks ?? []).first(where: { !$0.isCompleted }) else { return }
+        let outgoing = block.task
+        block.task = task
+        candidateBlock.task = outgoing
+        needsReapproval(block)
+        needsReapproval(candidateBlock)
+
+        let calendar = Calendar.current
+        for affected in [block, candidateBlock] {
+            if calendar.isDate(affected.date, inSameDayAs: targetDate) {
+                if !blocks.contains(where: { $0.id == affected.id }) {
+                    blocks.append(affected)
+                }
+            } else {
+                blocks.removeAll { $0.id == affected.id }
+            }
+        }
+        blocks.sort { $0.startTime < $1.startTime }
+    }
+
+    /// Candidates for the Replace/Swap picker: on a schedulable shelf,
+    /// not the block's own current task, not already completed, and —
+    /// unlike `unscheduledCandidates` — not required to be unscheduled.
+    /// A candidate that's already scheduled elsewhere is included as
+    /// long as it has at most one active block and that block isn't
+    /// locked, since taking over its slot (Replace) or trading places
+    /// with it (Swap) both need a single, movable block to act on; a
+    /// divisible task split across several blocks, or one pinned via a
+    /// locked block, is left out rather than guessing which piece should
+    /// move.
+    func replaceCandidates(from allTasks: [TaskItem], excluding block: ScheduledBlock) -> [TaskItem] {
+        allTasks.filter { task in
+            guard task.shelf?.hasEnabledSchedulingRules ?? false, task.id != block.task?.id, !task.isCompleted else { return false }
+            guard task.isScheduled else { return true }
+            let activeBlocks = (task.scheduledBlocks ?? []).filter { !$0.isCompleted }
+            return activeBlocks.count <= 1 && !(activeBlocks.first?.isLocked ?? false)
         }
     }
 
@@ -726,6 +1004,7 @@ final class ScheduleReviewViewModel {
         // until every occurrence is resolved (see `Habit.status`).
         let status: OccurrenceStatus = block.isCompleted ? .complete : .none
         habitLog(for: habit, on: block.date).setOccurrence(block.habitOccurrenceIndex, to: status)
+        HabitStatsRefreshCoordinator.shared.habitLogsChanged()
     }
 
     /// See `TaskCompletionRecord.upsert(for:in:)`.
@@ -868,6 +1147,107 @@ final class ScheduleReviewViewModel {
         allBlocks.contains { !$0.isCompleted && $0.startTime < .now }
     }
 
+    /// Stand-in minutes-since-midnight for an AM/Midday/PM occurrence —
+    /// same idea as `Habit.nextTargetDate`'s own fallback times, kept
+    /// separate since `openHabitOccurrencesForReview`'s ordering is by
+    /// this exact stand-in time rather than that property.
+    private static func targetMinutes(for mode: HabitOccurrenceTimeMode) -> Int {
+        switch mode {
+        case .am: return 6 * 60
+        case .midday: return 12 * 60
+        case .pm: return 21 * 60
+        case .specific: return 0
+        }
+    }
+
+    /// AM/Midday/PM habit occurrences (see `HabitOccurrenceTimeMode`)
+    /// genuinely still open (`.none`) as of `cutoff`, PLUS any occurrence
+    /// whose id appears in `alsoInclude` regardless of its current status
+    /// — the habit counterpart to `reviewableBlocks`/`hasIncompletePastBlocks`,
+    /// needed because these never get a `ScheduledBlock` of their own (a
+    /// Specific-Time occurrence doesn't need this, it already shows up as
+    /// a real block those two already cover). Walks backward from
+    /// `cutoff`'s own day so one left unchecked yesterday (or further
+    /// back) still turns up, same reasoning `reviewableBlocks` pulls in
+    /// backlog from any earlier day — bounded by each habit's own
+    /// `startDate`, capped at 400 days back so a very old habit can't
+    /// turn this into an unbounded scan. Filtered by exact `targetTime`,
+    /// not just by day, so (unlike a same-day block) a PM habit isn't
+    /// treated as "overdue" the moment its day starts.
+    ///
+    /// `alsoInclude` is what lets a row the caller just toggled to
+    /// complete keep showing — faded and struck through, `isCompleted`
+    /// now genuinely `true` — instead of vanishing the instant it drops
+    /// out of the `.none` set, the same way a completed task's block
+    /// stays visible in `reviewableBlocks` instead of disappearing. It's
+    /// the caller's job to remember which ids it's touched (see
+    /// `ScheduleReviewView`'s `pastReviewCompletedHabitOccurrenceIDs`) —
+    /// this function only decides whether to include a given id, never
+    /// which ones a caller cares about remembering.
+    static func openHabitOccurrencesForReview(habits: [Habit], upTo cutoff: Date = .now, alsoInclude: Set<String> = []) -> [HabitReviewOccurrence] {
+        let calendar = Calendar.current
+        let cutoffDay = calendar.startOfDay(for: cutoff)
+        var result: [HabitReviewOccurrence] = []
+        for habit in habits {
+            let earliestDay = calendar.startOfDay(for: habit.startDate)
+            let scanFloorDay = calendar.date(byAdding: .day, value: -400, to: cutoffDay) ?? earliestDay
+            let boundedEarliestDay = max(earliestDay, scanFloorDay)
+            guard boundedEarliestDay <= cutoffDay else { continue }
+
+            var cursor = cutoffDay
+            while cursor >= boundedEarliestDay {
+                if habit.isApplicable(on: cursor, calendar: calendar) {
+                    for index in 0..<max(habit.timesPerDay, 1) {
+                        let mode = habit.timeMode(for: index)
+                        guard mode != .specific else { continue }
+                        let targetTime = calendar.date(byAdding: .minute, value: targetMinutes(for: mode), to: cursor) ?? cursor
+                        guard targetTime < cutoff else { continue }
+                        let id = "\(habit.id)-\(index)-\(Int(cursor.timeIntervalSince1970))"
+                        let status = habit.occurrenceStatus(index, on: cursor, calendar: calendar)
+                        guard status == .none || alsoInclude.contains(id) else { continue }
+                        result.append(HabitReviewOccurrence(id: id, habit: habit, index: index, isCompleted: status == .complete, targetTime: targetTime, modeLabel: mode.label))
+                    }
+                }
+                guard let previousDay = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
+                cursor = previousDay
+            }
+        }
+        return result
+    }
+
+    static func hasOpenHabitOccurrences(habits: [Habit], upTo cutoff: Date = .now) -> Bool {
+        !openHabitOccurrencesForReview(habits: habits, upTo: cutoff).isEmpty
+    }
+
+    /// Toggles an untimed (AM/Midday/PM) habit occurrence's completion —
+    /// the habit counterpart to `toggleComplete`, for a
+    /// `HabitReviewOccurrence` that (unlike a habit-linked block) has no
+    /// `ScheduledBlock` to toggle in the first place.
+    func toggleHabitOccurrence(habit: Habit, index: Int, isCompleted: Bool, day: Date) {
+        habitLog(for: habit, on: day).setOccurrence(index, to: isCompleted ? .none : .complete)
+        HabitStatsRefreshCoordinator.shared.habitLogsChanged()
+    }
+
+    /// Marks every still-open (`.none`) habit occurrence up through
+    /// `cutoff` as missed — timed (a `reviewableBlocks` habit block left
+    /// incomplete) or untimed (`openHabitOccurrencesForReview`) — the
+    /// habit counterpart to `clearIncompletePastBlocks`'s task-side sweep.
+    /// Mirrors `NightlyReviewView.markUnresolvedHabitOccurrencesAsMissed`,
+    /// generalized so the Calendar tab's own "Review Previous Events"/
+    /// "Assume Not Completed" flow gives habits the same treatment tasks
+    /// already get there, instead of silently leaving them unresolved.
+    func markUnresolvedHabitOccurrencesAsMissed(allBlocks: [ScheduledBlock], habits: [Habit], cutoff: Date = .now) {
+        for block in allBlocks {
+            guard let habit = block.habit, !block.isCompleted, block.startTime < cutoff else { continue }
+            habitLog(for: habit, on: block.date).setOccurrence(block.habitOccurrenceIndex, to: .missed)
+        }
+        for occurrence in Self.openHabitOccurrencesForReview(habits: habits, upTo: cutoff) {
+            habitLog(for: occurrence.habit, on: occurrence.targetTime).setOccurrence(occurrence.index, to: .missed)
+        }
+        try? modelContext.save()
+        HabitStatsRefreshCoordinator.shared.habitLogsChanged()
+    }
+
     /// The merged timeline `DayTimelineGridView` actually renders: proposed
     /// blocks plus whatever's genuinely external on the calendar. A pushed
     /// block whose Google event has already synced back shows up in both
@@ -898,11 +1278,10 @@ final class ScheduleReviewViewModel {
     /// `regenerateFromNow` is free to place them again starting from right
     /// now. Covers any previous day in full, plus today up to right now —
     /// not a block later today, which hasn't happened yet and isn't
-    /// "not completed," just not-yet-due. Deliberately ignores the lock —
-    /// an overdue leftover is exactly the kind of thing "Assume Not
-    /// Completed" exists to sweep away regardless, unlike
-    /// `regenerateFromNow`'s own routine forward-looking clear, which
-    /// still respects it.
+    /// "not completed," just not-yet-due. A locked block is left exactly
+    /// where it is, same as `regenerateFromNow`'s own routine
+    /// forward-looking clear respects it — locked means "don't move this,"
+    /// full stop, whether or not it's been completed yet.
     /// Unlike `deleteBlock` (whose calendar-event removal is fire-and-forget
     /// — fine for a single swipe, where nothing downstream depends on it
     /// having landed yet), this `await`s each deletion: the caller always
@@ -917,7 +1296,7 @@ final class ScheduleReviewViewModel {
     /// left unchecked there gets freed up for tomorrow's generation even
     /// when `reviewDate` isn't today.
     func clearIncompletePastBlocks(allBlocks: [ScheduledBlock], cutoff: Date = .now) async {
-        let toClear = allBlocks.filter { !$0.isCompleted && $0.startTime < cutoff }
+        let toClear = allBlocks.filter { !$0.isCompleted && $0.startTime < cutoff && !$0.isLocked }
         for block in toClear {
             block.task?.isScheduled = false
             block.task?.pushedCount += 1

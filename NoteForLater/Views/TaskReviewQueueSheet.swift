@@ -135,6 +135,9 @@ struct TaskReviewQueueSheet: View {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Cancel", action: cancel)
                     }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Skip Remaining", action: skipRemaining)
+                    }
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Mark Complete", action: markComplete)
                             .tint(.green)
@@ -191,6 +194,20 @@ struct TaskReviewQueueSheet: View {
             snapshot = currentTask.map(TaskEditSnapshot.init)
             return
         }
+        currentTask = nil
+        snapshot = nil
+        startTagPhaseIfNeeded()
+    }
+
+    /// Jumps straight past every remaining task card at once — same
+    /// end state `advance()` reaches once the queue empties on its own
+    /// (the tag phase, or "All Caught Up" if there's nothing there
+    /// either), just without stepping through each card one at a time.
+    /// Nothing already reviewed this session is touched — each card's
+    /// edits already committed straight to the model as they were made,
+    /// same as `cancel()`'s own doc comment notes.
+    private func skipRemaining() {
+        queue = []
         currentTask = nil
         snapshot = nil
         startTagPhaseIfNeeded()

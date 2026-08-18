@@ -29,18 +29,6 @@ struct ScheduleReviewView: View {
     @State private var viewModel: ScheduleReviewViewModel?
     @State private var pickerTarget: ScheduledBlock?
     @State private var lockedStore = LockedEventsStore.shared
-    /// Drives the "Review Previous Events or Assume Not Completed?" prompt
-    /// shown by `regenerateBar` when there's a backlog from before today —
-    /// see `ScheduleReviewViewModel.hasIncompletePastBlocks`.
-    @State private var showRegeneratePrompt = false
-    @State private var showPastReviewSheet = false
-    /// Drives the "Review N Items in Inbox?" prompt `regenerateBar` shows
-    /// first, before the past-events one — Inbox tasks are never
-    /// auto-scheduled (see `AISchedulingService`'s doc comment), so this is
-    /// the nudge to go sort them onto a shelf instead of letting them pile
-    /// up unseen.
-    @State private var showInboxReviewPrompt = false
-    @State private var showInboxReviewSheet = false
     /// Live horizontal offset of the date header while dragging — follows
     /// your finger during the pull, then springs back to 0 on release
     /// (the push), rather than only reacting once you release past a
@@ -56,6 +44,10 @@ struct ScheduleReviewView: View {
     /// `collapseEmptyPeriodsButton`'s icon/action so it reads correctly
     /// in that state instead of looking like tapping it does nothing.
     @State private var isAnyPeriodCollapsed = false
+    /// Zoomed-out weekly overview — see `WeekTimelineView`. Replaces the
+    /// day timeline (and its header/date-swiper) entirely while shown;
+    /// tapping a day there jumps back to the day view for that date.
+    @State private var isShowingWeekView = false
 
     // AI scheduling itself is still mocked (that's a separate TODO: swap in
     // a real Claude API call). The calendar side is real — it hits Google
@@ -66,29 +58,42 @@ struct ScheduleReviewView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if let viewModel {
-                    content(viewModel: viewModel)
-                } else {
+                if isShowingWeekView, let viewModel {
+                    WeekTimelineView(
+                        allBlocks: allBlocks,
+                        allTasks: allTasks,
+                        viewModel: viewModel,
+                        initialAnchorDate: viewModel.targetDate,
+                        onSelectDay: { day in Task { await jumpToDay(day) } }
+                    )
+                } else if isShowingWeekView {
                     ProgressView()
+                } else {
+                    Group {
+                        if let viewModel {
+                            content(viewModel: viewModel)
+                        } else {
+                            ProgressView()
+                        }
+                    }
+                    .safeAreaInset(edge: .top) {
+                        header
+                    }
+                    .safeAreaInset(edge: .bottom) {
+                        dateSwiper
+                    }
                 }
-            }
-            .safeAreaInset(edge: .top) {
-                header
-            }
-            .safeAreaInset(edge: .bottom) {
-                regenerateBar
-            }
-            .safeAreaInset(edge: .bottom) {
-                dateSwiper
             }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button("Approve All") {
-                        viewModel?.approveAll()
+                if !isShowingWeekView {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button("Approve All") {
+                            viewModel?.approveAll()
+                        }
+                        .disabled((viewModel?.blocks.isEmpty) ?? true)
                     }
-                    .disabled((viewModel?.blocks.isEmpty) ?? true)
                 }
             }
             .onAppear(perform: setupIfNeeded)
@@ -108,13 +113,17 @@ struct ScheduleReviewView: View {
             .sheet(item: $pickerTarget) { block in
                 if let viewModel {
                     ReplacementPickerSheet(
-                        candidates: viewModel.unscheduledCandidates(from: allTasks, excluding: block),
+                        candidates: viewModel.replaceCandidates(from: allTasks, excluding: block),
                         onPick: { chosen in
                             viewModel.manualReplace(block, with: chosen)
                             pickerTarget = nil
                         },
                         onAuto: {
                             viewModel.autoReplace(block, candidatePool: allTasks)
+                            pickerTarget = nil
+                        },
+                        onSwap: { chosen in
+                            viewModel.swapBlocks(block, with: chosen)
                             pickerTarget = nil
                         }
                     )
@@ -173,19 +182,30 @@ struct ScheduleReviewView: View {
         Calendar.current.isDateInToday(viewModel?.targetDate ?? .now)
     }
 
+    /// Runs on every appear, not just the view's first one — a tab switch
+    /// away and back (e.g. editing a task's Eligible Schedules over on the
+    /// Inbox/Shelves tab, then flipping to Calendar to check it) is the
+    /// normal way a change made elsewhere ought to show up here, and
+    /// there's no other signal wired up to tell this screen something
+    /// changed while it wasn't the one on screen. `loadExistingBlocks`
+    /// re-derives `blocks` from the live `allBlocks` query first so
+    /// `autoPlaceEligibleTasks`'s own trim/place pass is working from
+    /// what's actually in the model, not a stale snapshot from whenever
+    /// the ViewModel happened to be created.
     private func setupIfNeeded() {
-        guard viewModel == nil else { return }
-        configureCalendarService()
-        let vm = ScheduleReviewViewModel(
-            modelContext: modelContext,
-            calendarService: calendarService,
-            schedulingService: schedulingService
-        )
+        if viewModel == nil {
+            configureCalendarService()
+            viewModel = ScheduleReviewViewModel(
+                modelContext: modelContext,
+                calendarService: calendarService,
+                schedulingService: schedulingService
+            )
+        }
+        guard let vm = viewModel else { return }
         vm.loadExistingBlocks(allBlocks)
-        viewModel = vm
         Task {
             await vm.loadCalendarEvents()
-            await vm.autoPlaceHabitsAndRecurringTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+            await vm.autoPlaceEligibleTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
         }
     }
 
@@ -205,13 +225,24 @@ struct ScheduleReviewView: View {
         guard let viewModel else { return }
         let newDate = Calendar.current.date(byAdding: .day, value: days, to: viewModel.targetDate) ?? viewModel.targetDate
         await viewModel.changeTargetDate(to: newDate, existingBlocks: allBlocks)
-        await viewModel.autoPlaceHabitsAndRecurringTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+        await viewModel.autoPlaceEligibleTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+    }
+
+    /// Tapping a day (or a block) in `WeekTimelineView` lands here — jumps
+    /// the day view straight to that date and switches back to it, same
+    /// as `goToToday`/`changeDate` but to an arbitrary target instead of
+    /// "now" or a relative offset.
+    private func jumpToDay(_ day: Date) async {
+        guard let viewModel else { return }
+        await viewModel.changeTargetDate(to: day, existingBlocks: allBlocks)
+        await viewModel.autoPlaceEligibleTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+        isShowingWeekView = false
     }
 
     private func goToToday() async {
         guard let viewModel else { return }
         await viewModel.changeTargetDate(to: .now, existingBlocks: allBlocks)
-        await viewModel.autoPlaceHabitsAndRecurringTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+        await viewModel.autoPlaceEligibleTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
     }
 
     /// In-content header (not the system nav bar) so the full date reads
@@ -229,8 +260,9 @@ struct ScheduleReviewView: View {
             }
 
             HStack {
-                Spacer()
                 collapseEmptyPeriodsButton
+                Spacer()
+                weekViewButton
             }
         }
         .padding(.horizontal, 20)
@@ -295,6 +327,15 @@ struct ScheduleReviewView: View {
         .accessibilityLabel(isEffectivelyCollapsed ? "Expand Empty Periods" : "Collapse Empty Periods")
     }
 
+    private var weekViewButton: some View {
+        Button {
+            isShowingWeekView = true
+        } label: {
+            Image(systemName: "minus.magnifyingglass")
+        }
+        .accessibilityLabel("Week View")
+    }
+
     /// Frozen above the tab bar, separate from the date/label up top — not
     /// part of any scrolling content, so it never moves.
     private var dateSwiper: some View {
@@ -337,133 +378,10 @@ struct ScheduleReviewView: View {
         .background(.bar)
     }
 
-    /// Unsorted tasks (no shelf) still worth a nudge to sort — mirrors
-    /// NightlyReviewView's own Inbox-step filter, so this prompt and that
-    /// one agree on what counts as "needs attention."
-    private var inboxTasksToReview: [TaskItem] {
-        allTasks.filter { $0.shelf == nil && !$0.isSnoozedFromAttributeReview }
-    }
-
-    private var routableShelves: [Shelf] {
-        allShelves.filter { !$0.isKitchen }
-    }
-
-    /// Frozen directly above `dateSwiper` — regenerating rebuilds from
-    /// right now forward (see ScheduleReviewViewModel.regenerateFromNow),
-    /// not just whatever day happens to be on screen, so this lives
-    /// outside the per-day content and toolbar entirely.
-    ///
-    /// Tapping this runs up to two prompts before it actually regenerates,
-    /// each skipped if it has nothing to say: first, whether to sort
-    /// what's sitting in the Inbox (never auto-scheduled — see
-    /// `AISchedulingService`'s doc comment, so leaving it unreviewed just
-    /// means it keeps getting silently skipped every time); then, if
-    /// there's a backlog of not-yet-completed blocks from before today,
-    /// whether to review them one at a time or assume they're all not
-    /// done. Reviewing either one skips straight to actually regenerating
-    /// once you're done — dismissing a review sheet by swiping it away
-    /// leaves you free to back out without triggering a regenerate you
-    /// didn't ask for; only finishing the review (or explicitly skipping)
-    /// does.
-    private var regenerateBar: some View {
-        Button {
-            guard viewModel != nil else { return }
-            if !inboxTasksToReview.isEmpty {
-                showInboxReviewPrompt = true
-            } else {
-                proceedPastEventsCheck()
-            }
-        } label: {
-            Label(viewModel?.blocks.isEmpty == false ? "Regenerate Schedule" : "Generate Schedule", systemImage: "arrow.clockwise")
-                .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.borderedProminent)
-        .disabled(viewModel?.isGenerating ?? true)
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(.bar)
-        .confirmationDialog(
-            "You have \(inboxTasksToReview.count) item\(inboxTasksToReview.count == 1 ? "" : "s") in your Inbox. Inbox tasks are never scheduled automatically.",
-            isPresented: $showInboxReviewPrompt,
-            titleVisibility: .visible
-        ) {
-            Button("Review Inbox") {
-                showInboxReviewSheet = true
-            }
-            Button("Skip and Generate") {
-                proceedPastEventsCheck()
-            }
-            Button("Cancel", role: .cancel) {}
-        }
-        .sheet(isPresented: $showInboxReviewSheet, onDismiss: proceedPastEventsCheck) {
-            TaskReviewQueueSheet(shelves: routableShelves, queue: inboxTasksToReview)
-        }
-        .confirmationDialog(
-            "You have tasks from previous days that haven't been marked complete.",
-            isPresented: $showRegeneratePrompt,
-            titleVisibility: .visible
-        ) {
-            Button("Review Previous Events") {
-                showPastReviewSheet = true
-            }
-            Button("Assume Not Completed") {
-                guard let viewModel else { return }
-                Task {
-                    // Awaited so every stale calendar event is actually
-                    // gone before regeneration checks what's free — see
-                    // `clearIncompletePastBlocks`'s doc comment.
-                    await viewModel.clearIncompletePastBlocks(allBlocks: allBlocks)
-                    await viewModel.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        }
-        .sheet(isPresented: $showPastReviewSheet) {
-            NavigationStack {
-                OverdueBlocksReviewList(
-                    items: ScheduleReviewViewModel.reviewableBlocks(from: allBlocks).map { .block($0) },
-                    onToggle: { item in
-                        guard case .block(let block) = item else { return }
-                        viewModel?.toggleComplete(block)
-                    },
-                    onDone: {
-                        guard let viewModel else { return }
-                        showPastReviewSheet = false
-                        Task {
-                            // Whatever's left after this review still isn't
-                            // marked complete — sweep it the same way "Assume
-                            // Not Completed" would, rather than leaving it
-                            // stranded on today's (or an earlier day's)
-                            // calendar untouched.
-                            await viewModel.clearIncompletePastBlocks(allBlocks: allBlocks)
-                            await viewModel.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
-                        }
-                    }
-                )
-                .navigationTitle("Review Previous Events")
-                .navigationBarTitleDisplayMode(.inline)
-            }
-        }
-    }
-
-    /// The second half of `regenerateBar`'s tap flow, reached once the
-    /// Inbox prompt (if it showed at all) is resolved — checks for an
-    /// overdue-blocks backlog next, same as before that prompt existed.
-    private func proceedPastEventsCheck() {
-        guard viewModel != nil else { return }
-        if ScheduleReviewViewModel.hasIncompletePastBlocks(in: allBlocks) {
-            showRegeneratePrompt = true
-        } else {
-            runRegenerate()
-        }
-    }
-
-    private func runRegenerate() {
-        guard let viewModel else { return }
-        Task {
-            await viewModel.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
-        }
-    }
+    // Generating/regenerating the schedule, and the Inbox/overdue-events
+    // review prompts that used to gate it, now live solely in Nightly
+    // Review's own flow (see NightlyReviewView's Inbox and Tomorrow
+    // steps) — this tab is view-and-adjust only.
 
     /// The date the drag would land on, if any, revealed sliding in from
     /// whichever edge you're dragging toward as it happens — not just the
@@ -575,23 +493,34 @@ struct ReplacementPickerSheet: View {
     /// to-do (by priority, then due date; see
     /// `ScheduleReviewViewModel.autoReplace`) instead of a specific pick.
     let onAuto: () -> Void
+    /// Only ever offered for a candidate that's already scheduled
+    /// somewhere else (see `ScheduleReviewViewModel.replaceCandidates`) —
+    /// trades the two tasks' times instead of freeing the candidate's own
+    /// slot the way tapping the row itself (`onPick`) does.
+    var onSwap: ((TaskItem) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
 
-    private struct ShelfGroup: Identifiable {
+    private struct DayGroup: Identifiable {
         let id: String
         let title: String
         let tasks: [TaskItem]
-        let color: Color
     }
 
-    /// Same shelf-grouped, colored, due-date-first layout as
-    /// `EmptySlotPickerSheet` (`DayTimelineGridView.swift`) — that sheet
-    /// and this one both boil down to "pick an unscheduled to-do to land
-    /// on a given time," just reached from a different tap (an open
-    /// slot's own "add here" vs. an existing block's "replace"), so they
-    /// should read as the same picker rather than one being a flat list.
-    private var groups: [ShelfGroup] {
-        let byShelf = Dictionary(grouping: candidates) { $0.shelf?.id }
+    private func activeBlock(for task: TaskItem) -> ScheduledBlock? {
+        (task.scheduledBlocks ?? []).first { !$0.isCompleted }
+    }
+
+    /// One section per day a candidate is currently sitting on, in
+    /// chronological order (each day's own tasks sorted by their block's
+    /// start time), plus a leading "Unscheduled" section (sorted by due
+    /// date, same as before) for candidates with no block at all — day is
+    /// the more useful grouping now that Replace/Swap candidates aren't
+    /// just unscheduled to-dos anymore (see
+    /// `ScheduleReviewViewModel.replaceCandidates`), since which day a
+    /// candidate would come *from* is exactly what you're weighing when
+    /// picking one.
+    private var groups: [DayGroup] {
+        let calendar = Calendar.current
         func dueDateFirst(_ lhs: TaskItem, _ rhs: TaskItem) -> Bool {
             switch (lhs.dueDate, rhs.dueDate) {
             case let (l?, r?): return l < r
@@ -600,14 +529,26 @@ struct ReplacementPickerSheet: View {
             case (nil, nil): return false
             }
         }
-        let shelfGroups = byShelf.values
-            .compactMap { tasks -> ShelfGroup? in
-                guard let shelf = tasks.first?.shelf else { return nil }
-                return ShelfGroup(id: shelf.id.uuidString, title: shelf.name, tasks: tasks.sorted(by: dueDateFirst), color: shelf.color)
-            }
-            .sorted { ($0.tasks.first?.shelf?.sortOrder ?? 0) < ($1.tasks.first?.shelf?.sortOrder ?? 0) }
-        let inboxTasks = (byShelf[nil] ?? []).sorted(by: dueDateFirst)
-        return inboxTasks.isEmpty ? shelfGroups : shelfGroups + [ShelfGroup(id: "inbox", title: "Inbox", tasks: inboxTasks, color: .secondary)]
+
+        let unscheduled = candidates.filter { activeBlock(for: $0) == nil }.sorted(by: dueDateFirst)
+        let scheduled = candidates.filter { activeBlock(for: $0) != nil }
+        let byDay = Dictionary(grouping: scheduled) { calendar.startOfDay(for: activeBlock(for: $0)!.date) }
+        let dayGroups = byDay.keys.sorted().map { day -> DayGroup in
+            let tasksForDay = (byDay[day] ?? []).sorted { activeBlock(for: $0)!.startTime < activeBlock(for: $1)!.startTime }
+            return DayGroup(id: day.timeIntervalSince1970.description, title: dayTitle(for: day), tasks: tasksForDay)
+        }
+
+        let unscheduledGroup = unscheduled.isEmpty ? [] : [DayGroup(id: "unscheduled", title: "Unscheduled", tasks: unscheduled)]
+        return unscheduledGroup + dayGroups
+    }
+
+    private func dayTitle(for day: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(day) { return "Today" }
+        if calendar.isDateInTomorrow(day) { return "Tomorrow" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE, MMM d"
+        return formatter.string(from: day)
     }
 
     var body: some View {
@@ -618,37 +559,54 @@ struct ReplacementPickerSheet: View {
                 } else {
                     List {
                         ForEach(groups) { group in
-                            Section {
+                            Section(group.title) {
                                 ForEach(group.tasks) { task in
-                                    Button {
-                                        onPick(task)
-                                    } label: {
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(task.title)
-                                                .font(.body.weight(.medium))
-                                                .foregroundStyle(.primary)
-                                            Text("\(task.durationLabel) \u{00B7} \(task.priority.label)")
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
+                                    let existingBlock = activeBlock(for: task)
+                                    let color = task.shelf?.color ?? .secondary
+                                    HStack(spacing: 8) {
+                                        Button {
+                                            onPick(task)
+                                        } label: {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(task.title)
+                                                    .font(.body.weight(.medium))
+                                                    .foregroundStyle(.primary)
+                                                if let existingBlock {
+                                                    Text("\(task.shelf?.name ?? "Inbox") \u{00B7} \(timeRangeText(existingBlock.startTime, existingBlock.endTime))")
+                                                        .font(.caption)
+                                                        .foregroundStyle(.orange)
+                                                } else {
+                                                    Text("\(task.durationLabel) \u{00B7} \(task.priority.label)")
+                                                        .font(.caption)
+                                                        .foregroundStyle(.secondary)
+                                                }
+                                            }
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .contentShape(Rectangle())
                                         }
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .padding(.vertical, 2)
-                                        .contentShape(Rectangle())
+                                        .buttonStyle(.plain)
+
+                                        if existingBlock != nil, let onSwap {
+                                            Button {
+                                                onSwap(task)
+                                            } label: {
+                                                Image(systemName: "arrow.left.arrow.right")
+                                                    .font(.caption.weight(.semibold))
+                                                    .foregroundStyle(Color.accentColor)
+                                                    .padding(8)
+                                                    .background(Circle().fill(Color.accentColor.opacity(0.18)))
+                                            }
+                                            .buttonStyle(.plain)
+                                            .accessibilityLabel("Swap times with \(task.title)")
+                                        }
                                     }
-                                    .buttonStyle(.plain)
+                                    .padding(.vertical, 2)
                                     .listRowBackground(
                                         RoundedRectangle(cornerRadius: 10)
-                                            .fill(group.color.opacity(0.15))
+                                            .fill(color.opacity(0.15))
                                             .padding(.vertical, 2)
                                     )
                                     .listRowSeparator(.hidden)
-                                }
-                            } header: {
-                                HStack(spacing: 5) {
-                                    Circle()
-                                        .fill(group.color)
-                                        .frame(width: 6, height: 6)
-                                    Text(group.title)
                                 }
                             }
                         }
@@ -666,6 +624,15 @@ struct ReplacementPickerSheet: View {
                 }
             }
         }
+    }
+
+    /// No day in this one — a candidate row already sits under its own
+    /// day's section header (see `groups`), so repeating the day here
+    /// would just be noise.
+    private func timeRangeText(_ start: Date, _ end: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "h:mm a"
+        return "\(formatter.string(from: start))–\(formatter.string(from: end))"
     }
 }
 

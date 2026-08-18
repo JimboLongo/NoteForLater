@@ -287,8 +287,16 @@ struct TaskRow: View {
             } else {
                 HStack(spacing: 12) {
                     Label(addedAgeText, systemImage: "hourglass")
-                    if let dueDate = task.dueDate {
-                        Label(dueDate.formatted(date: .abbreviated, time: .omitted), systemImage: "calendar")
+                    // A recurring task's own `dueDate` is just its
+                    // recurrence anchor (see `TaskItem.hasRecurringOccurrence`)
+                    // — once that anchor's passed, showing it here reads as
+                    // a stale/wrong date. `nextRecurringOccurrenceDate()` is
+                    // the same "soonest still-ahead occurrence" this list is
+                    // already sorted by (see `ShelfListView.sortDate`), so
+                    // the date shown here always matches the date it's
+                    // ordered by.
+                    if let previewDate = task.isRecurring ? task.nextRecurringOccurrenceDate() : task.dueDate {
+                        Label(previewDate.formatted(date: .abbreviated, time: .omitted), systemImage: "calendar")
                     }
                     if task.estimatedMinutes > 0 {
                         Label(task.durationLabel, systemImage: "clock")

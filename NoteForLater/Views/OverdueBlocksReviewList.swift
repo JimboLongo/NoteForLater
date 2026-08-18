@@ -59,9 +59,9 @@ enum ReviewItem: Identifiable {
 /// from the 7am task sitting right after it. Shared between Nightly
 /// Review's "Review Schedule" step and the standalone "Review Previous
 /// Events" sheet offered when regenerating a schedule with overdue blocks
-/// left over (see `ScheduleReviewViewModel.reviewableBlocks`
-/// /`hasIncompletePastBlocks`) — the latter never has habit items, it just
-/// wraps its blocks as `.block(_)`.
+/// left over — both mix in untimed habit occurrences the same way, via
+/// `ScheduleReviewViewModel.openHabitOccurrencesForReview` alongside
+/// `reviewableBlocks`/`hasIncompletePastBlocks` for the blocks themselves.
 ///
 /// Every row's circle directly reflects completion and toggles it
 /// immediately on tap — no separate "select, then confirm" step. Checking
@@ -78,7 +78,8 @@ struct OverdueBlocksReviewList: View {
     /// Fired immediately, every time a row's circle is tapped — the
     /// caller switches on the item to flip a block's completion
     /// (`ScheduleReviewViewModel.toggleComplete`) or a habit occurrence's
-    /// (`NightlyReviewView.toggleHabitReviewOccurrence`).
+    /// (`ScheduleReviewViewModel.toggleHabitOccurrence`, also what
+    /// `NightlyReviewView.toggleHabitReviewOccurrence` wraps).
     let onToggle: (ReviewItem) -> Void
     var onDone: (() -> Void)? = nil
 

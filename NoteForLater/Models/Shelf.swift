@@ -50,6 +50,12 @@ final class Shelf {
     /// same "hidden until a date" mechanism the existing Snooze action
     /// already provides.
     var tracksFutureReminder: Bool = false
+    /// Whether completing a task on this shelf contributes a
+    /// `TaskCompletionRecord` — off keeps it off the Task Stats page
+    /// entirely (see `TaskCompletionRecord.upsert`), for a shelf whose
+    /// "tasks" aren't really work to measure (e.g. a Reference shelf of
+    /// links, or one used as a plain checklist).
+    var tracksTaskStats: Bool = true
     /// Marks this as *the* Kitchen shelf (Pantry + Cookbook), created/
     /// removed by the "Meal Planning" toggle in Settings — a flag rather
     /// than matching on name so a rename doesn't silently break its
@@ -125,6 +131,10 @@ final class Shelf {
     /// Whether "Remind Me In" is actually tracked here — same Kitchen
     /// override.
     var effectiveTracksFutureReminder: Bool { !isKitchen && tracksFutureReminder }
+
+    /// Whether this shelf's completions are actually counted — same
+    /// Kitchen override.
+    var effectiveTracksTaskStats: Bool { !isKitchen && tracksTaskStats }
 
     /// A task landing on this shelf — routed from the Inbox, or added
     /// directly here — keeps whatever duration it already had; only a task

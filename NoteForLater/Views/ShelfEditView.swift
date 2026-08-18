@@ -27,6 +27,7 @@ struct ShelfEditView: View {
     @State private var hasNextStep: Bool
     @State private var hasPriority: Bool
     @State private var tracksFutureReminder: Bool
+    @State private var tracksTaskStats: Bool
 
     private let columns = [GridItem(.adaptive(minimum: 44))]
     private static let durationOptions = [0, 2, 5, 15, 30, 45, 60, 90, 120, 240, 480]
@@ -48,6 +49,7 @@ struct ShelfEditView: View {
         _hasNextStep = State(initialValue: shelf.hasNextStep)
         _hasPriority = State(initialValue: shelf.hasPriority)
         _tracksFutureReminder = State(initialValue: shelf.tracksFutureReminder)
+        _tracksTaskStats = State(initialValue: shelf.tracksTaskStats)
         let shelfID = shelf.id
         _rules = Query(
             filter: #Predicate<SchedulingRule> { $0.shelf?.id == shelfID },
@@ -119,10 +121,11 @@ struct ShelfEditView: View {
                     Toggle("Due Date", isOn: $hasDueDates)
                     Toggle("Duration", isOn: $tracksDuration)
                     Toggle("Future Reminder", isOn: $tracksFutureReminder)
+                    Toggle("Count Toward Task Stats", isOn: $tracksTaskStats)
                 } header: {
                     Text("Task Card Questions")
                 } footer: {
-                    Text("Which questions tasks on this shelf ask for — off hides that field on the card entirely.")
+                    Text("The first five hide that field on the card entirely when off. Count Toward Task Stats, off, keeps completions on this shelf out of the Task Stats page.")
                 }
 
                 if tracksDuration {
@@ -344,6 +347,7 @@ struct ShelfEditView: View {
         shelf.hasNextStep = hasNextStep
         shelf.hasPriority = hasPriority
         shelf.tracksFutureReminder = tracksFutureReminder
+        shelf.tracksTaskStats = tracksTaskStats
         // isTwoMinuteTasks/isRecurringTasks are no longer set from here —
         // see Settings > Special Shelves, which picks a shelf for either
         // flag directly rather than toggling it per-shelf.
@@ -391,6 +395,14 @@ struct ShelfEditView: View {
         let rule = SchedulingRule(shelf: shelf, sortOrder: nextOrder)
         rule.namedSchedule = schedule
         modelContext.insert(rule)
+        // On by default for every task already on this shelf — otherwise
+        // each one would silently need a manual re-review just to pick up
+        // a schedule that's obviously meant to cover it, the same way a
+        // task landing on the shelf fresh already gets every existing
+        // enabled rule on by default (see `shelfRow`).
+        for task in shelf.tasks ?? [] where !task.includedSchedulingRuleIDs.contains(rule.id) {
+            task.includedSchedulingRuleIDs.append(rule.id)
+        }
         showingSchedulePicker = false
         newlyAssignedRule = rule
     }

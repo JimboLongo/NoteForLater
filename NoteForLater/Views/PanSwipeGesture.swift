@@ -14,6 +14,11 @@ import UIKit
 /// dominant, so a swipe-to-delete row and a scrolling calendar coexist
 /// without either blocking the other.
 struct PanSwipeGesture: UIGestureRecognizerRepresentable {
+    /// See `LongPressDragGesture.isEnabled`'s doc comment — same reasoning:
+    /// this removes the recognizer from the touch path entirely, rather
+    /// than leaving it attached-but-inert and still competing for touches
+    /// a nested view's own gesture needs to see immediately.
+    var isEnabled: Bool = true
     var onChanged: (CGPoint) -> Void
     var onEnded: (CGPoint) -> Void
     var onCancelled: () -> Void
@@ -21,10 +26,13 @@ struct PanSwipeGesture: UIGestureRecognizerRepresentable {
     func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
         let recognizer = UIPanGestureRecognizer()
         recognizer.delegate = context.coordinator
+        recognizer.isEnabled = isEnabled
         return recognizer
     }
 
-    func updateUIGestureRecognizer(_ recognizer: UIPanGestureRecognizer, context: Context) {}
+    func updateUIGestureRecognizer(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        recognizer.isEnabled = isEnabled
+    }
 
     func handleUIGestureRecognizerAction(_ recognizer: UIPanGestureRecognizer, context: Context) {
         let translation = recognizer.translation(in: recognizer.view)

@@ -1,27 +1,61 @@
 import Foundation
 
 /// Turns "here's my shelves' SchedulingRules + here's my open calendar
-/// time" into a proposed set of ScheduledBlocks for a given day. This is
-/// the piece the nightly job calls to build tomorrow's preview.
+/// time" into a proposed set of ScheduledBlocks for a given day. There's
+/// no separate "generate" moment anymore — the calendar is meant to
+/// always be live, reflecting whatever the current shelves/rules say
+/// should be on a day the instant it's viewed (see
+/// `ScheduleReviewViewModel.autoPlaceEligibleTasks`, which calls this on
+/// every appear/day-change). Nightly Review's own end-of-day handoff
+/// (`regenerateFromNow`) still calls this too, for its own different
+/// job: clearing out and re-optimizing whatever isn't locked/approved
+/// across every future day, the chance to review and move things around
+/// the night before — not the only way a day ever gets populated in the
+/// first place.
 ///
 /// TODO(Claude Code): Replace the greedy mock packer with a real call to the
 /// Claude API (Messages API) — same shape, just smarter task selection.
 protocol AISchedulingServiceProtocol: AnyObject {
+    /// A task only ever gets pulled into a rule's window if it's been
+    /// explicitly toggled eligible for that specific schedule on its own
+    /// task card ("Eligible Schedules") — a task that only has, say,
+    /// Weekends toggled on is never a candidate for a weekday rule's
+    /// leftover budget, no matter how much room that rule still has. (An
+    /// earlier version relaxed this once every explicitly-eligible task
+    /// already had a slot, on the theory that unused budget was being
+    /// wasted — but that meant a task's own eligible-schedule choices
+    /// could be silently overridden by whichever rule happened to run
+    /// short on candidates, which is the opposite of what that toggle is
+    /// for.)
+    /// `existingBlocks` — every task/habit block already sitting on
+    /// `date`, from any earlier call — is what lets a rule's own
+    /// fill-strategy budget (e.g. "≤2 tasks") stay a real cap across
+    /// *repeated* calls, not just within a single one: each call's own
+    /// `pack()` seeds its task-count/total-minutes counters with
+    /// whatever's already occupying that rule's window before it decides
+    /// how much more room it has. Without this, a rule capped at 2 tasks
+    /// would place 2 more every single time this ran — which, now that
+    /// `ScheduleReviewViewModel.autoPlaceEligibleTasks` calls this on
+    /// every appear/day-change rather than once via an explicit generate,
+    /// is routine, not a rare double-run.
     func generateProposedSchedule(
         shelves: [Shelf],
         habits: [Habit],
         freeSlots: [TimeSlot],
         eligibleHoursWindows: [EligibleHoursWindow],
-        date: Date
+        date: Date,
+        existingBlocks: [ScheduledBlock]
     ) async throws -> [ScheduledBlock]
 
     /// The two categories that jump the whole queue — habits and the
     /// Recurring Tasks shelf's own tasks (see `Shelf.isRecurringTasks`) —
     /// split out of `generateProposedSchedule` so a caller can top these
     /// up on their own, without a full (rule-packing, network-fetching)
-    /// regenerate. Synchronous and side-effect-free — no calendar or
-    /// model access here, that's on the caller. See
-    /// `ScheduleReviewViewModel.autoPlaceHabitsAndRecurringTasks`.
+    /// pass. Synchronous and side-effect-free — no calendar or model
+    /// access here, that's on the caller. `generateProposedSchedule`
+    /// itself opens with this same pass — this is only kept as its own
+    /// entry point in case something ever needs just the habit/recurring
+    /// half without the rest.
     func placeHabitsAndRecurringTasks(
         shelves: [Shelf],
         habits: [Habit],
@@ -39,35 +73,32 @@ protocol AISchedulingServiceProtocol: AnyObject {
 /// shelves with overlapping windows on the same day never double-book the
 /// same slot.
 ///
-/// Each rule's own pass actually covers three tiers, in order, all pulling
-/// from that same rule's window and that same rule's fill-strategy budget
-/// (never anywhere else — a task never lands outside a shelf's own
+/// Each rule's own pass covers two tiers, in order, both pulling from
+/// that same rule's window, that same rule's fill-strategy budget, and
+/// only tasks explicitly marked eligible for this specific rule (never
+/// anywhere else — a task never lands outside a shelf's own
 /// eligible-schedule hours just because there was leftover time somewhere
-/// else in the day):
+/// else in the day, and never under a rule it wasn't opted into just
+/// because that rule had room left):
 ///   1. Shelf task, has a real duration, eligible for this rule — today's
 ///      baseline behavior.
 ///   2. Same, but no duration set — guessed (see `guessedMinutes`) rather
 ///      than left unscheduled forever.
-///   3. A task on this same shelf that was never marked eligible for this
-///      specific rule at all — only reached once every eligible task
-///      already has a slot, and only for whatever's left of this rule's
-///      own budget (a "≤2 tasks" rule still never places more than 2, this
-///      tier just relaxes *which* tasks can fill those 2).
 /// Inbox tasks (no shelf at all) are deliberately never auto-scheduled —
 /// they're surfaced for the user to sort or explicitly place instead (see
 /// ScheduleReviewView's pre-generate "Review Inbox" prompt and the
 /// timeline's long-press-to-insert picker).
-/// Within every rule, ordering (`tieredOrdering`) is eligible before
-/// not-eligible, and within each of those, a real duration before a
-/// guessed one — so a guess, or a not-explicitly-eligible task, only ever
-/// fills time nothing better-specified wanted.
+/// Within every rule, ordering (`tieredOrdering`) puts a real duration
+/// before a guessed one — so a guess only ever fills time nothing
+/// better-specified wanted.
 final class MockAISchedulingService: AISchedulingServiceProtocol {
     func generateProposedSchedule(
         shelves: [Shelf],
         habits: [Habit],
         freeSlots: [TimeSlot],
         eligibleHoursWindows: [EligibleHoursWindow],
-        date: Date
+        date: Date,
+        existingBlocks: [ScheduledBlock]
     ) async throws -> [ScheduledBlock] {
         let calendar = Calendar.current
         let weekday = calendar.component(.weekday, from: date)
@@ -126,9 +157,36 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
                 // it just sits out this day's packing entirely rather
                 // than counting as unschedulable.
                 .filter { !$0.isScheduled && !$0.isRecurring && !scheduledTaskIDs.contains($0.id) && $0.isEligibleToStart(on: date, calendar: calendar) }
-                .sorted { tieredOrdering($0, $1, rule: rule) }
+                // A task never toggled eligible for this specific rule
+                // simply isn't a candidate for it, full stop — see this
+                // method's doc comment.
+                .filter { $0.isEligible(for: rule) }
+                .sorted { tieredOrdering($0, $1) }
 
-            let (placed, leftoverInWindow) = pack(candidates: candidates, into: availableInWindow, rule: rule)
+            // Every task block already sitting inside this rule's own
+            // window — whichever call actually placed it — counts against
+            // its budget before a single new candidate is considered. Habit
+            // blocks are excluded: those aren't rule-packed at all, and a
+            // habit is explicitly allowed to double-book against a task
+            // (see `placeHabitsAndRecurringTasks`), so it was never part of
+            // this rule's own budget to begin with.
+            let alreadyInWindow = existingBlocks.filter { $0.task != nil && $0.startTime >= windowStart && $0.startTime < windowEnd }
+            // Counted by distinct task, not by block — a divisible task
+            // already split across several of its own minimum-size
+            // segments (see `TaskItem.isDivisible`/`minimumSegmentMinutes`)
+            // is still only ONE task against a per-task cap, same as
+            // `pack()` itself only bumps `taskCount` once per task no
+            // matter how many segments that task's own placement produced.
+            let startingTaskCount = Set(alreadyInWindow.compactMap { $0.task?.id }).count
+            let startingMinutesUsed = alreadyInWindow.reduce(0) { $0 + Int($1.endTime.timeIntervalSince($1.startTime) / 60) }
+
+            let (placed, leftoverInWindow) = pack(
+                candidates: candidates,
+                into: availableInWindow,
+                rule: rule,
+                startingTaskCount: startingTaskCount,
+                startingMinutesUsed: startingMinutesUsed
+            )
             for (task, start, end, isEstimated) in placed {
                 blocks.append(ScheduledBlock(date: date, startTime: start, endTime: end, task: task, isEstimatedDuration: isEstimated))
                 scheduledTaskIDs.insert(task.id)
@@ -317,12 +375,14 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
     private func pack(
         candidates: [TaskItem],
         into slots: [TimeSlot],
-        rule: SchedulingRule
+        rule: SchedulingRule,
+        startingTaskCount: Int = 0,
+        startingMinutesUsed: Int = 0
     ) -> (placed: [(task: TaskItem, start: Date, end: Date, isEstimated: Bool)], remainingSlots: [TimeSlot]) {
         var slots = slots.sorted { $0.start < $1.start }
         var results: [(TaskItem, Date, Date, Bool)] = []
-        var totalMinutesUsed = 0
-        var taskCount = 0
+        var totalMinutesUsed = startingMinutesUsed
+        var taskCount = startingTaskCount
 
         for task in candidates {
             if rule.fillStrategy == .maxTaskCount, taskCount >= rule.maxTaskCount { break }
@@ -363,6 +423,17 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             // A divisible task with no minimum segment chosen yet ("Not
             // Selected") can't be split safely — treat it as not ready.
             guard !task.isDivisible || task.minimumSegmentMinutes > 0 else { continue }
+            // A divisible task's own minimum chunk size is a hard floor —
+            // if this rule's own per-task cap (Max Task Count) or
+            // remaining budget (Max Total Duration) can't offer at least
+            // that much in one placement, the task simply doesn't fit
+            // this rule at all. Without this, the branches above would
+            // otherwise happily hand it whatever's left of the rule's own
+            // budget even when that's smaller than the one floor the user
+            // actually set — a 2-hour-minimum task getting split into
+            // 15-minute slivers because that's all a "≤15 min each" rule
+            // ever offers.
+            guard !task.isDivisible || minutesNeeded >= task.minimumSegmentMinutes else { continue }
 
             guard let placement = place(
                 minutesNeeded: minutesNeeded,
@@ -487,17 +558,10 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
 
     // MARK: - Ordering
 
-    /// A task explicitly marked eligible for `rule` always sorts before
-    /// one that wasn't — that checkbox is still a real signal of intent,
-    /// even though a not-yet-eligible task can still fill whatever's left
-    /// of the rule's own budget once every eligible one already has a
-    /// slot (see `generateProposedSchedule`'s per-rule loop).
-    private func tieredOrdering(_ lhs: TaskItem, _ rhs: TaskItem, rule: SchedulingRule) -> Bool {
-        let lhsEligible = lhs.isEligible(for: rule)
-        let rhsEligible = rhs.isEligible(for: rule)
-        if lhsEligible != rhsEligible {
-            return lhsEligible && !rhsEligible
-        }
+    /// Every candidate here has already passed the eligible-for-`rule`
+    /// filter (see `generateProposedSchedule`'s per-rule loop), so the
+    /// only tier left to break ties on is duration.
+    private func tieredOrdering(_ lhs: TaskItem, _ rhs: TaskItem) -> Bool {
         return durationTieredOrdering(lhs, rhs)
     }
 

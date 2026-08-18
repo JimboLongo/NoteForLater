@@ -216,13 +216,25 @@ struct DayTimelineGridView: View {
     /// complete occurrence (see `isCompleted`) so it can still render,
     /// checked; only missed/excused ones (resolved a different way, with
     /// no toggle-back UI here) are actually left out.
+    ///
+    /// `Habit.log(on:)` linearly scans that habit's *entire* log
+    /// history to find today's entry — this used to call it indirectly
+    /// (via `occurrenceStatus(_:on:calendar:)`) once per occurrence
+    /// index, redoing that same scan up to `timesPerDay` times over for
+    /// one habit. Looked up once per habit instead, since every index
+    /// below needs the exact same day's log — this is what actually
+    /// made checking off several habits in a row feel laggy on a habit
+    /// with a lot of history built up: every tap re-renders this (and
+    /// its two sibling calls, for the other two modes) across *every*
+    /// habit, not just the one tapped.
     private func openHabitOccurrences(mode: HabitOccurrenceTimeMode) -> [OpenHabitOccurrence] {
         let calendar = Calendar.current
         var result: [OpenHabitOccurrence] = []
         for habit in allHabits.sorted(by: { $0.sortOrder < $1.sortOrder }) where habit.isApplicable(on: targetDate, calendar: calendar) {
+            let log = habit.log(on: targetDate, calendar: calendar)
             for index in 0..<max(habit.timesPerDay, 1) {
                 guard habit.timeMode(for: index) == mode else { continue }
-                let status = habit.occurrenceStatus(index, on: targetDate, calendar: calendar)
+                let status = log?.occurrenceStatus(index) ?? .none
                 guard status == .none || status == .complete else { continue }
                 result.append(OpenHabitOccurrence(id: "\(habit.id).\(index)", habit: habit, index: index, isCompleted: status == .complete))
             }
@@ -637,6 +649,7 @@ struct DayTimelineGridView: View {
         }()
         log.setOccurrence(index, to: isCompleted ? .none : .complete)
         habitOccurrenceRefreshTick += 1
+        HabitStatsRefreshCoordinator.shared.habitLogsChanged()
     }
 }
 
@@ -1398,6 +1411,21 @@ private struct DayTimelineSegment: View {
         // to avoid lagging behind the touch.
         .animation(isDragging ? nil : .interactiveSpring(response: 0.3, dampingFraction: 0.8), value: previewOffset)
         .animation(isDragging ? nil : .interactiveSpring(response: 0.3, dampingFraction: 0.8), value: layout.count)
+        // Each gesture's own `isEnabled: !isLocked` (not a conditional
+        // `.gesture(...)` attachment) is what actually disables the
+        // underlying `UILongPressGestureRecognizer`/pan recognizer,
+        // removing it from this row's touch path entirely rather than
+        // leaving it attached-but-inert. That matters specifically for a
+        // habit row's own `completeCircle`/lock-icon taps (see their
+        // `.highPriorityGesture` comments): even with
+        // `shouldRecognizeSimultaneouslyWith` unconditionally `true`, a
+        // still-*attached* `LongPressDragGesture` was enough to make
+        // those nested taps visibly wait before registering. A
+        // permanently-locked-as-habit row never needs either of these at
+        // all (see `isLockedRow`) — "the only thing you can do with a
+        // habit on the calendar is mark it complete" — so disabling them
+        // outright is both the correct behavior and what actually made
+        // the checkmark feel instant again.
         .gesture(dragGesture(for: row, isLocked: isLocked))
         .gesture(swipeGesture(for: row))
         .onTapGesture { handleTap(on: row) }
@@ -1462,6 +1490,7 @@ private struct DayTimelineSegment: View {
             // Shorter than the empty-slot version (0.3s) — blocks cover
             // most of a busy day, so this is the far more common target.
             minimumDuration: 0.22,
+            isEnabled: !isLocked,
             onBegan: { point in
                 // Also blocked while the empty-slot candidates card is
                 // open, or this row is already mid-swipe — otherwise you
@@ -1574,17 +1603,20 @@ private struct DayTimelineSegment: View {
 
     /// Swipe-left-to-remove for a proposed block — ignored entirely for
     /// calendar events, for a locked block (locking protects it from this
-    /// the same way it protects it from being dragged or reflowed), and
-    /// for movement that isn't horizontally dominant (so it never fights a
-    /// vertical scroll; see `PanSwipeGesture`'s doc comment). Past
-    /// `swipeDeleteThreshold`, releasing removes the block from the
+    /// the same way it protects it from being dragged or reflowed — see
+    /// `isLockedRow`, which a habit block always counts as too: the only
+    /// thing you can do with one on the calendar is mark it complete),
+    /// and for movement that isn't horizontally dominant (so it never
+    /// fights a vertical scroll; see `PanSwipeGesture`'s doc comment).
+    /// Past `swipeDeleteThreshold`, releasing removes the block from the
     /// schedule via `onDeleteBlock` — the same "unschedule, leave the slot
     /// open" action already reachable from the tap menu's Delete button,
     /// just reachable directly by swiping now.
     private func swipeGesture(for row: DayTimelineRow) -> PanSwipeGesture {
         PanSwipeGesture(
+            isEnabled: !isLockedRow(row),
             onChanged: { translation in
-                guard case .proposed(let block) = row, !block.isLocked, draggingRowID == nil, emptySlotTime == nil else { return }
+                guard case .proposed = row, !isLockedRow(row), draggingRowID == nil, emptySlotTime == nil else { return }
                 guard abs(translation.x) > abs(translation.y), translation.x < 0 else {
                     if swipingRowID == row.id {
                         swipingRowID = nil
@@ -1781,12 +1813,19 @@ private struct DayTimelineSegment: View {
         return columnAssignments[row.id] ?? (column: 0, count: 1)
     }
 
+    /// A habit-linked block counts as locked here regardless of its own
+    /// `isLocked` flag — the only thing you can do with a habit on the
+    /// calendar is mark it complete (see `completeCircle`/`handleTap`),
+    /// so it should never be draggable itself, nor rippled out of the
+    /// way by some *other* block's drag landing on its slot (this same
+    /// flag is what both `dragGesture`'s onBegan guard and
+    /// `clampedStart`/`conflictingRow`'s ripple logic key off of).
     private func isLockedRow(_ row: DayTimelineRow) -> Bool {
         switch row {
         case .event(let event):
             return lockedStore.isLocked(event.id)
         case .proposed(let block):
-            return block.isLocked
+            return block.isLocked || block.habit != nil
         }
     }
 
@@ -1885,23 +1924,35 @@ private struct DayTimelineSegment: View {
                     // directly (no separate confirm step needed here, one
                     // task at a time rather than a batch).
                     completeCircle(for: block)
-                    // Always visible (unlike the calendar-event lock icon
-                    // above, which only shows once locked) so there's
-                    // always something to tap — locking a task protects it
-                    // from being pushed around by another block's drag
-                    // (`isLockedRow`/`unlockedOrder`) and from being
-                    // cleared by "Regenerate Schedule"
-                    // (`regenerateFromNow`). Green (same as the complete
-                    // checkmark) once locked, so the two states read the
-                    // same way at a glance.
-                    Image(systemName: block.isLocked ? "lock.fill" : "lock.open")
-                        .font(.caption2)
-                        .foregroundStyle(block.isLocked ? Color.green : Color.secondary.opacity(0.7))
-                        .padding(5)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            block.isLocked.toggle()
-                        }
+                    // Always visible for a task block (unlike the
+                    // calendar-event lock icon above, which only shows
+                    // once locked) so there's always something to tap —
+                    // locking a task protects it from being pushed around
+                    // by another block's drag (`isLockedRow`/
+                    // `unlockedOrder`) and from being cleared by
+                    // "Regenerate Schedule" (`regenerateFromNow`). Green
+                    // (same as the complete checkmark) once locked, so the
+                    // two states read the same way at a glance. Omitted
+                    // entirely for a habit block — that's already always
+                    // treated as locked (see `isLockedRow`), so a toggle
+                    // here would just be a dead control that can't
+                    // actually be turned off: the only thing you can do
+                    // with a habit on the calendar is mark it complete.
+                    if block.task != nil {
+                        Image(systemName: block.isLocked ? "lock.fill" : "lock.open")
+                            .font(.caption2)
+                            .foregroundStyle(block.isLocked ? Color.green : Color.secondary.opacity(0.7))
+                            .padding(5)
+                            .contentShape(Rectangle())
+                            // `.highPriorityGesture`, not `.onTapGesture` —
+                            // see `completeCircle`'s matching comment just
+                            // below.
+                            .highPriorityGesture(
+                                TapGesture().onEnded {
+                                    block.isLocked.toggle()
+                                }
+                            )
+                    }
                 }
                 .padding(2)
             }
@@ -1926,13 +1977,28 @@ private struct DayTimelineSegment: View {
         .frame(width: 15, height: 15)
         .padding(5)
         .contentShape(Rectangle())
-        .onTapGesture {
-            // Routed through the view model rather than toggling
-            // `isCompleted` directly — a habit-backed block needs its
-            // Habit Tracker log kept in sync too (see
-            // `ScheduleReviewViewModel.toggleComplete`).
-            viewModel.toggleComplete(block)
-        }
+        // `rowView` attaches `dragGesture(for:isLocked:)` — a real
+        // `minimumDuration: 0.22` `LongPressDragGesture` — to the whole
+        // row this circle sits inside. A plain `.onTapGesture` here loses
+        // to that ancestor `.gesture(...)` by SwiftUI's default priority
+        // rules, so the tap has to wait for the long-press to actually
+        // fail (up to the full 0.22s) before it's even allowed to
+        // register — `.highPriorityGesture` is what makes this circle's
+        // own tap win immediately instead, which is what actually fixed
+        // the felt delay tapping a habit complete on the calendar. A
+        // genuine long-press-and-drag still works exactly as before: it
+        // never satisfies a `TapGesture`'s own release-within-a-beat
+        // criteria in the first place, so there's nothing for this to
+        // preempt.
+        .highPriorityGesture(
+            TapGesture().onEnded {
+                // Routed through the view model rather than toggling
+                // `isCompleted` directly — a habit-backed block needs its
+                // Habit Tracker log kept in sync too (see
+                // `ScheduleReviewViewModel.toggleComplete`).
+                viewModel.toggleComplete(block)
+            }
+        )
     }
 
     private func minutesSinceMidnight(_ date: Date) -> Int {

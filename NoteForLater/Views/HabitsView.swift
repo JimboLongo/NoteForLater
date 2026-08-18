@@ -80,11 +80,14 @@ struct HabitsView: View {
 /// menu for the day-level Excused/Missed overrides. Ordered like a queue of
 /// what's coming up next: each habit's nearest still-unresolved reminder,
 /// today first (skipping reminders already resolved for the day) then
-/// rolling forward to its next applicable day. That order is debounced —
-/// it only re-shuffles after 5 seconds with no further taps, so the list
-/// doesn't jump around mid-interaction — while the circles themselves still
-/// update immediately. Dragging to manually reorder wouldn't survive an
-/// algorithmic order, so it's not offered here.
+/// rolling forward to its next applicable day. That order (`displayedHabits`)
+/// is debounced via `HabitStatsRefreshCoordinator` — it only re-shuffles 3
+/// seconds after the last habit-log edit anywhere in the app (this screen,
+/// the Calendar tab, or a habit's own detail calendar), so the list doesn't
+/// jump around mid-interaction — while the circles themselves still update
+/// immediately, straight off the live `todayLogs` query. Dragging to
+/// manually reorder wouldn't survive an algorithmic order, so it's not
+/// offered here.
 struct HabitsTodayView: View {
     let habits: [Habit]
     @Environment(\.modelContext) private var modelContext
@@ -101,11 +104,22 @@ struct HabitsTodayView: View {
     @Query private var todayLogs: [HabitLog]
 
     /// Each habit's streak/max-streak, cached instead of recomputed (a full
-    /// history walk) on every render — refreshed on appear.
+    /// history walk) on every render — refreshed on appear, and again by
+    /// `refreshCoordinator`'s idle tick (see `displayedHabits`).
     @State private var cachedStats: [UUID: HabitStats] = [:]
-    /// Same refresh-on-appear caching as `cachedStats`, for the Rolling 30
-    /// figure shown alongside streak on each habit's title card.
+    /// Same caching as `cachedStats`, for the Rolling 30 figure shown
+    /// alongside streak on each habit's title card.
     @State private var cachedRolling: [UUID: HabitRollingStats] = [:]
+    /// What's actually rendered — a frozen snapshot of `liveSortedHabits`,
+    /// only re-taken on appear or once `refreshCoordinator.idleRefreshTick`
+    /// bumps (3 seconds after the last habit-log edit anywhere in the
+    /// app), so checking a circle off doesn't immediately jump that row
+    /// somewhere else in the list mid-tap. The circles themselves still
+    /// read live status straight off `todayLogsByHabit`, independent of
+    /// this — only the row *order* (and `cachedStats`/`cachedRolling`,
+    /// above) waits for the debounce.
+    @State private var displayedHabits: [Habit] = []
+    @State private var refreshCoordinator = HabitStatsRefreshCoordinator.shared
 
     init(habits: [Habit]) {
         self.habits = habits
@@ -135,7 +149,7 @@ struct HabitsTodayView: View {
                 Text("No habits yet. Tap + to add one.")
                     .foregroundStyle(.secondary)
             }
-            ForEach(liveSortedHabits) { habit in
+            ForEach(displayedHabits) { habit in
                 HStack {
                     NavigationLink {
                         HabitDetailView(habit: habit)
@@ -166,6 +180,19 @@ struct HabitsTodayView: View {
         }
         .onAppear {
             refreshStats()
+            displayedHabits = liveSortedHabits
+        }
+        // A habit added/deleted/reordered elsewhere should reflect right
+        // away — the idle debounce below is specifically about not
+        // letting a same-day *completion* toggle jump the list around
+        // mid-tap, not about hiding a structural change like this.
+        .onChange(of: habits) { _, _ in
+            refreshStats()
+            displayedHabits = liveSortedHabits
+        }
+        .onChange(of: refreshCoordinator.idleRefreshTick) { _, _ in
+            refreshStats()
+            displayedHabits = liveSortedHabits
         }
     }
 
@@ -279,6 +306,7 @@ struct HabitsTodayView: View {
         }) {
             block.isCompleted = isNowComplete
         }
+        refreshCoordinator.habitLogsChanged()
     }
 
     private func fillColor(for status: OccurrenceStatus) -> Color {
@@ -314,7 +342,7 @@ struct HabitsTodayView: View {
     }
 
     private func deleteHabits(at offsets: IndexSet) {
-        let ordered = liveSortedHabits
+        let ordered = displayedHabits
         for index in offsets {
             let habit = ordered[index]
             modelContext.delete(habit)
