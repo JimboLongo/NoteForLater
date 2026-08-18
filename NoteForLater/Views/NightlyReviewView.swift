@@ -58,12 +58,19 @@ struct NightlyReviewView: View {
     /// `ScheduleReviewView`).
     @State private var pickerTarget: ScheduledBlock?
     @State private var lockedStore = LockedEventsStore.shared
+    /// Session-local only, never persisted — see §7.1's requirement that
+    /// "acknowledge" not be durable state (a persisted ack is one more
+    /// flag that can go stale). Resolved the same way extending/clearing
+    /// the due date does: the task drops off `atRiskTasks`, just without
+    /// touching the task itself.
+    @State private var acknowledgedAtRiskTaskIDs: Set<UUID> = []
+    @State private var atRiskTaskCardTarget: TaskItem?
 
     private let calendarService: CalendarServiceProtocol = GoogleCalendarService()
     private let schedulingService: AISchedulingServiceProtocol = MockAISchedulingService()
 
     private enum Step: Int, CaseIterable {
-        case chooseDay, today, inbox, twoMinuteTasks, tomorrow
+        case chooseDay, today, inbox, twoMinuteTasks, tomorrow, atRisk
 
         /// `planDate` is only meaningful for `.tomorrow` — the day right
         /// after whichever day was picked in Choose Day, not
@@ -79,6 +86,7 @@ struct NightlyReviewView: View {
                 let formatter = DateFormatter()
                 formatter.dateFormat = "EEE MMMM d, yyyy"
                 return "Plan for \(formatter.string(from: planDate))"
+            case .atRisk: return "At Risk"
             }
         }
     }
@@ -105,6 +113,7 @@ struct NightlyReviewView: View {
                 case .inbox: inboxStep
                 case .twoMinuteTasks: twoMinuteTasksStep
                 case .tomorrow: tomorrowStep
+                case .atRisk: atRiskStep
                 }
             }
             .navigationTitle(step == .tomorrow ? "" : step.title(planDate: planDate))
@@ -154,6 +163,9 @@ struct NightlyReviewView: View {
                     )
                 }
             }
+            .sheet(item: $atRiskTaskCardTarget) { task in
+                TaskCardSheet(task: task, shelves: routableInboxShelves)
+            }
         }
     }
 
@@ -164,7 +176,7 @@ struct NightlyReviewView: View {
                 Button("Back", action: back)
             }
             Spacer()
-            if step == .tomorrow {
+            if step == .atRisk {
                 Button("Done") { dismiss() }
                     .buttonStyle(.borderedProminent)
             } else {
@@ -182,9 +194,18 @@ struct NightlyReviewView: View {
     }
 
     private func advance() {
-        let next = Step(rawValue: step.rawValue + 1) ?? .tomorrow
+        let next = Step(rawValue: step.rawValue + 1) ?? .atRisk
         if step == .chooseDay {
             setupViewModels()
+        }
+        // §7.1: skipped entirely when empty, rather than shown with
+        // nothing in it and a "tap Next to continue" — the only step in
+        // this flow that behaves this way, since unlike Inbox/2-Minute-
+        // Tasks there's nothing actionable to confirm when nothing's at
+        // risk.
+        if next == .atRisk, atRiskTasks.isEmpty {
+            dismiss()
+            return
         }
         step = next
         if next == .inbox {
@@ -194,18 +215,39 @@ struct NightlyReviewView: View {
             let pending = (twoMinuteShelf?.tasks ?? []).filter { !$0.isCompleted && $0.isEligibleToStart(on: reviewDate) }
             twoMinuteReviewTaskIDs = Set(pending.map(\.id))
         }
-        if next == .tomorrow, let todayViewModel, let tomorrowViewModel {
+        if next == .inbox, let todayViewModel, let tomorrowViewModel {
+            // §7.2: this whole batch runs "on Next from the Today step,"
+            // i.e. right here on the today→inbox transition, not deferred
+            // all the way to the tomorrow handoff below. Freeze exactly
+            // what `reviewItems` represented at this exact synchronous
+            // moment before anything else (Inbox routing, in particular)
+            // can touch it — see `TaskItem.isNightlyReviewed`'s own doc
+            // comment for why a live re-derive isn't safe across the
+            // async gap below.
+            let reviewedBlocks = reviewableBlocks
+            let frozenCutoff = reviewCutoff
+            let frozenAllBlocks = allBlocks
+            for block in reviewedBlocks {
+                block.task?.isNightlyReviewed = true
+            }
+            // Captured now, before `purgeCompletedBlocks` clears each
+            // purged block's own `task` reference to nil below — a
+            // recurring task survives its block being purged (only a
+            // non-recurring one is deleted outright), so it's the one
+            // case that needs its stamp explicitly reset afterward.
+            let recurringCompletedTasks = reviewedBlocks.filter(\.isCompleted).compactMap(\.task).filter(\.isRecurring)
+            let incompleteTasks = reviewedBlocks.filter { !$0.isCompleted }.compactMap(\.task)
+
             // Any habit occurrence the Today review showed but never got
             // checked off — timed or not — is done being reviewable the
-            // moment the day is handed off to tomorrow's plan, so it's
-            // marked missed right here, synchronously, before any of the
-            // async cleanup below. Deliberately not folded into
-            // `clearIncompletePastBlocks` itself (used here too, just
-            // below) — that function is also what the plain intra-day
-            // Regenerate flow calls, where a passed-but-undone habit
-            // should still get a fresh shot later *today*, not be
-            // written off; only Nightly Review's own end-of-day handoff
-            // means "no more chances left."
+            // moment Today is left behind, so it's marked missed right
+            // here, synchronously, before any of the async cleanup below.
+            // Deliberately not folded into `clearIncompletePastBlocks`
+            // itself (used here too, just below) — that function is also
+            // what the plain intra-day Regenerate flow calls, where a
+            // passed-but-undone habit should still get a fresh shot later
+            // *today*, not be written off; only Nightly Review's own
+            // end-of-day handoff means "no more chances left."
             markUnresolvedHabitOccurrencesAsMissed()
             // Closes `reviewDate` out for `ScheduleReviewViewModel
             // .autoPlaceEligibleTasks`'s own live auto-place walk — once
@@ -217,48 +259,54 @@ struct NightlyReviewView: View {
             // not an incidental side effect of the async cleanup.
             NightlyReviewCompletionState.shared.markReviewed(day: reviewDate)
             Task {
-                // Whatever's still unchecked from the Today step is freed
-                // up here — unscheduled from its stale block so it's a
-                // candidate again — before the plan below gets generated,
-                // so an unfinished task actually gets reconsidered for
-                // tomorrow instead of just sitting stuck on a past block
-                // nothing ever revisits. Scoped to `reviewCutoff`, not
-                // real-now, so this still works when `reviewDate` isn't
-                // today.
-                await todayViewModel.clearIncompletePastBlocks(allBlocks: allBlocks, cutoff: reviewCutoff)
-                // Anything still marked complete — task or habit — gets
-                // swept from the calendar entirely right here, same as a
-                // completed task: this is the one place that actually
-                // happens (see `purgeCompletedBlocks`); a plain regenerate
-                // leaves a completed block faded in place instead.
+                // Complete → swept from the calendar entirely, same as
+                // every other completed block; this is the one place that
+                // actually happens (see `purgeCompletedBlocks`) — a plain
+                // regenerate leaves a completed block faded in place
+                // instead.
                 await tomorrowViewModel.purgeCompletedBlocks()
-                // Always re-run, not just when `blocks` is still empty —
-                // the Inbox step just above this can route tasks onto a
-                // shelf moments before this runs, and those need to be
-                // considered as real candidates for tomorrow's plan too.
-                // `regenerateFromNow`, not `regenerateSingleDay` — today's
-                // (and any prior day's) unfinished tasks were just freed
-                // up above, and they need an actual following day to land
-                // on, not just a chance at tomorrow specifically: if
-                // tomorrow's own rule windows are already full, whatever
-                // doesn't fit has to trickle further out, bumping
-                // non-approved/non-locked blocks already sitting on later
-                // days to make room the same way `regenerateFromNow`
-                // always has, walking forward until everything schedulable
-                // has a real slot. A locked block, on any day, is never
-                // touched by any of this.
+                for task in recurringCompletedTasks {
+                    task.isNightlyReviewed = false
+                }
+                // Incomplete → unscheduled from its stale block so it's a
+                // real candidate again, restoring `remainingMinutes`, then
+                // un-stamped so it re-enters tomorrow's plan as an
+                // ordinary task rather than staying marked as still
+                // "mid-review." Uses the frozen cutoff/blocks captured
+                // above, not a live re-read, for the same reason the
+                // stamping itself happened synchronously before this Task
+                // even started.
+                await todayViewModel.clearIncompletePastBlocks(allBlocks: frozenAllBlocks, cutoff: frozenCutoff)
+                for task in incompleteTasks {
+                    task.isNightlyReviewed = false
+                }
+                // Unconditional — today's (and any prior day's) unfinished
+                // tasks were just freed up above, and they need an actual
+                // following day to land on. `regenerateFromNow`, not
+                // `regenerateSingleDay` (doesn't exist — see §6.3),
+                // walking forward until everything schedulable has a real
+                // slot. A locked block, on any day, is never touched by
+                // any of this.
                 let completedFully = await tomorrowViewModel.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
-                // This walk just did everything a dirty-triggered one
-                // would (see `ScheduleDirtyState`) — clearing here is
-                // pure hygiene, so the next time the Calendar tab syncs
-                // it goes back to the light additive top-up instead of
-                // needlessly re-running a second full regenerate for a
-                // flag this pass already made moot. Only when the walk
-                // actually finished, though — same reasoning as
-                // `ScheduleReviewView.syncSchedule`: a fetchFreeSlots
-                // failure mid-walk must not silently drop the flag.
                 if completedFully {
                     ScheduleDirtyState.shared.isDirty = false
+                }
+            }
+        }
+        if next == .tomorrow, let tomorrowViewModel {
+            // The Inbox step just left can route tasks onto a shelf via
+            // `TaskReviewCard.advance()`, which already sets
+            // `ScheduleDirtyState.shared.isDirty` (see §6.1) — so this
+            // only re-runs the full walk when Inbox routing (or anything
+            // else) actually happened. A session with no Inbox routing
+            // skips this second walk entirely; the one above already
+            // covers everything that mattered.
+            if ScheduleDirtyState.shared.isDirty {
+                Task {
+                    let completedFully = await tomorrowViewModel.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+                    if completedFully {
+                        ScheduleDirtyState.shared.isDirty = false
+                    }
                 }
             }
         }
@@ -549,7 +597,16 @@ struct NightlyReviewView: View {
         HStack(spacing: 12) {
             twoMinuteSelectionCircle(isSelected: task.isCompleted)
                 .contentShape(Rectangle())
-                .onTapGesture { task.setCompleted(!task.isCompleted, in: modelContext) }
+                .onTapGesture {
+                    task.setCompleted(!task.isCompleted, in: modelContext)
+                    // A completed 2-minute task shouldn't claim a slot in
+                    // tomorrow's schedule (see this step's own footer
+                    // text) — a gap in the established per-call-site
+                    // pattern (every other `setCompleted`/`markComplete`
+                    // call site in the app already sets this; this one
+                    // didn't).
+                    ScheduleDirtyState.shared.isDirty = true
+                }
             Text(task.title)
                 .strikethrough(task.isCompleted)
             Spacer()
@@ -623,6 +680,83 @@ struct NightlyReviewView: View {
         } else {
             ProgressView()
         }
+    }
+
+    // MARK: - Step 5: At Risk
+
+    /// Live, not snapshotted — unlike `twoMinuteReviewTaskIDs`, a task
+    /// resolving (extended/cleared due date, or acknowledged) is supposed
+    /// to drop off this list immediately, not linger for the rest of the
+    /// step. `isAtRisk()` itself already excludes anything without a
+    /// real picked due date (§5.3/§4 correction) and anything whose slack
+    /// is still non-negative.
+    private var atRiskTasks: [TaskItem] {
+        allTasks.filter { $0.isAtRisk() && !acknowledgedAtRiskTaskIDs.contains($0.id) }
+    }
+
+    @ViewBuilder
+    private var atRiskStep: some View {
+        if atRiskTasks.isEmpty {
+            ContentUnavailableView {
+                Label("Nothing At Risk", systemImage: "checkmark.shield")
+            } description: {
+                Text("Every task with a due date has a real path to get there.")
+            }
+        } else {
+            List {
+                Section {
+                    ForEach(atRiskTasks) { task in
+                        atRiskTaskRow(task)
+                    }
+                } footer: {
+                    Text("These won't make their due date at the current pace. Extend it, clear it, or open the task to see what's actually blocking it.")
+                }
+            }
+        }
+    }
+
+    private func atRiskTaskRow(_ task: TaskItem) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(task.title)
+                .font(.body.weight(.medium))
+            if let blocker = task.atRiskBlocker() {
+                Label(blocker, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            HStack(spacing: 8) {
+                Button("Open") { atRiskTaskCardTarget = task }
+                Button("Extend +1 Day") { extendDueDate(task) }
+                Button("Clear Due Date") { clearDueDate(task) }
+                Button("Acknowledge") { acknowledgedAtRiskTaskIDs.insert(task.id) }
+                    .tint(.secondary)
+            }
+            .buttonStyle(.bordered)
+            .font(.caption)
+        }
+        .padding(.vertical, 4)
+    }
+
+    /// Pushes the deadline forward from wherever it currently sits, not
+    /// from `.now` — repeated taps keep moving it further out rather than
+    /// snapping back to "one day from today" each time. A schedule-
+    /// affecting edit per §6.1, so it has to set the dirty flag itself
+    /// (see the same pattern at every other Model-mutating View call site
+    /// in this file).
+    private func extendDueDate(_ task: TaskItem) {
+        let calendar = Calendar.current
+        task.dueDate = calendar.date(byAdding: .day, value: 1, to: task.dueDate ?? .now)
+        ScheduleDirtyState.shared.isDirty = true
+    }
+
+    /// Mirrors `dueDateAnswer`'s own "Has due date → No" case exactly
+    /// (see `TaskReviewCard`) — the canonical way this app already clears
+    /// a due date, just reached from a different screen.
+    private func clearDueDate(_ task: TaskItem) {
+        task.dueDateDecided = true
+        task.dueDate = nil
+        task.dueDatePicked = false
+        ScheduleDirtyState.shared.isDirty = true
     }
 
     private func setupViewModels() {

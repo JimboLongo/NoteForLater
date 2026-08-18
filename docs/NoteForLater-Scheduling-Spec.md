@@ -42,7 +42,7 @@ var remainingMinutes: Int = 0
 
 **Migration:** `remainingMinutes = estimatedMinutes` for all existing tasks.
 
-### 1.2 `TaskItem.isNightlyReviewed` (new)
+### 1.2 `TaskItem.isNightlyReviewed` (new) — ✅ done, Phase 6
 
 ```swift
 /// True only between "Next" on the Nightly Review Today step and the push
@@ -323,26 +323,32 @@ Habits are untouched by any of this — `habitPopulationDays` stays a flat 30-da
 
 ---
 
-## 7. Nightly Review
+## 7. Nightly Review — ✅ done, Phase 6
 
-Steps unchanged: `chooseDay → today → inbox → twoMinuteTasks → tomorrow`, plus §7.1.
+Steps: `chooseDay → today → inbox → twoMinuteTasks → tomorrow → atRisk` (§7.1 inserted at the end).
 
-### 7.1 New step: At Risk
+### 7.1 New step: At Risk — ✅ done
 
-Insert **after `tomorrow`**. Lists tasks meeting §5.3 with their blocker. Actions per task: open task card, extend due date, clear due date, or acknowledge. Skipped entirely when empty.
+Inserted **after `tomorrow`**, last in the flow (`tomorrow`'s Next becomes `atRisk`'s own Next/Done boundary). Lists tasks where `isAtRisk()` is true, via `atRiskBlocker()` for the label. Actions per task: open task card (`TaskCardSheet`), extend due date (+1 day from wherever it currently sits, not from `.now`), clear due date (mirrors `TaskReviewCard`'s own "Has due date → No" case exactly: `dueDateDecided = true; dueDate = nil; dueDatePicked = false`), or acknowledge. Extend/clear both set `ScheduleDirtyState.shared.isDirty = true` — a schedule-affecting edit like any other in §6.1.
 
-### 7.2 Review batch stamping
+The list itself is live (`allTasks.filter { $0.isAtRisk() && !acknowledged.contains($0.id) }`), not snapshotted the way `twoMinuteReviewTaskIDs` is — a task resolving (extended, cleared, or acknowledged) drops off immediately rather than lingering for the rest of the step. "Acknowledge" is a session-local `Set<UUID>` (`@State`, not persisted) — deliberately not another durable flag that can go stale; it just quiets the list for the remainder of this one review session.
 
-On **Next** from the Today step, in this order:
+**Skipped entirely when empty**: `advance()`'s own `next == .atRisk && atRiskTasks.isEmpty` check dismisses the review directly instead of transitioning into the step at all.
 
-1. Set `isNightlyReviewed = true` on every task represented in `reviewItems` at the moment of the tap. This freezes the batch.
-2. `markUnresolvedHabitOccurrencesAsMissed()` — existing, unchanged.
-3. For each stamped task:
-   - **Complete** → delete task and blocks (`purgeCompletedBlocks`, existing). Recurring tasks keep the `TaskItem`, delete only the occurrence's block.
-   - **Incomplete** → `clearIncompletePastBlocks` (deletes block, `isScheduled = false`, `pushedCount += 1`, **restores `remainingMinutes`** per §1.1), then set `isNightlyReviewed = false` so it re-enters tomorrow's review.
-4. `regenerateSingleDay` for the target day, then `regenerateFromNow` so pushed work can reach later days.
+### 7.2 Review batch stamping — ✅ done
 
-Steps 1–3 operate on the frozen batch, not on a recomputed `reviewCutoff`.
+On **Next** from the Today step (the `today → inbox` transition — not deferred to the `tomorrow` handoff), in this order:
+
+1. Set `isNightlyReviewed = true` on every task represented in `reviewableBlocks` at the moment of the tap. This freezes the batch.
+2. `markUnresolvedHabitOccurrencesAsMissed()` — existing, unchanged, just moved earlier alongside the stamp.
+3. Async:
+   - **Complete** → `purgeCompletedBlocks` (existing, unscoped — safe to run against every completed block system-wide, not just this batch). Recurring tasks keep the `TaskItem`; only their occurrence's block is deleted. A recurring survivor's stamp is reset to `false` explicitly (captured *before* the purge, since purge clears each block's own `task` reference on the way out).
+   - **Incomplete** → `clearIncompletePastBlocks` against the frozen `allBlocks`/`reviewCutoff` captured at tap time (not a live re-read), then `isNightlyReviewed = false` so it re-enters tomorrow's plan as an ordinary candidate.
+4. `regenerateFromNow` (not `regenerateSingleDay` — doesn't exist, see §6.3), unconditionally, so the just-freed incomplete work can actually reach a real day.
+
+**A second, gated regenerate at the `tomorrow` handoff**: the Inbox step (and Two-Minute-Tasks' own completion toggle) can still change things after step 4 above already ran — Inbox routing goes through `TaskReviewCard.advance()`, which already sets `ScheduleDirtyState.shared.isDirty` (§6.1). So the `tomorrow` transition re-runs `regenerateFromNow` **only if `ScheduleDirtyState.shared.isDirty`** — a session with no Inbox routing (or 2-minute-task completion) skips this second walk entirely, since step 4 already covered everything that mattered. Both regenerate calls only clear the flag when the walk actually completed (§ Open Decisions' `fetchFreeSlots`-failure fix applies here too).
+
+Step 1–3's async work operates on locals captured synchronously before the `Task {}` starts, not on live-recomputed `reviewableBlocks`/`reviewCutoff` — see `TaskItem.isNightlyReviewed`'s own doc comment for why.
 
 ### 7.3 Locked past blocks lose protection — ✅ done
 

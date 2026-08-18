@@ -70,6 +70,17 @@ final class TaskItem {
     var priorityRaw: String = Priority.unset.rawValue
     var isScheduled: Bool = false
     var isCompleted: Bool = false
+    /// True only between "Next" on the Nightly Review Today step and the
+    /// push that follows — see `NightlyReviewView.advance()`'s
+    /// today→inbox transition. Not durable state on a surviving task:
+    /// every stamped task is reset to `false` by the end of that same
+    /// batch, whether it was completed (deleted outright, if
+    /// non-recurring) or freed back up as an ordinary incomplete
+    /// candidate. Exists to freeze which tasks belonged to a given
+    /// review's batch before an async gap, rather than re-deriving that
+    /// set live off `reviewCutoff` (which drifts as `.now` moves,
+    /// notably across midnight).
+    var isNightlyReviewed: Bool = false
     /// How many times a scheduled block for this task has been deleted off
     /// the calendar (swipe-to-delete, the Delete action, or "Assume Not
     /// Completed" sweeping it up) — a running count of how often this task
