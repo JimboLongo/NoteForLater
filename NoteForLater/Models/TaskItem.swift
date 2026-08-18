@@ -325,6 +325,96 @@ final class TaskItem {
         isEligible(for: rule) && rule.canEverFit(estimatedMinutes: estimatedMinutes, isDivisible: isDivisible, minimumSegmentMinutes: minimumSegmentMinutes)
     }
 
+    /// Minutes of headroom before `dueDate` becomes mathematically
+    /// impossible to hit — negative once there's no longer enough
+    /// calendar time left for whatever's still unplaced (`remainingMinutes`),
+    /// regardless of whether any specific rule window actually has room.
+    /// `nil` when there's no due date at all (nothing to measure against).
+    /// `date` is the day being evaluated from — during a multi-day walk
+    /// (`AISchedulingService.taskOrdering`) that's the day currently
+    /// being packed, not necessarily `.now`, so ordering on an out day
+    /// reflects how much room is left as of *that* day, not today's.
+    func slack(asOf date: Date = .now) -> Int? {
+        guard let dueDate else { return nil }
+        let minutesUntilDue = Int(dueDate.timeIntervalSince(date) / 60)
+        return minutesUntilDue - remainingMinutes
+    }
+
+    /// A task is at risk in one of two distinct ways, both surfaced the
+    /// same way on the task card:
+    /// - Still has unplaced work (`remainingMinutes > 0`) and no longer
+    ///   enough raw calendar time left to place it before `dueDate`
+    ///   (`slack(asOf:) < 0`) — the forward-looking case, purely
+    ///   mathematical, no simulation of actual rule-window contention.
+    /// - Already has an active (not completed) block that ends *after*
+    ///   `dueDate` — the packer placed it, just too late. This is a
+    ///   fact already sitting in `scheduledBlocks`, not something slack
+    ///   alone can see: a fully-placed task (`remainingMinutes == 0`)
+    ///   always reads as healthy under slack math, even when what it
+    ///   was placed *into* blows straight past the deadline. This is
+    ///   the more common real-world case — the packer did its job, the
+    ///   result just doesn't satisfy the deadline — so it can't be left
+    ///   out.
+    /// Neither branch accounts for actual future rule-window contention
+    /// (a task that's mathematically fine today but will lose a
+    /// bidding war for capacity next week) — that's a real gap, deferred
+    /// to Nightly Review's own post-regeneration audit (§7.1) rather
+    /// than simulated here.
+    func isAtRisk(asOf date: Date = .now) -> Bool {
+        if remainingMinutes > 0, let slack = slack(asOf: date), slack < 0 {
+            return true
+        }
+        guard let dueDate else { return false }
+        return (scheduledBlocks ?? []).contains { !$0.isCompleted && $0.endTime > dueDate }
+    }
+
+    /// Names the actual reason `isAtRisk` is true, for the task card's
+    /// own badge — checked in order: already scheduled past the
+    /// deadline first (the concrete, already-happened case), then past
+    /// due with nothing scheduled at all, then whichever `fitStatus`
+    /// explains why none of this shelf's enabled rules can currently
+    /// take it. Reads `fitStatus` rather than `includedSchedulingRuleIDs
+    /// .isEmpty` deliberately — a task with schedules toggled on that
+    /// all evaluate to `.exceedsConstraint` (or `.needsDuration`/
+    /// `.needsMinimumSegment`) has real rules selected; reporting "no
+    /// eligible schedule" for that case would name the wrong blocker.
+    /// `nil` when the task isn't at risk at all. Takes `asOf` (default
+    /// `.now`, matching `slack`/`isAtRisk`) rather than hardcoding real
+    /// wall-clock time internally — both so the "past due" check below
+    /// stays consistent with whatever moment `isAtRisk` itself was
+    /// evaluated against, and so this is actually testable against a
+    /// fixed date rather than only ever reflecting whenever the test
+    /// happens to run.
+    func atRiskBlocker(asOf date: Date = .now) -> String? {
+        guard isAtRisk(asOf: date) else { return nil }
+        if let dueDate, (scheduledBlocks ?? []).contains(where: { !$0.isCompleted && $0.endTime > dueDate }) {
+            return "Scheduled past its due date"
+        }
+        if let dueDate, dueDate < date {
+            return "Past due"
+        }
+        // Two separate axes: whether this task has actually toggled
+        // itself eligible for a given rule at all (`isEligible`, the
+        // stored user choice), and whether that rule could ever take it
+        // (`fitStatus`, independent of the toggle). Conflating them was
+        // the exact bug being corrected here — a task with real rules
+        // toggled on that all fail their own fit check needs the fit
+        // reason named, not "no eligible schedule."
+        let toggledRules = (shelf?.schedulingRules ?? []).filter { $0.isEnabled && isEligible(for: $0) }
+        guard !toggledRules.isEmpty else { return "No eligible schedule" }
+        let statuses = toggledRules.map { fitStatus(for: $0) }
+        // `.fits` present among the toggled rules means this task IS
+        // effectively eligible for at least one of them — nothing about
+        // its own attributes is blocking it, so whatever kept it
+        // unplaced is real window/capacity contention, not a
+        // configuration problem.
+        if statuses.contains(.fits) { return "Insufficient capacity" }
+        if statuses.contains(.exceedsConstraint) { return "Exceeds every eligible schedule's time constraint" }
+        if statuses.contains(.needsMinimumSegment) { return "Set a minimum segment first" }
+        if statuses.contains(.needsDuration) { return "Set a duration first" }
+        return "No eligible schedule"
+    }
+
     /// Marks this task complete with the exact same effects as checking
     /// it off on the calendar (see `ScheduleReviewViewModel.toggleComplete`)
     /// — every active scheduled block behind it is marked complete too,

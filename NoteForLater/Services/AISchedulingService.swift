@@ -161,7 +161,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
                 // candidate for it, full stop — see this method's doc
                 // comment.
                 .filter { $0.isEffectivelyEligible(for: rule) }
-                .sorted { taskOrdering($0, $1) }
+                .sorted { taskOrdering($0, $1, asOf: date) }
 
             // Every task block already sitting inside this rule's own
             // window — whichever call actually placed it — counts against
@@ -554,22 +554,42 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
 
     // MARK: - Ordering
 
-    /// Nearing due date first, then priority (high before low), then
-    /// whichever task has been sitting on the shelf longest (oldest
-    /// `createdAt` first) — the three real ranking criteria. Whatever
-    /// survives all three still tied (most often several tasks added in
-    /// the same batch import, sharing an identical `createdAt`) falls
-    /// through to a fourth, "minimize how many tasks it takes to fill the
-    /// available time" tiebreak: larger before smaller, and a task that
-    /// fills a slot in one whole piece before a divisible one that would
-    /// have to be chopped up to do the same — so, all else equal, one
-    /// 2-hour task is preferred over four 30-minute divisible ones for
-    /// filling a 2-hour window, rather than fragmenting it four ways.
-    private func taskOrdering(_ lhs: TaskItem, _ rhs: TaskItem) -> Bool {
-        let lhsDue = lhs.dueDate ?? .distantFuture
-        let rhsDue = rhs.dueDate ?? .distantFuture
-        if lhsDue != rhsDue {
-            return lhsDue < rhsDue
+    /// Tightest deadline first — not raw `dueDate`, but `slack(asOf:)`
+    /// (§5.2 of the scheduling spec): minutes of headroom before a
+    /// task's deadline becomes mathematically impossible to hit, which
+    /// already accounts for how much of the task is actually left
+    /// (`remainingMinutes`), not just which calendar date it's due on. A
+    /// task with no due date at all sorts last, behind every task that
+    /// has one — a real deadline, however loose, always outranks having
+    /// none. `asOf date` is the day currently being packed, not
+    /// necessarily `.now` — a multi-day walk (`regenerateFromNow`)
+    /// orders each day's own candidates by how much slack they have as
+    /// of *that* day, not by today's headroom applied to every day.
+    ///
+    /// Ties broken by priority (high before low), then whichever task
+    /// has been sitting on the shelf longest (oldest `createdAt` first)
+    /// — the real ranking criteria. Whatever survives all three still
+    /// tied (most often several tasks added in the same batch import,
+    /// sharing an identical `createdAt`) falls through to a fourth,
+    /// "minimize how many tasks it takes to fill the available time"
+    /// tiebreak: larger `remainingMinutes` before smaller — not
+    /// `estimatedMinutes`, since a partially-placed divisible task's
+    /// real remaining size is what actually competes for the window
+    /// left, not its original stated size — and a task that fills a
+    /// slot in one whole piece before a divisible one that would have
+    /// to be chopped up to do the same — so, all else equal, one 2-hour
+    /// task is preferred over four 30-minute divisible ones for filling
+    /// a 2-hour window, rather than fragmenting it four ways.
+    private func taskOrdering(_ lhs: TaskItem, _ rhs: TaskItem, asOf date: Date) -> Bool {
+        switch (lhs.slack(asOf: date), rhs.slack(asOf: date)) {
+        case let (lhsSlack?, rhsSlack?) where lhsSlack != rhsSlack:
+            return lhsSlack < rhsSlack
+        case (nil, _?):
+            return false
+        case (_?, nil):
+            return true
+        default:
+            break // equal slack (both real and equal, or both nil) — fall through
         }
         if lhs.priority != rhs.priority {
             return priorityRank(lhs.priority) > priorityRank(rhs.priority)
@@ -577,8 +597,8 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
         if lhs.createdAt != rhs.createdAt {
             return lhs.createdAt < rhs.createdAt
         }
-        if lhs.estimatedMinutes != rhs.estimatedMinutes {
-            return lhs.estimatedMinutes > rhs.estimatedMinutes
+        if lhs.remainingMinutes != rhs.remainingMinutes {
+            return lhs.remainingMinutes > rhs.remainingMinutes
         }
         return !lhs.isDivisible && rhs.isDivisible
     }

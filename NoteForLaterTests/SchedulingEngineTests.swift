@@ -10,6 +10,9 @@ import SwiftData
 /// .isEffectivelyEligible`, `syncEligibilityWithFit` removal — §12 cases
 /// 1-6 (fit checking) and 10 (Tier-3-removal regression, now against the
 /// `isEffectivelyEligible` filter).
+/// Phase 4: `TaskItem.slack`/`isAtRisk`/`atRiskBlocker`, `taskOrdering`'s
+/// slack-based primary sort tier — §12 cases 11-14 (ordering), plus
+/// slack/at-risk boundary and blocker-naming coverage.
 final class SchedulingEngineTests: XCTestCase {
     private var container: ModelContainer!
     private var context: ModelContext!
@@ -43,14 +46,14 @@ final class SchedulingEngineTests: XCTestCase {
     /// day of the week (so the fixture never has to care which weekday
     /// `on` actually falls on) and the full clock (so `freeSlots` alone
     /// decides what's actually available).
-    private func makeShelf(fillStrategy: FillStrategy, maxTotalMinutes: Int = 120) -> (shelf: Shelf, rule: SchedulingRule) {
+    private func makeShelf(fillStrategy: FillStrategy, maxTotalMinutes: Int = 120, maxTaskCount: Int = 2, maxMinutesPerTask: Int = 15) -> (shelf: Shelf, rule: SchedulingRule) {
         let shelf = Shelf(name: "Test Shelf")
         context.insert(shelf)
 
         let schedule = NamedSchedule(name: "All Day", daysOfWeek: [1, 2, 3, 4, 5, 6, 7], startHour: 0, startMinute: 0, endHour: 23, endMinute: 59)
         context.insert(schedule)
 
-        let rule = SchedulingRule(shelf: shelf, fillStrategy: fillStrategy, maxTotalMinutes: maxTotalMinutes)
+        let rule = SchedulingRule(shelf: shelf, fillStrategy: fillStrategy, maxTotalMinutes: maxTotalMinutes, maxTaskCount: maxTaskCount, maxMinutesPerTask: maxMinutesPerTask)
         rule.namedSchedule = schedule
         context.insert(rule)
         shelf.schedulingRules = [rule]
@@ -317,5 +320,251 @@ final class SchedulingEngineTests: XCTestCase {
 
         XCTAssertTrue(blocks.isEmpty)
         XCTAssertFalse(task.isScheduled)
+    }
+
+    // MARK: - §12.11-14 — ordering (AISchedulingService.taskOrdering)
+    //
+    // `taskOrdering` is private, so these test it indirectly: a
+    // `maxTaskCount` rule capped at exactly 1 places only the single
+    // candidate the ordering ranks first, so which task's block shows up
+    // in the result is a direct readout of which one won.
+
+    /// §12.11 — negative slack (due soon, not enough of its own remaining
+    /// time to spare) beats positive slack even against high priority.
+    func test_ordering_negativeSlackBeatsPositiveSlackHighPriority() async throws {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .maxTaskCount, maxTaskCount: 1, maxMinutesPerTask: 120)
+
+        let atRisk = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        atRisk.title = "At Risk"
+        atRisk.priority = .low
+        // 30 minutes until due, 60 minutes of work left — slack -30.
+        atRisk.dueDate = calendar.date(byAdding: .minute, value: 30, to: testDay)!
+
+        let comfortable = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        comfortable.title = "Comfortable"
+        comfortable.priority = .high
+        comfortable.dueDate = calendar.date(byAdding: .day, value: 30, to: testDay)!
+
+        let blocks = try await service.generateProposedSchedule(
+            shelves: [shelf], habits: [], freeSlots: [businessHoursSlot(on: testDay)],
+            eligibleHoursWindows: [], date: testDay, existingBlocks: []
+        )
+
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks.first?.task?.title, "At Risk")
+    }
+
+    /// §12.12 — equal slack, differing priority → higher priority first.
+    func test_ordering_equalSlack_higherPriorityFirst() async throws {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .maxTaskCount, maxTaskCount: 1, maxMinutesPerTask: 120)
+        let dueDate = calendar.date(byAdding: .day, value: 5, to: testDay)!
+
+        let low = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        low.title = "Low"
+        low.priority = .low
+        low.dueDate = dueDate
+
+        let high = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        high.title = "High"
+        high.priority = .high
+        high.dueDate = dueDate // same estimatedMinutes + same dueDate → same slack
+
+        let blocks = try await service.generateProposedSchedule(
+            shelves: [shelf], habits: [], freeSlots: [businessHoursSlot(on: testDay)],
+            eligibleHoursWindows: [], date: testDay, existingBlocks: []
+        )
+
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks.first?.task?.title, "High")
+    }
+
+    /// §12.13 — equal slack and priority → older `createdAt` first.
+    func test_ordering_equalSlackAndPriority_olderCreatedAtFirst() async throws {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .maxTaskCount, maxTaskCount: 1, maxMinutesPerTask: 120)
+        let dueDate = calendar.date(byAdding: .day, value: 5, to: testDay)!
+
+        let older = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        older.title = "Older"
+        older.priority = .medium
+        older.dueDate = dueDate
+        older.createdAt = calendar.date(byAdding: .day, value: -10, to: testDay)!
+
+        let newer = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        newer.title = "Newer"
+        newer.priority = .medium
+        newer.dueDate = dueDate
+        newer.createdAt = testDay
+
+        let blocks = try await service.generateProposedSchedule(
+            shelves: [shelf], habits: [], freeSlots: [businessHoursSlot(on: testDay)],
+            eligibleHoursWindows: [], date: testDay, existingBlocks: []
+        )
+
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks.first?.task?.title, "Older")
+    }
+
+    /// §12.14a — slack, priority, and `createdAt` all tied → larger
+    /// `remainingMinutes` first. Because `slack` is itself derived from
+    /// `remainingMinutes` (`slack = minutesUntilDue - remainingMinutes`),
+    /// two tasks can't have both an equal `dueDate` and an equal slack
+    /// once their remaining sizes differ — so this deliberately uses
+    /// *different* due dates, each offset by exactly its own task's size,
+    /// to engineer identical slack while isolating the final tiebreak
+    /// tier rather than accidentally re-testing tier 1.
+    func test_ordering_allTiersEqual_largerRemainingMinutesFirst() async throws {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .maxTaskCount, maxTaskCount: 1, maxMinutesPerTask: 120)
+        let createdAt = testDay
+        let targetSlack = 1000
+
+        let small = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 30, isDivisible: false, minimumSegmentMinutes: 0)
+        small.title = "Small"
+        small.priority = .medium
+        small.createdAt = createdAt
+        small.dueDate = calendar.date(byAdding: .minute, value: targetSlack + 30, to: testDay)!
+
+        let large = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 90, isDivisible: false, minimumSegmentMinutes: 0)
+        large.title = "Large"
+        large.priority = .medium
+        large.createdAt = createdAt
+        large.dueDate = calendar.date(byAdding: .minute, value: targetSlack + 90, to: testDay)!
+
+        XCTAssertEqual(small.slack(asOf: testDay), large.slack(asOf: testDay), "fixture invalid — slack must actually be equal for this to isolate the remainingMinutes tiebreak")
+
+        let blocks = try await service.generateProposedSchedule(
+            shelves: [shelf], habits: [], freeSlots: [businessHoursSlot(on: testDay)],
+            eligibleHoursWindows: [], date: testDay, existingBlocks: []
+        )
+
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks.first?.task?.title, "Large")
+    }
+
+    /// §12.14b — same size (so slack ties without needing compensating
+    /// due dates), same everything else → non-divisible before divisible.
+    func test_ordering_allTiersEqual_nonDivisibleBeforeDivisible() async throws {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .maxTaskCount, maxTaskCount: 1, maxMinutesPerTask: 120)
+        let dueDate = calendar.date(byAdding: .day, value: 5, to: testDay)!
+        let createdAt = testDay
+
+        let divisible = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: true, minimumSegmentMinutes: 60)
+        divisible.title = "Divisible"
+        divisible.priority = .medium
+        divisible.dueDate = dueDate
+        divisible.createdAt = createdAt
+
+        let nonDivisible = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        nonDivisible.title = "Non-Divisible"
+        nonDivisible.priority = .medium
+        nonDivisible.dueDate = dueDate
+        nonDivisible.createdAt = createdAt
+
+        let blocks = try await service.generateProposedSchedule(
+            shelves: [shelf], habits: [], freeSlots: [businessHoursSlot(on: testDay)],
+            eligibleHoursWindows: [], date: testDay, existingBlocks: []
+        )
+
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks.first?.task?.title, "Non-Divisible")
+    }
+
+    // MARK: - slack / isAtRisk boundaries
+
+    func test_slack_noDueDate_isNil() {
+        let shelf = Shelf(name: "Test Shelf")
+        let task = TaskItem(title: "No Due Date", shelf: shelf, estimatedMinutes: 60)
+        XCTAssertNil(task.slack(asOf: .now))
+        XCTAssertFalse(task.isAtRisk(asOf: .now))
+    }
+
+    /// Exactly zero slack is not negative — the boundary itself must not
+    /// read as at risk.
+    func test_isAtRisk_exactlyZeroSlack_notAtRisk() {
+        let shelf = Shelf(name: "Test Shelf")
+        let task = TaskItem(title: "Zero Slack", shelf: shelf, estimatedMinutes: 60)
+        let now = day(2026, 1, 5)
+        task.dueDate = calendar.date(byAdding: .minute, value: 60, to: now)!
+
+        XCTAssertEqual(task.slack(asOf: now), 0)
+        XCTAssertFalse(task.isAtRisk(asOf: now))
+    }
+
+    /// Correction 1 — a task fully placed (`remainingMinutes == 0`, so
+    /// pure slack math reads healthy: `slack` is never even consulted by
+    /// the `remainingMinutes > 0` branch) but whose actual block ends
+    /// after its own due date is still at risk. This is the common
+    /// real-world case — the packer did its job, the result just misses
+    /// the deadline — and slack alone can't see it.
+    func test_isAtRisk_scheduledPastDeadline_evenWithZeroRemainingMinutes() throws {
+        let shelf = Shelf(name: "Test Shelf")
+        context.insert(shelf)
+        let task = TaskItem(title: "Placed Late", shelf: shelf, estimatedMinutes: 60)
+        context.insert(task)
+        task.remainingMinutes = 0
+        task.isScheduled = true
+        let now = day(2026, 1, 5)
+        task.dueDate = calendar.date(byAdding: .hour, value: 2, to: now)!
+        let blockStart = calendar.date(byAdding: .hour, value: 3, to: now)! // starts after the deadline
+        let blockEnd = calendar.date(byAdding: .minute, value: 60, to: blockStart)!
+        let block = ScheduledBlock(date: now, startTime: blockStart, endTime: blockEnd, task: task)
+        context.insert(block)
+        try context.save()
+
+        // Pure slack math alone would call this healthy: `remainingMinutes
+        // == 0` means the first branch of `isAtRisk` never even looks at
+        // slack's sign — proving this test actually exercises the second
+        // (scheduled-past-deadline) branch, not a slack coincidence.
+        XCTAssertEqual(task.remainingMinutes, 0)
+        XCTAssertTrue(task.isAtRisk(asOf: now))
+        XCTAssertEqual(task.atRiskBlocker(asOf: now), "Scheduled past its due date")
+    }
+
+    /// Correction 2 — a task with a real rule toggled on that fails its
+    /// own fit check (`.exceedsConstraint`) must name that, not "No
+    /// eligible schedule." `makeTask` already calls `setEligible(true,
+    /// for: rule)`, so `includedSchedulingRuleIDs` is non-empty here —
+    /// this is the exact case the naive `includedSchedulingRuleIDs
+    /// .isEmpty` check would have gotten wrong.
+    func test_atRiskBlocker_namesFitStatus_notEmptyEligibleArray() {
+        let (shelf, rule) = makeShelf(fillStrategy: .maxTaskCount, maxTaskCount: 2, maxMinutesPerTask: 15)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        let now = day(2026, 1, 5)
+        // Negative slack: 10 minutes until due, 60 minutes of work left.
+        task.dueDate = calendar.date(byAdding: .minute, value: 10, to: now)!
+
+        XCTAssertFalse(task.includedSchedulingRuleIDs.isEmpty, "fixture invalid — task must actually be toggled eligible for this to test the right thing")
+        XCTAssertTrue(task.isAtRisk(asOf: now))
+        XCTAssertEqual(task.atRiskBlocker(asOf: now), "Exceeds every eligible schedule's time constraint")
+    }
+
+    /// `slack(asOf:)` measures from whatever day is passed, not real
+    /// `.now` — `taskOrdering` relies on this for a multi-day walk, where
+    /// each day's own candidates need to be ordered by how much slack
+    /// they have as of *that* day, not by today's headroom reused for
+    /// every later day. Uses a fixed due date and checks slack shrinks
+    /// correctly as the `asOf` day advances toward it.
+    func test_slack_measuresFromPackingDay_notNow() {
+        let shelf = Shelf(name: "Test Shelf")
+        let task = TaskItem(title: "Multi-Day", shelf: shelf, estimatedMinutes: 60)
+        task.dueDate = day(2026, 1, 10)
+
+        let earlyDay = day(2026, 1, 5) // 5 days before the deadline
+        let laterDay = day(2026, 1, 8) // 2 days before the deadline
+
+        let earlySlack = task.slack(asOf: earlyDay)
+        let laterSlack = task.slack(asOf: laterDay)
+
+        XCTAssertNotNil(earlySlack)
+        XCTAssertNotNil(laterSlack)
+        // 5 days of headroom vs. 2 — slack as of the earlier day must be
+        // the larger number, proving the calculation actually moved with
+        // the day passed in rather than being pinned to a single value.
+        XCTAssertGreaterThan(earlySlack!, laterSlack!)
+        XCTAssertEqual(earlySlack! - laterSlack!, 3 * 24 * 60, "the 3-day gap between the two `asOf` days should show up minute-for-minute in the slack difference")
     }
 }

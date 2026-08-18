@@ -992,6 +992,20 @@ struct TaskReviewCard: View {
                     .foregroundStyle(.orange)
             }
 
+            // Shown wherever this card renders (Task Attribute Review,
+            // the standalone task card sheet, the review queue) since
+            // they all wrap `TaskReviewCard` — one badge, reused
+            // everywhere rather than duplicated per entry point. See
+            // `TaskItem.isAtRisk`/`atRiskBlocker` (spec §5.3) — a task
+            // that's out of math (or already scheduled past its own
+            // deadline) gets named here, not silently left to be
+            // noticed only once it's actually missed.
+            if let blocker = task.atRiskBlocker() {
+                Label("At risk — \(blocker)", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.red)
+            }
+
             if nextStepAllowed {
                 HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "arrow.turn.down.right")
