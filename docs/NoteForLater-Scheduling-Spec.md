@@ -62,34 +62,36 @@ Rationale: `reviewCutoff` is `min(.now, dayEnd)`, recomputed on every access. Re
 
 ## 2. Eligibility — hard exclusion
 
-**Current:** `includedSchedulingRuleIDs` is advisory. `tieredOrdering` sorts ineligible tasks last, but `pack()` still places them once eligible tasks are exhausted ("Tier 3" in `generateProposedSchedule`'s doc comment).
+**Current as of `1bd15d3` (post-baseline — §2.1 and §2.2 already shipped):** `generateProposedSchedule`'s per-rule candidate filter is `.filter { $0.isEligible(for: rule) }` — no Tier 3, no fallback. `tieredOrdering` has no eligible/ineligible comparison left; it's duration-only. Both match this section's **Required** state already. §2.3 does not — see below.
 
 **Required:** A task not eligible for a rule is **never** placed by that rule.
 
-### 2.1 Remove Tier 3
+### 2.1 Remove Tier 3 — ✅ done
 
-- `generateProposedSchedule`: filter candidates to `task.isEffectivelyEligible(for: rule)` (§3.2) before packing.
-- `tieredOrdering`: drop the eligible/ineligible comparison — it becomes dead, since ineligible tasks no longer reach the sort.
-- Update the doc comment; it currently documents the three-tier behavior in detail.
+- `generateProposedSchedule` filters candidates to `task.isEligible(for: rule)` before packing (not yet renamed to `isEffectivelyEligible` — that rename is §3.2, still open, since `canEverFit` isn't factored in at this filter yet).
+- `tieredOrdering` dropped the eligible/ineligible comparison; its doc comment already reflects the new (post-Tier-3) two-tier state.
 
-### 2.2 Seeding — inbox→shelf only
+### 2.2 Seeding — inbox→shelf only — ✅ done at the two named sites
 
-Seed `includedSchedulingRuleIDs` to all *enabled* rules on the destination shelf at these two sites only:
+- `InboxViewModel.swift` `route(_:to:)` — seeds correctly.
+- `NightlyReviewView.swift` `shelfRow` (~line 1752) — seeds correctly, and also still calls `syncEligibilityWithFit()` right after (§3.2 dead code, not yet removed).
+- Confirmed still unseeded: `ShelfListView.swift`, `ReceiptImportView.swift`, `TaskImportService.swift`.
 
-- `InboxViewModel.swift:49` (bulk submit) — already correct
-- `NightlyReviewView.swift:1690` (`shelfRow` preview) — already correct
+Not originally listed here: `NightlyReviewView.swift`'s "Recurring?" toggle (~line 1236) also seeds `includedSchedulingRuleIDs` when it auto-previews the Recurring Tasks shelf, by the same "preview a shelf, seed its enabled rules" rationale as `shelfRow`. Same category, just not enumerated by name in the original draft of this section.
 
 **Leave unseeded** (deliberate): `ShelfListView.swift:205`, `ReceiptImportView.swift:139`, `TaskImportService.swift:118` and `:132`.
 
 ⚠️ **Consequence:** tasks from those four paths are unschedulable until the user opens the card and picks schedules. Under Tier 3 they were being quietly scheduled anyway. This is intended — `eligibleSchedulesMissing` already flags them, so they surface through attribute review. Do not "fix" this by adding seeding.
 
-### 2.3 New rules do not auto-opt-in
+### 2.3 New rules do not auto-opt-in — ⚠️ active conflict, not yet reconciled
 
-Adding a rule to a shelf must not modify any existing task's `includedSchedulingRuleIDs`. Matches the existing model comment.
+**Current:** `ShelfEditView.assignSchedule(_:)` (lines 393–408) explicitly loops every existing task on the shelf and appends the new rule's ID to `includedSchedulingRuleIDs` — shipped in `1bd15d3` as a deliberate feature, per an explicit request in that session ("if an eligible schedule is added to a shelf, it should be automatically toggled on for all tasks on that shelf"). This directly contradicts the **Required** text below. Needs an explicit decision — keep the auto-opt-in feature and update this spec section, or remove the feature to match the spec — before this section can be implemented either way.
+
+**Required:** Adding a rule to a shelf must not modify any existing task's `includedSchedulingRuleIDs`. Matches the existing model comment.
 
 ### 2.4 No migration backfill
 
-Existing tasks keep their empty arrays and surface via attribute review as "Eligible Schedules" missing. Expect most of the existing shelf backlog to go unscheduled on first launch after this ships. This is intended.
+Existing tasks keep their empty arrays and surface via attribute review as "Eligible Schedules" missing. Expect most of the existing shelf backlog to go unscheduled on first launch after this ships. This is intended. Still true at HEAD — no eligibility migration exists (the Phase 1 migration only backfills `remainingMinutes`, an unrelated field).
 
 ---
 
@@ -97,12 +99,22 @@ Existing tasks keep their empty arrays and surface via attribute review as "Elig
 
 ### 3.1 Rewrite `SchedulingRule.canEverFit`
 
-**Current:**
+**Current as of `1bd15d3`** (partially fixed, but not to this section's spec — the whole-chunk-size bug from the baseline is gone, replaced by a different bug):
 ```swift
-case .maxTaskCount:
-    return isDivisible || minutesNeeded <= maxMinutesPerTask
+func canEverFit(minutesNeeded: Int, isDivisible: Bool, minimumSegmentMinutes: Int = 0) -> Bool {
+    switch fillStrategy {
+    case .fillToFit:
+        return true
+    case .maxDuration:
+        guard isDivisible else { return minutesNeeded <= maxTotalMinutes }
+        return minimumSegmentMinutes <= 0 || minimumSegmentMinutes <= maxTotalMinutes
+    case .maxTaskCount:
+        guard isDivisible else { return minutesNeeded <= maxMinutesPerTask }
+        return minimumSegmentMinutes <= 0 || minimumSegmentMinutes <= maxMinutesPerTask
+    }
+}
 ```
-Any divisible task returns `true` regardless of chunk size. A 4-hour task divisible into 1-hour chunks "fits" a 15-minute-per-task rule.
+The baseline bug (any divisible task returns `true` regardless of chunk size) is fixed — a divisible task's chunk size is now checked against the rule's cap. But `minimumSegmentMinutes <= 0` (not yet decided) returns **`true`** here — optimistic, mirroring `pack()`'s own "not ready yet, skip rather than flag" guard — where §3.1 below wants **`false`** ("can't be split safely"). This is a deliberate design choice made mid-session to fix a real placement bug (a task with a 2-hour minimum segment getting sliced into 15-minute pieces by a "≤15 min each" rule), not an oversight — but it conflicts with this section's Required table and needs reconciling, not just extending. The signature itself is also still `minutesNeeded`, not `estimatedMinutes`, and has no `estimatedMinutes > 0` precondition — those parts are genuinely just unimplemented.
 
 **Required signature:**
 ```swift
@@ -126,11 +138,11 @@ A divisible task with `minimumSegmentMinutes == 0` ("Not Selected") returns `fal
 
 ### 3.2 Filter at read time — do not write
 
-**Current:** `syncEligibilityWithFit()` calls `setEligible(false, ...)`, permanently deleting the rule ID when a fit check fails. Loosening the rule later does not restore it, and the array can no longer distinguish "user said no" from "system cleared this."
+**Current:** unchanged from baseline — still live at HEAD, not started. `syncEligibilityWithFit()` calls `setEligible(false, ...)`, permanently deleting the rule ID when a fit check fails. Loosening the rule later does not restore it, and the array can no longer distinguish "user said no" from "system cleared this." Currently called from **five** sites in `TaskReviewCard` (`NightlyReviewView.swift`), not two: `.onAppear` (~line 850), three separate `.onChange` hooks (`estimatedMinutes` ~852, `isDivisible` ~863, `minimumSegmentMinutes` ~864), and the `shelfRow` preview tap (~line 1753) — all need to go. Point 4 below is already true at HEAD independent of the rest of this section: `eligibleSchedulesMissing` already reads the raw `includedSchedulingRuleIDs` array, not any fit-aware helper.
 
 **Required:**
 
-1. **Delete `syncEligibilityWithFit()`** and both `.onChange` hooks calling it (`NightlyReviewView.swift` ~line 830), plus the call in `shelfRow`.
+1. **Delete `syncEligibilityWithFit()`** and all five call sites above.
 2. Add to `TaskItem`:
    ```swift
    func isEffectivelyEligible(for rule: SchedulingRule) -> Bool {
@@ -147,6 +159,8 @@ A divisible task with `minimumSegmentMinutes == 0` ("Not Selected") returns `fal
 Caption when suppressed: **"Exceeds time constraint — will re-enable if this changes"** (currently a flat "Exceeds time constraint", which reads as permanent).
 
 ### 3.3 Duration-less tasks are never eligible
+
+**Current:** unchanged from baseline — still live at HEAD, not started. `guessedMinutes(for:)` and the `isEstimated` path in `pack()` (lines ~395, 401, 451, 465, 481) are fully intact; `fillToFit` in the current `canEverFit` (§3.1) returns `true` unconditionally, with no `estimatedMinutes > 0` check anywhere in it yet.
 
 `estimatedMinutes == 0` → `canEverFit` returns `false` for all strategies including `fillToFit`.
 
