@@ -555,11 +555,24 @@ final class ScheduleReviewViewModel {
     /// user to notice and fix (a duration too big, a rule too narrow)
     /// rather than silently consuming the walk's time.
     ///
-    /// Checks `remainingMinutes`, not `TaskItem.isEffectivelyEligible`'s
-    /// own `estimatedMinutes` — a divisible task already partially placed
-    /// elsewhere has less left to offer than its original stated size,
-    /// and it's that leftover amount that determines whether *this* rule
-    /// could still take it, not the task's full original size.
+    /// Deliberately does NOT call `TaskItem.isEffectivelyEligible` —
+    /// inlines the same check against `remainingMinutes` instead of
+    /// `estimatedMinutes`, and that's load-bearing, not a style
+    /// preference. This function is one of only two conditions that ever
+    /// stop `regenerateFromNow`'s walk (see §6.4 — the other is the
+    /// `taskSafetyCapDays` backstop), so it has to be able to go `false`
+    /// on its own, without depending on `isScheduled` ever getting set
+    /// correctly elsewhere. `rule.canEverFit`'s underlying `fitStatus`
+    /// returns `.needsDuration` (not `.fits`) the moment its `estimatedMinutes`
+    /// argument is `<= 0` — so passing `remainingMinutes` here means a
+    /// fully-drained task (`remainingMinutes == 0`) always evaluates as
+    /// not-fitting-anything and drops out of "remaining work" on that
+    /// alone, independent of whatever `isScheduled` happens to be. Pass
+    /// `estimatedMinutes` (the task's original, undrained size) instead,
+    /// and a task stuck at `remainingMinutes == 0` with `isScheduled`
+    /// somehow still `false` would keep reporting "still fits" forever —
+    /// the walk would never terminate on it. Do not "simplify" this back
+    /// to `isEffectivelyEligible` without re-verifying the walk still stops.
     private func hasRemainingSchedulableWork(shelves: [Shelf]) -> Bool {
         shelves.contains { shelf in
             let rules = (shelf.schedulingRules ?? []).filter(\.isEnabled)

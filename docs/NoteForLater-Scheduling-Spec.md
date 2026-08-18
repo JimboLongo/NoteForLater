@@ -166,35 +166,31 @@ The four cases map 1:1 onto the two existing attribute-review checks in `TaskIte
 - `.exceedsConstraint` → "Exceeds time constraint — will re-enable if this changes" (§3.2's caption).
 - `.fits` → no caption; toggle just reads enabled.
 
-### 3.2 Filter at read time — do not write
+### 3.2 Filter at read time — do not write — ✅ done as of `df87fb6`
 
-**Current:** unchanged from baseline — still live at HEAD, not started. `syncEligibilityWithFit()` calls `setEligible(false, ...)`, permanently deleting the rule ID when a fit check fails. Loosening the rule later does not restore it, and the array can no longer distinguish "user said no" from "system cleared this." Currently called from **five** sites in `TaskReviewCard` (`NightlyReviewView.swift`), not two: `.onAppear` (~line 850), three separate `.onChange` hooks (`estimatedMinutes` ~852, `isDivisible` ~863, `minimumSegmentMinutes` ~864), and the `shelfRow` preview tap (~line 1753) — all need to go. Point 4 below is already true at HEAD independent of the rest of this section: `eligibleSchedulesMissing` already reads the raw `includedSchedulingRuleIDs` array, not any fit-aware helper.
+`syncEligibilityWithFit()` and all five call sites in `TaskReviewCard` are deleted (`.onAppear`, three `.onChange` hooks, the `shelfRow` preview tap). `eligibleSchedulesMissing` was already reading the raw array at HEAD before this landed, unchanged. The task card's Eligible Schedules row now reads `TaskItem.fitStatus(for:)` and captions per-case, per §3.1.
 
-**Required:**
+`TaskItem.isEffectivelyEligible(for:)` shipped, but **not** with the snippet originally given here:
+```swift
+func isEffectivelyEligible(for rule: SchedulingRule) -> Bool {
+    isEligible(for: rule) && rule.canEverFit(
+        estimatedMinutes: estimatedMinutes,
+        isDivisible: isDivisible,
+        minimumSegmentMinutes: minimumSegmentMinutes
+    )
+}
+```
+This reads `estimatedMinutes` — the task's *original* stated size — which is correct for most callers (the task card toggle, the scheduler's own candidate filter) since those want to know "is this task, as configured, a candidate for this rule at all." But it is **not** correct for `ScheduleReviewViewModel.hasRemainingSchedulableWork`, one of only two conditions that ever stop `regenerateFromNow`'s multi-day walk (§6.4 — the other is `taskSafetyCapDays`). That function needs `remainingMinutes` (what's actually still unplaced on a partially-scheduled divisible task), not `estimatedMinutes` (the task's full original size): checking the original size would keep reporting "still fits" even once the task is fully drained, if `isScheduled` hasn't been set by whatever path drained it — the walk would never terminate on that task. `hasRemainingSchedulableWork` deliberately does **not** call `isEffectivelyEligible` — it inlines the same `isEligible(for:) && canEverFit(...)` check with `remainingMinutes` substituted for `estimatedMinutes`, with a comment on-site explaining why. This is the one caller `isEffectivelyEligible` is not meant to replace.
 
-1. **Delete `syncEligibilityWithFit()`** and all five call sites above.
-2. Add to `TaskItem`:
-   ```swift
-   func isEffectivelyEligible(for rule: SchedulingRule) -> Bool {
-       isEligible(for: rule) && rule.canEverFit(
-           estimatedMinutes: estimatedMinutes,
-           isDivisible: isDivisible,
-           minimumSegmentMinutes: minimumSegmentMinutes
-       )
-   }
-   ```
-3. Scheduler reads `isEffectivelyEligible`. Task card toggle reads raw `isEligible` for its stored value, and `canEverFit` separately for enabled/disabled state.
-4. `eligibleSchedulesMissing` checks the **raw** array — a task whose only rule is temporarily suppressed should not be dragged into attribute review.
+Caption when suppressed: **"Exceeds time constraint — will re-enable if this changes"** (`.exceedsConstraint`), shipped as one of four status-specific captions per §3.1 (`.needsDuration`/`.needsMinimumSegment` get their own).
 
-Caption when suppressed: **"Exceeds time constraint — will re-enable if this changes"** (currently a flat "Exceeds time constraint", which reads as permanent).
-
-### 3.3 Duration-less tasks are never eligible
-
-**Current:** unchanged from baseline — still live at HEAD, not started. `guessedMinutes(for:)` and the `isEstimated` path in `pack()` (lines ~395, 401, 451, 465, 481) are fully intact; `fillToFit` in the current `canEverFit` (§3.1) returns `true` unconditionally, with no `estimatedMinutes > 0` check anywhere in it yet.
+### 3.3 Duration-less tasks are never eligible — ✅ done as of `df87fb6`
 
 `estimatedMinutes == 0` → `fitStatus` returns `.needsDuration` (§3.1) → `canEverFit` is `false` for all strategies including `fillToFit`, with no special-cased duration check needed at this layer — `.needsDuration` already isn't `.fits`.
 
-**Removes:** `guessedMinutes(for:)`, the `isEstimated` path in `pack()`, and `ScheduledBlock.isEstimatedDuration` display of `~` durations from the packer.
+**Removed:** `guessedMinutes(for:)` and the `isEstimated` path in `pack()` — every candidate reaching `pack()` now passes `isEffectivelyEligible` upstream, which already guarantees `estimatedMinutes > 0`, so nothing in the packer ever needs to guess a duration on a task's behalf again. `tieredOrdering`/`durationTieredOrdering` (the has-duration-vs-guessed sort tier) were also removed as a direct consequence — every candidate now guarantees a real duration, so that comparison was as dead as the eligible-vs-ineligible one §2.1 already removed; see the corrected note on §5.1 below.
+
+**Kept, deliberately:** `ScheduledBlock.isEstimatedDuration` and its "(Est Duration)" / `~` display — the field has two other writers untouched by this section: `ScheduleReviewViewModel.insertBlock`'s manual-timeline-insert fallback, and `placeHabitsAndRecurringTasks`'s own recurring-task 30-minute fallback (a deliberate exception — a recurring task bypasses eligibility/rule-packing by design, so "duration-less tasks are never eligible" doesn't apply to a mechanism that doesn't check eligibility at all).
 
 ⚠️ Feature removal — duration-less tasks currently receive a guessed 30-minute block. They will now never appear on the calendar until a duration is set. `durationMissing` already flags them in attribute review.
 
@@ -234,19 +230,19 @@ Result: with 20 minutes of budget left, a task configured as indivisible below 6
 
 ### 5.1 Ordering
 
-Replace `tieredOrdering` / `durationTieredOrdering` / `taskOrdering` with:
+**Current as of `df87fb6`:** `tieredOrdering` and `durationTieredOrdering` no longer exist — both were removed during Phase 2 as dead code once §2.1 (eligible-vs-ineligible tier) and §3.3 (has-duration-vs-guessed tier) made their respective comparisons unreachable (every candidate reaching either function was already guaranteed to be eligible/have a real duration, so the tier they sorted on could never actually differ). `AISchedulingService`'s per-rule candidate `.sorted` call already calls `taskOrdering` directly. **The "Removed" line below is therefore already satisfied — nothing left to remove, only steps 3 and 6 below to actually add.**
+
+Replace the remaining `taskOrdering` (due date → priority → `createdAt` → a same-tiebreak `estimatedMinutes`/divisible pair — see its current body) with:
 
 1. **Filter:** `isEligibleToStart(on: date)` — unchanged
-2. **Filter:** `isEffectivelyEligible(for: rule)` — §3.2
+2. **Filter:** `isEffectivelyEligible(for: rule)` — §3.2 (already the candidate filter's own job, upstream of this sort — not something `taskOrdering` itself needs to check)
 3. **Sort:** ascending `slack` (§5.2); tasks with no due date sort last
 4. **Sort:** priority descending (high → medium → low → unset)
 5. **Sort:** `createdAt` ascending (insertion order)
-6. **Sort:** `remainingMinutes` descending
+6. **Sort:** `remainingMinutes` descending — current code compares `estimatedMinutes` here; needs to move to `remainingMinutes` for the same reason §3.2's `isEffectivelyEligible` caveat exists (a partially-placed divisible task's real remaining size, not its original stated size)
 7. **Sort:** non-divisible before divisible
 
 Steps 6–7 minimize fragmentation: one 2-hour task preferred over four 30-minute divisible ones for a 2-hour window.
-
-Removed: the has-duration-vs-guessed tier (dead per §3.3) and the eligible-vs-ineligible tier (dead per §2.1).
 
 ### 5.2 Slack
 
