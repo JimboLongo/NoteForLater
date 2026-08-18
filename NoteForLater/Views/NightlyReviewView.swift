@@ -285,8 +285,11 @@ struct NightlyReviewView: View {
                 // following day to land on. `regenerateFromNow`, not
                 // `regenerateSingleDay` (doesn't exist — see §6.3),
                 // walking forward until everything schedulable has a real
-                // slot. A locked block, on any day, is never touched by
-                // any of this.
+                // slot. A locked block on a present or future day is
+                // never touched by any of this — but a locked *past*
+                // incomplete block already was, eleven lines up: §7.3
+                // deliberately strips lock protection once a block's own
+                // day is over (see `clearIncompletePastBlocks`).
                 let completedFully = await tomorrowViewModel.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
                 if completedFully {
                     ScheduleDirtyState.shared.isDirty = false

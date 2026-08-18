@@ -46,11 +46,12 @@ var remainingMinutes: Int = 0
 
 ```swift
 /// True only between "Next" on the Nightly Review Today step and the push
-/// that follows. Not durable state on a surviving task.
+/// that follows. Not durable state on a surviving task. Diagnostic only —
+/// nothing reads it. See §7.2 for what actually guarantees the batch.
 var isNightlyReviewed: Bool = false
 ```
 
-Rationale: `reviewCutoff` is `min(.now, dayEnd)`, recomputed on every access. Reviewing across midnight, or an async cleanup interleaving, means `advance()` can operate on a different set than the user just looked at. Stamping the batch makes the push deterministic. See §7.2.
+Rationale: `reviewCutoff` is `min(.now, dayEnd)`, recomputed on every access. Reviewing across midnight, or an async cleanup interleaving, means `advance()` can operate on a different set than the user just looked at. **The actual fix is capturing `reviewedBlocks`/`frozenCutoff`/`frozenAllBlocks` as local `let`s synchronously, before the async work starts** — see §7.2. `isNightlyReviewed` doesn't drive that determinism itself (it's write-only, never read back); it exists to make a stamped task visibly identifiable while it's mid-batch, not as the mechanism the freeze depends on.
 
 **Migration:** `false` for all existing tasks.
 

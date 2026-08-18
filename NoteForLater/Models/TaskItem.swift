@@ -76,10 +76,19 @@ final class TaskItem {
     /// every stamped task is reset to `false` by the end of that same
     /// batch, whether it was completed (deleted outright, if
     /// non-recurring) or freed back up as an ordinary incomplete
-    /// candidate. Exists to freeze which tasks belonged to a given
-    /// review's batch before an async gap, rather than re-deriving that
-    /// set live off `reviewCutoff` (which drifts as `.now` moves,
-    /// notably across midnight).
+    /// candidate.
+    ///
+    /// Diagnostic only — nothing reads this field. The actual freeze
+    /// (what makes the batch immune to the async-gap/midnight-drift
+    /// hazard this was meant to solve) comes from `reviewedBlocks`/
+    /// `frozenCutoff`/`frozenAllBlocks`, local `let`s captured
+    /// synchronously in `advance()` before its `Task {}` starts. Those
+    /// locals are what's actually load-bearing; this field just makes a
+    /// stamped task visibly identifiable (e.g. in the debugger or a
+    /// future inspector UI) while it's mid-batch. Do not wire it into
+    /// `reviewableBlocks` or any other live query — that would create a
+    /// second, redundant source of truth for something the locals
+    /// already answer correctly.
     var isNightlyReviewed: Bool = false
     /// How many times a scheduled block for this task has been deleted off
     /// the calendar (swipe-to-delete, the Delete action, or "Assume Not
