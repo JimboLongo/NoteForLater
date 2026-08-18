@@ -247,14 +247,19 @@ struct NightlyReviewView: View {
                 // always has, walking forward until everything schedulable
                 // has a real slot. A locked block, on any day, is never
                 // touched by any of this.
-                await tomorrowViewModel.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+                let completedFully = await tomorrowViewModel.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
                 // This walk just did everything a dirty-triggered one
                 // would (see `ScheduleDirtyState`) — clearing here is
                 // pure hygiene, so the next time the Calendar tab syncs
                 // it goes back to the light additive top-up instead of
                 // needlessly re-running a second full regenerate for a
-                // flag this pass already made moot.
-                ScheduleDirtyState.shared.isDirty = false
+                // flag this pass already made moot. Only when the walk
+                // actually finished, though — same reasoning as
+                // `ScheduleReviewView.syncSchedule`: a fetchFreeSlots
+                // failure mid-walk must not silently drop the flag.
+                if completedFully {
+                    ScheduleDirtyState.shared.isDirty = false
+                }
             }
         }
     }

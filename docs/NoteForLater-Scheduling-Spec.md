@@ -344,11 +344,13 @@ On **Next** from the Today step, in this order:
 
 Steps 1–3 operate on the frozen batch, not on a recomputed `reviewCutoff`.
 
-### 7.3 Locked past blocks lose protection
+### 7.3 Locked past blocks lose protection — ✅ done
 
-`clearIncompletePastBlocks` must clear past incomplete blocks **regardless of `isLocked`**. A lock pins a block within a day's layout; it does not pin it to a day that has ended. Current code already ignores lock status here — verify no regression, and confirm `approvalStatus == .approved` past blocks are also swept.
+`clearIncompletePastBlocks` clears past incomplete blocks **regardless of `isLocked`**. A lock pins a block within a day's layout; it does not pin it to a day that has ended. Without this, a locked past-incomplete block would keep matching `reviewableBlocks`' `startTime < reviewCutoff` filter forever, with no in-app way to resolve it. Clearing isn't destructive — the task survives and `remainingMinutes` is restored, so it just returns to the shelf for rescheduling. `approvalStatus == .approved` past blocks are also swept — the function never filters on approval status at all.
 
-Locking continues to protect present and future blocks in `regenerateFromNow` and `regenerateSingleDay`.
+`purgeCompletedBlocks` never checked `isLocked` either, so completed past blocks (locked or not) never had this problem.
+
+Locking continues to protect present and future blocks in `regenerateFromNow`.
 
 ### 7.4 Inbox step
 
@@ -417,10 +419,6 @@ Each phase should build and run.
 ## Open Decisions
 
 Things currently settled only in conversation, not in this document. Each needs to land here (or get resolved) before the phase it blocks.
-
-### Locked past-block conflict — unresolved, blocks Phase 6
-
-§7.3 says `clearIncompletePastBlocks` must clear past incomplete blocks **regardless of `isLocked`**, and claims current code already does this. It doesn't: `clearIncompletePastBlocks` (`ScheduleReviewViewModel.swift:1386`) filters with `!$0.isLocked`, so a locked past-incomplete block is skipped, not cleared. Both the spec text and the shipped `!$0.isLocked` guard came from the same conversation — they weren't reconciled against each other when the guard was added. Needs a decision (clear locked past blocks per §7.3's original intent, or update §7.3 to match the protection the code actually gives locks) before Phase 6, since Phase 6's own Nightly Review work sits directly on top of this function.
 
 ### Task-walk horizon: 30 → 365 → stall detection
 

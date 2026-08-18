@@ -1383,7 +1383,16 @@ final class ScheduleReviewViewModel {
     /// left unchecked there gets freed up for tomorrow's generation even
     /// when `reviewDate` isn't today.
     func clearIncompletePastBlocks(allBlocks: [ScheduledBlock], cutoff: Date = .now) async {
-        let toClear = allBlocks.filter { !$0.isCompleted && $0.startTime < cutoff && !$0.isLocked }
+        // Deliberately ignores isLocked — a lock only pins a block within
+        // a day's own layout. Once that day is over, protecting it here
+        // would make it immortal: it still matches reviewableBlocks'
+        // `startTime < reviewCutoff` filter, so it would keep resurfacing
+        // in every future Today step with no in-app way to resolve it.
+        // Clearing isn't destructive — the task survives and
+        // remainingMinutes is restored below, so it just goes back to the
+        // shelf to be rescheduled. Locking still protects present/future
+        // blocks everywhere else (regenerateFromNow etc).
+        let toClear = allBlocks.filter { !$0.isCompleted && $0.startTime < cutoff }
         for block in toClear {
             block.task?.isScheduled = false
             block.task?.pushedCount += 1

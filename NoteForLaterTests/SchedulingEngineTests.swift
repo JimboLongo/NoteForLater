@@ -187,6 +187,33 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertEqual(task.remainingMinutes, 120)
     }
 
+    // MARK: - §7.3 — a lock doesn't survive the day it was pinning past
+
+    /// A lock only pins a block within its own day's layout — once that
+    /// day is over, `clearIncompletePastBlocks` clears it the same as any
+    /// other incomplete past block. Without this, a locked past-incomplete
+    /// block would keep matching `reviewableBlocks`' `startTime <
+    /// reviewCutoff` filter forever, with no in-app way to resolve it.
+    func test_clearIncompletePastBlocks_clearsLockedBlockToo() async throws {
+        let testDay = day(2026, 1, 5)
+        let yesterday = day(2026, 1, 4)
+        let (shelf, rule) = makeShelf(fillStrategy: .maxDuration, maxTotalMinutes: 50)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 120, isDivisible: true, minimumSegmentMinutes: 30)
+        task.remainingMinutes = 70
+        task.isScheduled = true
+        let blockStart = calendar.date(byAdding: .hour, value: 9, to: yesterday)!
+        let blockEnd = calendar.date(byAdding: .minute, value: 50, to: blockStart)!
+        let block = ScheduledBlock(date: yesterday, startTime: blockStart, endTime: blockEnd, task: task)
+        block.isLocked = true
+        context.insert(block)
+
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: testDay)
+        await viewModel.clearIncompletePastBlocks(allBlocks: [block], cutoff: testDay)
+
+        XCTAssertEqual(task.remainingMinutes, 120)
+        XCTAssertFalse(task.isScheduled)
+    }
+
     // MARK: - regenerateFromNow's own forward-looking clear also restores remainingMinutes
 
     /// `regenerateFromNow` clears non-approved/non-locked/non-completed
