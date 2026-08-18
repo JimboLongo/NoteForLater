@@ -83,11 +83,13 @@ Not originally listed here: `NightlyReviewView.swift`'s "Recurring?" toggle (~li
 
 ⚠️ **Consequence:** tasks from those four paths are unschedulable until the user opens the card and picks schedules. Under Tier 3 they were being quietly scheduled anyway. This is intended — `eligibleSchedulesMissing` already flags them, so they surface through attribute review. Do not "fix" this by adding seeding.
 
-### 2.3 New rules do not auto-opt-in — ⚠️ active conflict, not yet reconciled
+### 2.3 New rules auto-opt-in every existing task — ✅ intentional, supersedes the old model comment
 
-**Current:** `ShelfEditView.assignSchedule(_:)` (lines 393–408) explicitly loops every existing task on the shelf and appends the new rule's ID to `includedSchedulingRuleIDs` — shipped in `1bd15d3` as a deliberate feature, per an explicit request in that session ("if an eligible schedule is added to a shelf, it should be automatically toggled on for all tasks on that shelf"). This directly contradicts the **Required** text below. Needs an explicit decision — keep the auto-opt-in feature and update this spec section, or remove the feature to match the spec — before this section can be implemented either way.
+**Reversed from the original draft of this section**, which carried forward the model comment's "new rule ≠ auto-eligible" note without weighing it against §2.1's own hard exclusion. Under hard exclusion, "a new rule opts in nobody" means adding a schedule to a shelf does nothing at all until every task on that shelf has its card opened by hand and the new toggle flipped on — for a shelf with any real backlog, that's the schedule sitting inert, not a safety default. Appending the *new* rule's own ID also can't be overriding a user decision, since by construction no task has an opinion yet on a rule that didn't exist a moment ago — there's nothing to override.
 
-**Required:** Adding a rule to a shelf must not modify any existing task's `includedSchedulingRuleIDs`. Matches the existing model comment.
+**Required:** `ShelfEditView.assignSchedule(_:)` keeps its current behavior — on creating a new `SchedulingRule`, append that rule's ID to `includedSchedulingRuleIDs` for every task already on the shelf that doesn't already have it (which, for a brand-new rule, is all of them). Verified this fires *only* from rule creation (the "Add Schedule" picker, which excludes schedules already assigned) and never from editing an existing rule — `SchedulingRuleEditView.swift` never touches `includedSchedulingRuleIDs`, so a rule someone deliberately toggled off on a task stays off across any number of edits to that rule's own window/fill-strategy. Only a genuinely *new* rule ever seeds anything.
+
+The old model-comment language this contradicts (`SchedulingRule`'s own doc comment, if it still says a new rule isn't auto-eligible) should be updated to match, not the other way around.
 
 ### 2.4 No migration backfill
 
@@ -114,27 +116,51 @@ func canEverFit(minutesNeeded: Int, isDivisible: Bool, minimumSegmentMinutes: In
     }
 }
 ```
-The baseline bug (any divisible task returns `true` regardless of chunk size) is fixed — a divisible task's chunk size is now checked against the rule's cap. But `minimumSegmentMinutes <= 0` (not yet decided) returns **`true`** here — optimistic, mirroring `pack()`'s own "not ready yet, skip rather than flag" guard — where §3.1 below wants **`false`** ("can't be split safely"). This is a deliberate design choice made mid-session to fix a real placement bug (a task with a 2-hour minimum segment getting sliced into 15-minute pieces by a "≤15 min each" rule), not an oversight — but it conflicts with this section's Required table and needs reconciling, not just extending. The signature itself is also still `minutesNeeded`, not `estimatedMinutes`, and has no `estimatedMinutes > 0` precondition — those parts are genuinely just unimplemented.
+The baseline bug (any divisible task returns `true` regardless of chunk size) is fixed — a divisible task's chunk size is now checked against the rule's cap. But `minimumSegmentMinutes <= 0` (not yet decided) returns **`true`** here — optimistic, mirroring `pack()`'s own "not ready yet, skip rather than flag" guard — where the original draft of this section wanted **`false`** ("can't be split safely"). Neither is actually correct, which is the reason for the redesign below, not just a pick between the two: `canEverFit` is answering two different questions with one `Bool` — "blocked by a real constraint" and "not ready to evaluate yet" — and collapsing them loses information a caller might need. Optimistic (`true`) makes the task card's toggle look enabled while `pack()` silently skips the task anyway; strict (`false`) shows "Exceeds time constraint," which is a lie — nothing is actually too big, the minimum segment just hasn't been chosen yet.
 
-**Required signature:**
+**Required — replace the `Bool` with a status enum:**
 ```swift
-func canEverFit(estimatedMinutes: Int, isDivisible: Bool, minimumSegmentMinutes: Int) -> Bool
+enum SchedulingFitStatus {
+    /// Genuinely too big for anything this rule could ever offer —
+    /// duration/segment vs. the rule's own cap, a real comparison.
+    case exceedsConstraint
+    /// Divisible, but no minimum segment chosen yet ("Not Selected") —
+    /// there's nothing to compare against the rule's cap, so no fit
+    /// judgment is possible either way.
+    case needsMinimumSegment
+    /// Fits — comfortably within whatever the rule allows.
+    case fits
+}
+
+func fitStatus(estimatedMinutes: Int, isDivisible: Bool, minimumSegmentMinutes: Int) -> SchedulingFitStatus {
+    guard estimatedMinutes > 0 else { return .exceedsConstraint } // see open question below
+    if isDivisible, minimumSegmentMinutes <= 0 { return .needsMinimumSegment }
+    let minutesToCheck = isDivisible ? minimumSegmentMinutes : estimatedMinutes
+    switch fillStrategy {
+    case .fillToFit:
+        return .fits
+    case .maxDuration:
+        return minutesToCheck <= maxTotalMinutes ? .fits : .exceedsConstraint
+    case .maxTaskCount:
+        return minutesToCheck <= maxMinutesPerTask ? .fits : .exceedsConstraint
+    }
+}
+
+/// Convenience for every existing Bool call site (e.g. `isEffectivelyEligible`,
+/// §3.2) that only needs a yes/no, not the reason.
+func canEverFit(estimatedMinutes: Int, isDivisible: Bool, minimumSegmentMinutes: Int) -> Bool {
+    fitStatus(estimatedMinutes: estimatedMinutes, isDivisible: isDivisible, minimumSegmentMinutes: minimumSegmentMinutes) == .fits
+}
 ```
-
-Logic:
-
-| Strategy | Divisible | Test |
-|---|---|---|
-| any | — | `estimatedMinutes > 0` — else `false` (§3.3) |
-| `fillToFit` | either | `true` |
-| `maxDuration` | no | `estimatedMinutes <= maxTotalMinutes` |
-| `maxDuration` | yes | `minimumSegmentMinutes <= maxTotalMinutes` |
-| `maxTaskCount` | no | `estimatedMinutes <= maxMinutesPerTask` |
-| `maxTaskCount` | yes | `minimumSegmentMinutes <= maxMinutesPerTask` |
 
 Divisible cases use the **segment** test, not the whole-task test. A recurring window drains a large task across multiple occurrences; a whole-task test would gray out most large projects and defeat divisibility. A whole-task test would also produce a gray-out that flickers as `remainingMinutes` drains.
 
-A divisible task with `minimumSegmentMinutes == 0` ("Not Selected") returns `false` — can't be split safely.
+**Task card caption picks off the status, not a single flat string:**
+- `.exceedsConstraint` → "Exceeds time constraint — will re-enable if this changes" (§3.2's caption).
+- `.needsMinimumSegment` → "Set a minimum segment first" — names the actual blocker instead of implying the task itself is too big.
+- `.fits` → no caption; toggle just reads enabled.
+
+⚠️ **Open question for review, not yet resolved:** where does `estimatedMinutes <= 0` belong? It's arguably a third "not ready to evaluate" case (no duration set at all — the same category as "not ready" `needsMinimumSegment`, just for the duration question instead of the divisible one), not a real "exceeds constraint." Bucketed it into `.exceedsConstraint` above only to keep exactly the three cases named, but that means a duration-less task gets the same (slightly inaccurate) "Exceeds time constraint" caption `needsMinimumSegment` was designed to avoid being wrong about. The alternative is a fourth case (`.needsDuration`, captioned "Set a duration first") — more consistent, but expands the enum beyond what was specified. Pick one before Phase 2 implements this.
 
 ### 3.2 Filter at read time — do not write
 
