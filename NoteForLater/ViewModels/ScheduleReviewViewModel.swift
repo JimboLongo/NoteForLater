@@ -402,10 +402,20 @@ final class ScheduleReviewViewModel {
     /// hand over a stale snapshot that still contains those now-deleted
     /// objects, and this function's own final `blocks = combined.filter
     /// { ... }` would silently resurrect them right back into view.
-    func regenerateFromNow(shelves: [Shelf], habits: [Habit], eligibleHoursWindows: [EligibleHoursWindow]) async {
+    /// Returns whether the walk actually reached its natural stopping
+    /// point (stall threshold / habit horizon exhausted) rather than
+    /// bailing out early on a `fetchFreeSlots` failure. Callers that use
+    /// this as the dirty-flag escalation (see `ScheduleReviewView
+    /// .syncSchedule`) need to know the difference — a caught-but-
+    /// incomplete walk can still leave a stale block sitting past the
+    /// point it reached, so the flag it's meant to clear must survive
+    /// to be retried later instead of being dropped here.
+    @discardableResult
+    func regenerateFromNow(shelves: [Shelf], habits: [Habit], eligibleHoursWindows: [EligibleHoursWindow]) async -> Bool {
         isGenerating = true
         errorMessage = nil
         defer { isGenerating = false }
+        var completedFully = true
 
         // Regenerating always clears out anything left over from a day
         // before today first — see `clearBlocksBeforeToday`.
@@ -519,6 +529,7 @@ final class ScheduleReviewViewModel {
                 }
             } catch {
                 errorMessage = error.localizedDescription
+                completedFully = false
                 break
             }
             cursorDay = calendar.date(byAdding: .day, value: 1, to: cursorDay) ?? cursorDay
@@ -532,6 +543,7 @@ final class ScheduleReviewViewModel {
             .sorted { $0.startTime < $1.startTime }
 
         await loadCalendarEvents()
+        return completedFully
     }
 
     /// Carves `occupied` out of `slots`, splitting or trimming whichever

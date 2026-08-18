@@ -414,6 +414,28 @@ Each phase should build and run.
 
 ---
 
+## Open Decisions
+
+Things currently settled only in conversation, not in this document. Each needs to land here (or get resolved) before the phase it blocks.
+
+### Locked past-block conflict — unresolved, blocks Phase 6
+
+§7.3 says `clearIncompletePastBlocks` must clear past incomplete blocks **regardless of `isLocked`**, and claims current code already does this. It doesn't: `clearIncompletePastBlocks` (`ScheduleReviewViewModel.swift:1386`) filters with `!$0.isLocked`, so a locked past-incomplete block is skipped, not cleared. Both the spec text and the shipped `!$0.isLocked` guard came from the same conversation — they weren't reconciled against each other when the guard was added. Needs a decision (clear locked past blocks per §7.3's original intent, or update §7.3 to match the protection the code actually gives locks) before Phase 6, since Phase 6's own Nightly Review work sits directly on top of this function.
+
+### Task-walk horizon: 30 → 365 → stall detection
+
+History: the walk was originally capped at a deliberate 30-day horizon; `1bd15d3` raised it to a flat `taskSafetyCapDays = 365`; `e18ef4e` (Phase 5) replaced that flat cap with stall detection (`taskStallThresholdDays = 14` consecutive days placing zero task blocks). This is a real behavior change worth naming explicitly: a task that's eligible and fits, but whose only opening is more than 14 consecutive empty days out, now never reaches that opening — the walk gives up first. At-risk detection (§5.3) doesn't catch this either, since `isAtRisk` is slack/deadline-driven and has nothing to say about a task with no due date sitting past the stall threshold. Not blocking any phase today, but worth flagging if a "task silently never gets scheduled" report ever comes in.
+
+### `dueDate` end-of-day semantics — in code, not in this doc
+
+`c162acb` changed `slack`/`isAtRisk`/`atRiskBlocker` to measure against `endOfDueDate(calendar:)` (midnight ending `dueDate`'s calendar day) rather than the raw `dueDate` instant, and made `isAtRisk` return `false` outright when `dueDatePicked == false`. §5 doesn't describe either of these; both are load-bearing (the raw-instant version had a due-today-at-9am-reads-as-past-due-at-9:01 bug) and should be written into §5 before anyone edits that code without the conversation history.
+
+### Dead code referenced by §6.1
+
+`InboxViewModel.route(_ task:to shelf:)` is never called anywhere in the current codebase, and there is no "Inbox bulk submit" feature — §6.1's trigger list should not (and per the Phase 5 rewrite, does not) cite either as a real dirty-flag trigger site. Actual task-to-shelf routing goes entirely through `TaskReviewCard.advance()`'s `onMove` path. Noted here so a future read of `route(_:to:)` doesn't get treated as a call site worth instrumenting.
+
+---
+
 ## 12. Test cases
 
 Extend `NoteForLaterTests/`. Currently only `HabitRollingStatsTests` and `ReceiptLineParserTests` exist — there is no scheduler coverage at all.

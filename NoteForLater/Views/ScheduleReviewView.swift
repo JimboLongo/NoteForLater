@@ -234,8 +234,15 @@ struct ScheduleReviewView: View {
     private func syncSchedule() async {
         guard let vm = viewModel else { return }
         if ScheduleDirtyState.shared.isDirty {
-            await vm.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
-            ScheduleDirtyState.shared.isDirty = false
+            let completedFully = await vm.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+            // Only clear the flag once the walk actually reached its
+            // stopping point — a fetchFreeSlots failure bails out early
+            // (see regenerateFromNow's own doc comment), and clearing
+            // here anyway would silently strand whatever it didn't get
+            // to until an unrelated edit happens to re-dirty it.
+            if completedFully {
+                ScheduleDirtyState.shared.isDirty = false
+            }
         } else {
             await vm.autoPlaceEligibleTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
         }
