@@ -121,19 +121,22 @@ The baseline bug (any divisible task returns `true` regardless of chunk size) is
 **Required — replace the `Bool` with a status enum:**
 ```swift
 enum SchedulingFitStatus {
+    /// No duration set at all — nothing to compare against the rule's
+    /// cap yet, so no fit judgment is possible either way.
+    case needsDuration
+    /// Divisible, but no minimum segment chosen yet ("Not Selected") —
+    /// same idea as `needsDuration`, for the divisible/segment question
+    /// instead of the duration one.
+    case needsMinimumSegment
     /// Genuinely too big for anything this rule could ever offer —
     /// duration/segment vs. the rule's own cap, a real comparison.
     case exceedsConstraint
-    /// Divisible, but no minimum segment chosen yet ("Not Selected") —
-    /// there's nothing to compare against the rule's cap, so no fit
-    /// judgment is possible either way.
-    case needsMinimumSegment
     /// Fits — comfortably within whatever the rule allows.
     case fits
 }
 
 func fitStatus(estimatedMinutes: Int, isDivisible: Bool, minimumSegmentMinutes: Int) -> SchedulingFitStatus {
-    guard estimatedMinutes > 0 else { return .exceedsConstraint } // see open question below
+    guard estimatedMinutes > 0 else { return .needsDuration }
     if isDivisible, minimumSegmentMinutes <= 0 { return .needsMinimumSegment }
     let minutesToCheck = isDivisible ? minimumSegmentMinutes : estimatedMinutes
     switch fillStrategy {
@@ -155,12 +158,13 @@ func canEverFit(estimatedMinutes: Int, isDivisible: Bool, minimumSegmentMinutes:
 
 Divisible cases use the **segment** test, not the whole-task test. A recurring window drains a large task across multiple occurrences; a whole-task test would gray out most large projects and defeat divisibility. A whole-task test would also produce a gray-out that flickers as `remainingMinutes` drains.
 
-**Task card caption picks off the status, not a single flat string:**
-- `.exceedsConstraint` → "Exceeds time constraint — will re-enable if this changes" (§3.2's caption).
-- `.needsMinimumSegment` → "Set a minimum segment first" — names the actual blocker instead of implying the task itself is too big.
-- `.fits` → no caption; toggle just reads enabled.
+The four cases map 1:1 onto the two existing attribute-review checks in `TaskItem` (`durationMissing` ↔ `.needsDuration`, `divisibleMissing` ↔ `.needsMinimumSegment`), plus the one genuine "no" (`.exceedsConstraint`) and the one genuine "yes" (`.fits`) — nothing left over, nothing double-counted. §3.3's "duration-less tasks are never eligible" is now just `fitStatus != .fits` (which `canEverFit` already gives for free) rather than a special-cased `estimatedMinutes > 0` guard bolted onto every strategy branch.
 
-⚠️ **Open question for review, not yet resolved:** where does `estimatedMinutes <= 0` belong? It's arguably a third "not ready to evaluate" case (no duration set at all — the same category as "not ready" `needsMinimumSegment`, just for the duration question instead of the divisible one), not a real "exceeds constraint." Bucketed it into `.exceedsConstraint` above only to keep exactly the three cases named, but that means a duration-less task gets the same (slightly inaccurate) "Exceeds time constraint" caption `needsMinimumSegment` was designed to avoid being wrong about. The alternative is a fourth case (`.needsDuration`, captioned "Set a duration first") — more consistent, but expands the enum beyond what was specified. Pick one before Phase 2 implements this.
+**Task card caption picks off the status, not a single flat string:**
+- `.needsDuration` → "Set a duration first."
+- `.needsMinimumSegment` → "Set a minimum segment first" — names the actual blocker instead of implying the task itself is too big.
+- `.exceedsConstraint` → "Exceeds time constraint — will re-enable if this changes" (§3.2's caption).
+- `.fits` → no caption; toggle just reads enabled.
 
 ### 3.2 Filter at read time — do not write
 
@@ -188,7 +192,7 @@ Caption when suppressed: **"Exceeds time constraint — will re-enable if this c
 
 **Current:** unchanged from baseline — still live at HEAD, not started. `guessedMinutes(for:)` and the `isEstimated` path in `pack()` (lines ~395, 401, 451, 465, 481) are fully intact; `fillToFit` in the current `canEverFit` (§3.1) returns `true` unconditionally, with no `estimatedMinutes > 0` check anywhere in it yet.
 
-`estimatedMinutes == 0` → `canEverFit` returns `false` for all strategies including `fillToFit`.
+`estimatedMinutes == 0` → `fitStatus` returns `.needsDuration` (§3.1) → `canEverFit` is `false` for all strategies including `fillToFit`, with no special-cased duration check needed at this layer — `.needsDuration` already isn't `.fits`.
 
 **Removes:** `guessedMinutes(for:)`, the `isEstimated` path in `pack()`, and `ScheduledBlock.isEstimatedDuration` display of `~` durations from the packer.
 
