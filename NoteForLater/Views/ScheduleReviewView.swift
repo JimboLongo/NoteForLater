@@ -205,7 +205,7 @@ struct ScheduleReviewView: View {
         vm.loadExistingBlocks(allBlocks)
         Task {
             await vm.loadCalendarEvents()
-            await vm.autoPlaceEligibleTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+            await syncSchedule()
         }
     }
 
@@ -221,11 +221,31 @@ struct ScheduleReviewView: View {
         )
     }
 
+    /// The routine per-appear/day-change sync, shared by every call site
+    /// below — normally just the light, purely-additive top-up
+    /// (`autoPlaceEligibleTasks`), same as always. Escalates to a full
+    /// `regenerateFromNow` exactly once whenever `ScheduleDirtyState`
+    /// says something happened elsewhere that the additive pass can't
+    /// fix on its own (see its own doc comment) — a task that's no
+    /// longer eligible for whatever rule originally placed it needs to
+    /// actually be cleared and re-walked, not topped up around — then
+    /// clears the flag so the next sync goes back to the light path
+    /// until something changes again. See spec §6.
+    private func syncSchedule() async {
+        guard let vm = viewModel else { return }
+        if ScheduleDirtyState.shared.isDirty {
+            await vm.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+            ScheduleDirtyState.shared.isDirty = false
+        } else {
+            await vm.autoPlaceEligibleTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+        }
+    }
+
     private func changeDate(by days: Int) async {
         guard let viewModel else { return }
         let newDate = Calendar.current.date(byAdding: .day, value: days, to: viewModel.targetDate) ?? viewModel.targetDate
         await viewModel.changeTargetDate(to: newDate, existingBlocks: allBlocks)
-        await viewModel.autoPlaceEligibleTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+        await syncSchedule()
     }
 
     /// Tapping a day (or a block) in `WeekTimelineView` lands here — jumps
@@ -235,14 +255,14 @@ struct ScheduleReviewView: View {
     private func jumpToDay(_ day: Date) async {
         guard let viewModel else { return }
         await viewModel.changeTargetDate(to: day, existingBlocks: allBlocks)
-        await viewModel.autoPlaceEligibleTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+        await syncSchedule()
         isShowingWeekView = false
     }
 
     private func goToToday() async {
         guard let viewModel else { return }
         await viewModel.changeTargetDate(to: .now, existingBlocks: allBlocks)
-        await viewModel.autoPlaceEligibleTasks(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+        await syncSchedule()
     }
 
     /// In-content header (not the system nav bar) so the full date reads

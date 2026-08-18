@@ -405,12 +405,14 @@ struct ShelfEditView: View {
         }
         showingSchedulePicker = false
         newlyAssignedRule = rule
+        ScheduleDirtyState.shared.isDirty = true
     }
 
     private func deleteRules(at offsets: IndexSet) {
         for index in offsets {
             modelContext.delete(rules[index])
         }
+        ScheduleDirtyState.shared.isDirty = true
     }
 }
 

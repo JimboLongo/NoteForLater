@@ -100,6 +100,10 @@ struct NamedScheduleEditView: View {
         schedule.startMinute = startMinute
         schedule.endHour = endHour
         schedule.endMinute = endMinute
+        // Every rule that references this schedule (on any shelf) shares
+        // its window — a save here can change what any of them actually
+        // means, even though nothing about the rules themselves changed.
+        ScheduleDirtyState.shared.isDirty = true
         dismiss()
     }
 

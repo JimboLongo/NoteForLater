@@ -99,6 +99,7 @@ struct TaskCardSheet: View {
     /// either way, same as before.
     private func toggleComplete() {
         task.setCompleted(!task.isCompleted, in: modelContext)
+        ScheduleDirtyState.shared.isDirty = true
         dismiss()
     }
 }

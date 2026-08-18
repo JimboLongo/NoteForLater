@@ -272,13 +272,13 @@ Threshold is `slack < 0` only. No buffer.
 
 ---
 
-## 6. Regeneration triggers
+## 6. Regeneration triggers — ✅ done, Phase 5
 
-**Current:** no reactive trigger. Regeneration runs only from the manual Regenerate button, Nightly Review's `advance()`, and calendar-appear (habits/recurring top-up only).
+**Current as of Phase 5:** `ScheduleReviewView`'s own appear/day-change sync used to mean exactly one thing (the purely-additive `autoPlaceEligibleTasks` — this section's original "Current" line describing "calendar-appear (habits/recurring top-up only)" was already stale by the time this section was written, since that top-up had already grown to cover every shelf's rule-eligible tasks, not just habits/recurring). It now means one of two things depending on `ScheduleDirtyState`, per §6.2 below.
 
-### 6.1 Dirty flag
+### 6.1 Dirty flag — ✅ done
 
-New `@Observable` singleton, mirroring `InboxSearchState` / `NightlyReviewLaunchState`:
+`Services/ScheduleDirtyState.swift`, mirroring `InboxSearchState` / `NightlyReviewLaunchState`:
 
 ```swift
 @Observable final class ScheduleDirtyState {
@@ -287,33 +287,39 @@ New `@Observable` singleton, mirroring `InboxSearchState` / `NightlyReviewLaunch
 }
 ```
 
-**Set `isDirty = true`:**
-- Task card **Save** (any variant: "Save", "Save & Move", "Save & Submit", "Save, Move & Submit") when `hasChanges` is true
-- Mark Complete / Mark Incomplete
-- Discard
-- Task created on a shelf, or moved between shelves
-- Any `SchedulingRule` create / edit / delete
-- Any `NamedSchedule` edit or delete
-- Shelf deletion
-- Inbox bulk submit
+**Set `isDirty = true`** — verified against current code, not assumed from the list below:
+- `TaskReviewCard.advance()` (the single shared commit point behind Save/Save & Move/Save & Submit/Skip across `TaskCardSheet`, `TaskReviewQueueSheet`, and Nightly Review's own Today/Inbox steps — they all wrap this one view), gated on `hasChanges || isMoving` — a bare Skip/Next with neither leaves the flag alone.
+- `TaskReviewCard`'s own Discard confirmation.
+- Mark Complete / Mark Incomplete, at every real entry point: `TaskCardSheet.toggleComplete`, `TaskReviewQueueSheet.markComplete`, `DailyDigestCheckInView.blockRow`, and the task branch only of `ScheduleReviewViewModel.toggleComplete` (the calendar's own tap-to-complete circle) — **not** its habit branch, since a habit occurrence's completion never touches shelf-task scheduling at all. **Not** the 2-Minute Task shelf's own checklist toggle either (`DayTimelineGridView.twoMinuteTasksSection`, `NightlyReviewView.twoMinuteTaskRow`) — that shelf is permanently excluded from the packer's candidate pool by design (see `AISchedulingService`'s own doc comment), so completing one of its tasks can never be relevant to anything this flag exists to catch.
+- `SchedulingRule` create (`ShelfEditView.assignSchedule`) / edit (`SchedulingRuleEditView.save`) / delete (`ShelfEditView.deleteRules`).
+- `NamedSchedule` edit (`NamedScheduleEditView.save`) / delete (`SchedulesListView.deleteSchedules`).
+- Shelf deletion (`ShelvesView.deleteShelves`).
+
+**Two items from the original draft of this list don't correspond to anything real, found while wiring this up — not silently dropped:**
+- **"Task created on a shelf, or moved between shelves"** — already fully covered by `TaskReviewCard.advance()`'s `isMoving` check above; there's no separate call site for this.
+- **"Inbox bulk submit"** — no such feature exists in the current codebase, and `InboxViewModel.route(_:to:)` (the method this bullet presumably meant) is dead code, never called from anywhere. The actual task-to-shelf routing UI is `TaskReviewCard.advance()`, already covered.
 
 **Do not set:** Cancel (restores the snapshot — net zero change).
 
-### 6.2 Flush
+### 6.2 Flush — ✅ done
 
-`ScheduleReviewView.onAppear` and on viewed-day change: if dirty → `await regenerateFromNow(...)` → clear flag.
+`ScheduleReviewView.setupIfNeeded`/`changeDate`/`jumpToDay`/`goToToday` (four call sites, factored into one shared `syncSchedule()`): if `ScheduleDirtyState.shared.isDirty` → `await regenerateFromNow(...)` → clear the flag; **otherwise** (the normal case) → `await autoPlaceEligibleTasks(...)`, unchanged from before this section existed. The original draft's "if dirty → regenerateFromNow → clear flag" was correct as far as it went, but didn't name what happens the rest of the time — `autoPlaceEligibleTasks` is the load-bearing default this section's flush escalates *away from*, not something `regenerateFromNow` simply replaced.
 
-Deferred rather than immediate because `regenerateFromNow` walks up to 30 days with one `fetchFreeSlots` call per day. Firing on the Save tap either blocks sheet dismissal or runs a long async job behind a dismissing sheet.
+Deferred rather than immediate because `regenerateFromNow` walks a variable number of days (now bounded by stall detection, not a flat 30 — see §6.4) with one `fetchFreeSlots` call per day. Firing on the Save tap either blocks sheet dismissal or runs a long async job behind a dismissing sheet.
 
-Nightly Review clears the flag on completion — `regenerateSingleDay` already covers it.
+Nightly Review's own Today→Tomorrow handoff clears the flag right after its own unconditional `regenerateFromNow` call — pure hygiene (that walk already did everything a dirty-triggered one would), not required for correctness, since the handoff never checked the flag to begin with.
 
-### 6.3 Use `regenerateFromNow`, not `regenerateSingleDay`
+### 6.3 Use `regenerateFromNow`, not `regenerateSingleDay` — moot, `regenerateSingleDay` no longer exists
 
-Edits that push work to a later day (untoggling a weekday schedule so a task moves to the weekend) require the multi-day walk. `regenerateSingleDay` never walks forward and would drop the overflow.
+This section's whole premise predates a change made earlier the same session this spec was first written: Nightly Review's Today→Tomorrow handoff already calls `regenerateFromNow` unconditionally (see §6.2), and `regenerateSingleDay` was deleted as dead code once nothing called it anymore. There is only one regenerate function left — nothing to choose between.
 
-### 6.4 Horizon stays at 30 days
+### 6.4 Horizon — ✅ resolved: habit/task split + stall detection, as of Phase 5
 
-`maxDays = 30` is retained. Note for future work: `hasSchedulableHabits` is `!habits.isEmpty` computed once outside the loop, so for any user with a habit the day cap is the **only** terminating condition. `hasRemainingSchedulableWork` also never goes false when permanently-unplaceable tasks exist — which §2.2 and §3.3 make a normal state. **Do not raise or remove the cap without first fixing both conditions**; the loop will not terminate.
+**This section's original text described a single `maxDays = 30` cap shared by both habits and tasks — that's no longer the design.** `1bd15d3` (before this spec existed) split the walk's two termination conditions apart, exactly along the line this section's original warning was drawing: `hasSchedulableHabits` (habits, `!habits.isEmpty`, checked once outside the loop — genuinely never goes false on its own, by design, since a habit recurs forever) got its own separate `habitPopulationDays = 30`, a real permanent horizon choice, not a safety net. `hasRemainingSchedulableWork` (tasks) was left paired with a raw day-count backstop, `taskSafetyCapDays`, which that same commit set to 365 — high enough that a genuinely-stuck-but-still-"remaining" task (the exact failure mode this section warned about — `hasRemainingSchedulableWork` never goes false when permanently-unplaceable tasks exist, which §2.2/§3.3 make a normal state) could still burn 365 `fetchFreeSlots` calls before the walk gave up, a real cost that gets paid far more often once Phase 5's dirty-flag flush makes `regenerateFromNow` fire on ordinary edits instead of only on deliberate, occasional regenerates.
+
+**Current, replacing the flat cap:** the task side of the walk now stops via **stall detection** (`taskStallThresholdDays = 14`, `ScheduleReviewViewModel`) instead of a raw day count — `dayIndex < N` became `consecutiveDaysWithoutTaskPlacement < 14`, reset to 0 any day that places at least one task block, incremented otherwise. This terminates correctly regardless of how far out the walk could theoretically go, for a structural reason rather than a chosen number: the candidate task pool for a single call is finite and only ever shrinks (a placement either fully schedules a task, permanently removing it via `isScheduled`, or drains `remainingMinutes` toward zero, a bounded quantity) — so the walk can only have finitely many "progress" days total, and the stall counter bounds how many *consecutive* non-progress days can separate any two of them. Both together guarantee termination without needing an outer day cap at all. 14 was chosen, not defaulted to: a rule restricted to a single weekday can legitimately go up to 6 days between chances to place anything, and doubling that leaves margin for a rule that's *also* narrow some other way (a tight eligible-hours window, a task-count cap already claimed by other shelves that day) without waiting anywhere near as long as 365 ever did.
+
+Habits are untouched by any of this — `habitPopulationDays` stays a flat 30-day cap, unconditionally, since "zero habit blocks placed on some day" was never itself a signal of anything going wrong the way an empty day is for a finite task backlog.
 
 ---
 

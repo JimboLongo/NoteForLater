@@ -248,6 +248,13 @@ struct NightlyReviewView: View {
                 // has a real slot. A locked block, on any day, is never
                 // touched by any of this.
                 await tomorrowViewModel.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
+                // This walk just did everything a dirty-triggered one
+                // would (see `ScheduleDirtyState`) — clearing here is
+                // pure hygiene, so the next time the Calendar tab syncs
+                // it goes back to the light additive top-up instead of
+                // needlessly re-running a second full regenerate for a
+                // flag this pass already made moot.
+                ScheduleDirtyState.shared.isDirty = false
             }
         }
     }
@@ -1706,8 +1713,22 @@ struct TaskReviewCard: View {
     /// What Next/Skip (or a flick either direction) actually does — a
     /// shelf picked in `shelfRow` is only ever committed here, never on
     /// the tap that selected it, so this is the one place that can move
-    /// the task at all.
+    /// the task at all. The single shared "commit" point behind every
+    /// Save/Save & Move/Save & Submit/Skip variant across every screen
+    /// that presents this card (`TaskCardSheet`, `TaskReviewQueueSheet`,
+    /// Nightly Review's own Today/Inbox steps) — see §6.1.
     private func advance() {
+        let isMoving = selectedShelf != nil && selectedShelf?.id != task.shelf?.id
+        if hasChanges || isMoving {
+            // A shelf move always counts, even on its own: `hasChanges`
+            // deliberately excludes it (see its own doc comment —
+            // "merely tapping a shelf to preview it" isn't itself an
+            // edit), but actually committing that move here is a real
+            // change regardless of whether anything else on the card
+            // was touched. A bare Skip/Next with neither is a true
+            // no-op and correctly leaves the flag alone.
+            ScheduleDirtyState.shared.isDirty = true
+        }
         if let selectedShelf, selectedShelf.id != task.shelf?.id {
             onMove(selectedShelf)
         } else if task.isMissingAttributes {
@@ -1826,6 +1847,7 @@ struct TaskReviewCard: View {
                 titleVisibility: .visible
             ) {
                 Button("Delete", role: .destructive) {
+                    ScheduleDirtyState.shared.isDirty = true
                     fly(direction: -1, action: onDiscard)
                 }
             } message: {

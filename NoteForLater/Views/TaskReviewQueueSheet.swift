@@ -180,6 +180,7 @@ struct TaskReviewQueueSheet: View {
 
     private func markComplete() {
         currentTask?.markComplete(in: modelContext)
+        ScheduleDirtyState.shared.isDirty = true
         completeBurstID = (completeBurstID ?? 0) + 1
         // Let the burst actually play before the card flies off to the
         // next task — advancing immediately would tear it down unseen.

@@ -97,6 +97,7 @@ struct DailyDigestCheckInView: View {
     private func blockRow(_ block: ScheduledBlock) -> some View {
         Button {
             block.task?.setCompleted(true, in: modelContext)
+            ScheduleDirtyState.shared.isDirty = true
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "circle")

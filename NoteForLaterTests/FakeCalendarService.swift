@@ -17,8 +17,17 @@ final class FakeCalendarService: CalendarServiceProtocol {
     var busyBlocksToReturn: [TimeSlot] = []
     var eventsToReturn: [CalendarEventSummary] = []
     private(set) var deletedEventIDs: [String] = []
+    /// How many times `fetchFreeSlots` was actually called — the one
+    /// external call a multi-day walk makes once per day it visits, so
+    /// counting it is how a test proves the walk stopped where it
+    /// should (stall detection) rather than running away to some much
+    /// larger number.
+    private(set) var fetchFreeSlotsCallCount = 0
 
-    func fetchFreeSlots(for date: Date) async throws -> [TimeSlot] { freeSlotsToReturn }
+    func fetchFreeSlots(for date: Date) async throws -> [TimeSlot] {
+        fetchFreeSlotsCallCount += 1
+        return freeSlotsToReturn
+    }
     func fetchBusyBlocks(for date: Date) async throws -> [TimeSlot] { busyBlocksToReturn }
     func fetchEvents(for date: Date) async throws -> [CalendarEventSummary] { eventsToReturn }
     func pushEvent(for block: ScheduledBlock) async throws -> String { "fake-event-id" }

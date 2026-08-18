@@ -119,6 +119,7 @@ struct ShelvesView: View {
                 continue
             }
             modelContext.delete(shelf)
+            ScheduleDirtyState.shared.isDirty = true
         }
     }
 

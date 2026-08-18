@@ -107,6 +107,7 @@ struct SchedulingRuleEditView: View {
         rule.maxTaskCount = maxTaskCount
         rule.maxMinutesPerTask = maxMinutesPerTask
         rule.maxDurationTaskCountEnabled = maxDurationTaskCountEnabled
+        ScheduleDirtyState.shared.isDirty = true
         dismiss()
     }
 }

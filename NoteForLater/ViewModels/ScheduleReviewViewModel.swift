@@ -107,9 +107,9 @@ final class ScheduleReviewViewModel {
     /// flip through each future day themselves. A task that can never
     /// fit any rule it's eligible for is already excluded from that
     /// check (see its own doc comment), so it's never what keeps this
-    /// walking — only real, placeable backlog is. `taskSafetyCapDays` is
-    /// only a backstop against a genuine bug in that guarantee, not a
-    /// real limit this should ever hit in practice.
+    /// walking — only real, placeable backlog is, bounded by
+    /// `taskStallThresholdDays` rather than a flat day-count cap (see
+    /// its own doc comment, and §6.4).
     ///
     /// Every block already on a given day (task or habit, proposed or
     /// approved) has its time carved out of that day's `freeSlots`
@@ -144,16 +144,20 @@ final class ScheduleReviewViewModel {
             cursorDay = calendar.date(byAdding: .day, value: 1, to: cursorDay) ?? cursorDay
         }
         var dayIndex = 0
-        let taskSafetyCapDays = 365
         var allBlocksNow = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
         var anyInserted = false
+        // See `taskStallThresholdDays` — bounds the walk without a flat
+        // day-count cap. Reset to 0 any day that places at least one
+        // task block, incremented otherwise.
+        var consecutiveDaysWithoutTaskPlacement = 0
 
-        while dayIndex == 0 || (dayIndex < taskSafetyCapDays && hasRemainingSchedulableWork(shelves: shelves)) {
+        while dayIndex == 0 || (consecutiveDaysWithoutTaskPlacement < Self.taskStallThresholdDays && hasRemainingSchedulableWork(shelves: shelves)) {
             guard var freeSlots = try? await calendarService.fetchFreeSlots(for: cursorDay) else { break }
             let dayBlocks = allBlocksNow.filter { calendar.isDate($0.date, inSameDayAs: cursorDay) }
             for existing in dayBlocks {
                 freeSlots = subtracting(existing.startTime..<existing.endTime, from: freeSlots)
             }
+            var placedTaskBlockToday = false
             if let newBlocks = try? await schedulingService.generateProposedSchedule(
                 shelves: shelves,
                 habits: habits,
@@ -167,10 +171,12 @@ final class ScheduleReviewViewModel {
                 }
                 allBlocksNow += newBlocks
                 anyInserted = true
+                placedTaskBlockToday = newBlocks.contains { $0.task != nil }
                 if calendar.isDate(cursorDay, inSameDayAs: targetDate) {
                     blocks = (blocks + newBlocks).sorted { $0.startTime < $1.startTime }
                 }
             }
+            consecutiveDaysWithoutTaskPlacement = placedTaskBlockToday ? 0 : consecutiveDaysWithoutTaskPlacement + 1
             cursorDay = calendar.date(byAdding: .day, value: 1, to: cursorDay) ?? cursorDay
             dayIndex += 1
         }
@@ -450,17 +456,20 @@ final class ScheduleReviewViewModel {
         // shelf's rules and genuinely able to fit it (see `SchedulingRule
         // .canEverFit`), so it's guaranteed to go false once everything
         // real is placed — a task that can never fit anywhere is already
-        // excluded, not counted as "remaining" forever. `taskSafetyCapDays`
-        // is only a backstop against a genuine bug in that guarantee, not
-        // a real limit this should ever hit.
+        // excluded, not counted as "remaining" forever.
         let habitPopulationDays = 30
-        let taskSafetyCapDays = 365
         var newBlocks: [ScheduledBlock] = []
         let keepWalkingForHabits = hasSchedulableHabits(habits: habits)
+        // Bounds the *task* side of the walk without a flat day-count
+        // cap — see `taskStallThresholdDays`. Reset to 0 any day that
+        // places at least one task block (habit placements don't count;
+        // this is purely about whether the task backlog is making
+        // progress), incremented otherwise.
+        var consecutiveDaysWithoutTaskPlacement = 0
 
         while dayIndex == 0
             || (dayIndex < habitPopulationDays && keepWalkingForHabits)
-            || (dayIndex < taskSafetyCapDays && hasRemainingSchedulableWork(shelves: shelves)) {
+            || (consecutiveDaysWithoutTaskPlacement < Self.taskStallThresholdDays && hasRemainingSchedulableWork(shelves: shelves)) {
             do {
                 var freeSlots = try await calendarService.fetchFreeSlots(for: cursorDay)
                 if dayIndex == 0 && calendar.isDateInToday(cursorDay) {
@@ -502,6 +511,11 @@ final class ScheduleReviewViewModel {
                 for block in dayBlocks {
                     modelContext.insert(block)
                     newBlocks.append(block)
+                }
+                if dayBlocks.contains(where: { $0.task != nil }) {
+                    consecutiveDaysWithoutTaskPlacement = 0
+                } else {
+                    consecutiveDaysWithoutTaskPlacement += 1
                 }
             } catch {
                 errorMessage = error.localizedDescription
@@ -555,17 +569,35 @@ final class ScheduleReviewViewModel {
     /// user to notice and fix (a duration too big, a rule too narrow)
     /// rather than silently consuming the walk's time.
     ///
+    /// How many consecutive days the task-side walk (`regenerateFromNow`,
+    /// `autoPlaceEligibleTasks`) will place zero task blocks — while
+    /// `hasRemainingSchedulableWork` is still `true` — before giving up,
+    /// in place of a flat day-count cap (see §6.4). A weekday-restricted
+    /// rule (e.g. "Fridays only") can legitimately go up to 6 days
+    /// between chances to place anything; doubling that gives margin for
+    /// a rule that's *also* narrow in some other way (a tight eligible-
+    /// hours window, a low task-count cap already claimed by other
+    /// shelves) without waiting anywhere near as long as a raw day count
+    /// ever had to. Task placement, not habit placement, is what resets
+    /// this — `regenerateFromNow`'s own habit walk has no stall concept
+    /// at all (a habit recurs forever, so "zero habit blocks placed
+    /// today" is never a sign of anything going wrong the way an empty
+    /// day is for a finite task backlog); it's governed purely by
+    /// `habitPopulationDays` instead.
+    private static let taskStallThresholdDays = 14
+
     /// Deliberately does NOT call `TaskItem.isEffectivelyEligible` —
     /// inlines the same check against `remainingMinutes` instead of
     /// `estimatedMinutes`, and that's load-bearing, not a style
     /// preference. This function is one of only two conditions that ever
-    /// stop `regenerateFromNow`'s walk (see §6.4 — the other is the
-    /// `taskSafetyCapDays` backstop), so it has to be able to go `false`
-    /// on its own, without depending on `isScheduled` ever getting set
-    /// correctly elsewhere. `rule.canEverFit`'s underlying `fitStatus`
-    /// returns `.needsDuration` (not `.fits`) the moment its `estimatedMinutes`
-    /// argument is `<= 0` — so passing `remainingMinutes` here means a
-    /// fully-drained task (`remainingMinutes == 0`) always evaluates as
+    /// stop `regenerateFromNow`'s walk (see §6.4 — the other is
+    /// `taskStallThresholdDays`, not a flat day-count backstop), so it
+    /// has to be able to go `false` on its own, without depending on
+    /// `isScheduled` ever getting set correctly elsewhere. `rule
+    /// .canEverFit`'s underlying `fitStatus` returns `.needsDuration`
+    /// (not `.fits`) the moment its `estimatedMinutes` argument is
+    /// `<= 0` — so passing `remainingMinutes` here means a fully-drained
+    /// task (`remainingMinutes == 0`) always evaluates as
     /// not-fitting-anything and drops out of "remaining work" on that
     /// alone, independent of whatever `isScheduled` happens to be. Pass
     /// `estimatedMinutes` (the task's original, undrained size) instead,
@@ -1016,6 +1048,10 @@ final class ScheduleReviewViewModel {
                 } else {
                     removeCompletionRecord(for: task)
                 }
+                // Task-side completion only — a habit occurrence's own
+                // completion (below) never touches shelf-task scheduling
+                // at all, so it has nothing to do with this flag.
+                ScheduleDirtyState.shared.isDirty = true
             }
         }
         guard let habit = block.habit else { return }

@@ -13,6 +13,14 @@ import SwiftData
 /// Phase 4: `TaskItem.slack`/`isAtRisk`/`atRiskBlocker`, `taskOrdering`'s
 /// slack-based primary sort tier — §12 cases 11-14 (ordering), plus
 /// slack/at-risk boundary and blocker-naming coverage.
+/// Phase 5: stall detection (§6.4, replacing the old flat 365-day
+/// `taskSafetyCapDays`) and the ViewModel-level case for why
+/// `ScheduleDirtyState`'s flush has to escalate to `regenerateFromNow`
+/// rather than just running `autoPlaceEligibleTasks` again — §6. Full
+/// UI-level coverage of the dirty flag's ~10 trigger sites (Views only,
+/// no ViewModel logic of their own beyond a one-line flag set) isn't
+/// covered here — this suite has no UI-testing harness, only SwiftData-
+/// backed unit tests.
 final class SchedulingEngineTests: XCTestCase {
     private var container: ModelContainer!
     private var context: ModelContext!
@@ -636,5 +644,127 @@ final class SchedulingEngineTests: XCTestCase {
 
         XCTAssertFalse(task.isAtRisk(asOf: now, calendar: calendar))
         XCTAssertNil(task.atRiskBlocker(asOf: now, calendar: calendar))
+    }
+
+    // MARK: - §6.4 — stall detection replaces the flat 365-day task-walk cap
+
+    /// `hasRemainingSchedulableWork` only checks `isEligible` + `canEverFit`
+    /// — it doesn't know about a rule's own day-of-week restriction. A
+    /// rule on a `NamedSchedule` whose `daysOfWeek` matches nothing
+    /// (misconfigured, or every day manually unchecked) is exactly the
+    /// mismatch that made the old flat 365-day cap expensive: the task
+    /// stays "remaining" forever, but the packer's own per-rule loop
+    /// (`effectiveDaysOfWeek.contains(weekday)`) skips this rule on
+    /// every single day, so nothing is ever actually placed. Stall
+    /// detection has to be what stops this, not the day-of-week check
+    /// itself (which has no way to know "no day will ever match" ahead
+    /// of time without literally trying every day).
+    func test_autoPlaceEligibleTasks_stallDetection_stopsAtThreshold_notOldFixedCap() async throws {
+        let shelf = Shelf(name: "Test Shelf")
+        context.insert(shelf)
+        let schedule = NamedSchedule(name: "Never", daysOfWeek: [], startHour: 0, startMinute: 0, endHour: 23, endMinute: 59)
+        context.insert(schedule)
+        let rule = SchedulingRule(shelf: shelf, fillStrategy: .fillToFit)
+        rule.namedSchedule = schedule
+        context.insert(rule)
+        shelf.schedulingRules = [rule]
+
+        let task = TaskItem(title: "Stuck Task", shelf: shelf, estimatedMinutes: 30)
+        task.setEligible(true, for: rule)
+        context.insert(task)
+        shelf.tasks = [task]
+
+        // Genuinely in the future relative to the real wall clock, not a
+        // fixed 2026 date — `autoPlaceEligibleTasks` early-returns for
+        // any day in the past (`targetDate >= startOfDay(for: .now)`),
+        // which would make this test pass for the wrong reason (zero
+        // calls at all) once 2026 itself becomes the past.
+        let testDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+        let calendarService = FakeCalendarService()
+        calendarService.freeSlotsToReturn = [businessHoursSlot(on: testDay)]
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: testDay)
+
+        await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+
+        // 14 == the production `taskStallThresholdDays` (private to
+        // ScheduleReviewViewModel, so asserted here as a literal) — the
+        // walk visiting exactly this many days, not 365 and not
+        // unboundedly many, is the actual thing this test is proving.
+        XCTAssertEqual(calendarService.fetchFreeSlotsCallCount, 14)
+        XCTAssertFalse(task.isScheduled)
+        XCTAssertEqual(task.remainingMinutes, 30)
+    }
+
+    // MARK: - §6 — why the dirty flag has to escalate to regenerateFromNow
+
+    /// `autoPlaceEligibleTasks` is additive-plus-a-narrow-trim, not purely
+    /// additive: `trimOverflowingRuleBlocksAcrossFutureDays` does clear a
+    /// block whose task has since gone ineligible for the rule that placed
+    /// it, or that now violates that rule's own count/duration cap — but
+    /// only by walking each day's `applicableRules`, which is itself
+    /// filtered to rules whose `effectiveDaysOfWeek` still covers that
+    /// day. A block stranded on a day its rule's schedule no longer
+    /// covers is invisible to that walk, so it's never reached. This is
+    /// the concrete case `ScheduleDirtyState`'s escalation exists for: a
+    /// task placed under a rule, then the rule's own schedule edited to
+    /// drop that weekday (the equivalent of an edit on the rule/schedule
+    /// itself) — the light path alone leaves the stale block exactly
+    /// where it is forever; only `regenerateFromNow`'s real clear-and-
+    /// rewalk actually fixes it.
+    func test_autoPlaceAlone_leavesStalePlacement_regenerateFromNow_fixesIt() async throws {
+        // Genuinely in the future relative to the real wall clock — both
+        // autoPlaceEligibleTasks's own past-day guard and
+        // regenerateFromNow's `cutoff = max(targetDate, .now)` need this
+        // to actually be ahead of "now," or the fixture's premise (a
+        // block that's still there to go stale) breaks for reasons
+        // unrelated to what this test is checking.
+        let testDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+
+        let calendarService = FakeCalendarService()
+        calendarService.freeSlotsToReturn = [businessHoursSlot(on: testDay)]
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: testDay)
+
+        // Place it once while still eligible.
+        await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+        XCTAssertTrue(task.isScheduled, "fixture invalid — task must actually get placed first")
+
+        // Simulate the edit that would have set ScheduleDirtyState.isDirty
+        // in the real app: the rule's own schedule is narrowed so it no
+        // longer covers the weekday the block already landed on (task
+        // eligibility itself is untouched). This is deliberately NOT an
+        // eligibility toggle — trimOverflowingRuleBlocksAcrossFutureDays
+        // already sweeps those (see its "task never marked eligible for
+        // this specific rule" cleanup), so that scenario can't
+        // demonstrate the gap this test is about. A schedule-window
+        // change is different: trimOverflowingRuleBlocks only inspects
+        // rules whose `effectiveDaysOfWeek` still includes the day being
+        // swept (see its `applicableRules` filter), so once testDay's
+        // weekday is dropped, this rule is skipped for testDay entirely
+        // and its stale block is invisible to that sweep.
+        let testWeekday = calendar.component(.weekday, from: testDay)
+        rule.namedSchedule?.daysOfWeek = [1, 2, 3, 4, 5, 6, 7].filter { $0 != testWeekday }
+
+        // The light path alone must NOT be able to fix this — proving
+        // why a purely-additive top-up can't be the only thing that
+        // ever runs.
+        await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+        XCTAssertTrue(task.isScheduled, "autoPlaceEligibleTasks incorrectly cleared a stale block — its per-day rule sweep is only supposed to reach days a rule's own schedule still covers")
+
+        // The escalation path — what ScheduleDirtyState.isDirty actually
+        // triggers — must fix it.
+        await viewModel.regenerateFromNow(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+        XCTAssertFalse(task.isScheduled, "regenerateFromNow should have cleared the block once its rule no longer covers that day")
+    }
+
+    // MARK: - ScheduleDirtyState sanity
+
+    func test_scheduleDirtyState_isASingleton_defaultsFalse() {
+        ScheduleDirtyState.shared.isDirty = false // reset in case another test left it set
+        XCTAssertFalse(ScheduleDirtyState.shared.isDirty)
+        ScheduleDirtyState.shared.isDirty = true
+        XCTAssertTrue(ScheduleDirtyState.shared.isDirty, "must be the same shared instance every time it's accessed")
+        ScheduleDirtyState.shared.isDirty = false // leave it clean for any other test that reads it
     }
 }

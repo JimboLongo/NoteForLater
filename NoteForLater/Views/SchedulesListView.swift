@@ -60,6 +60,12 @@ struct SchedulesListView: View {
         for index in offsets {
             modelContext.delete(schedules[index])
         }
+        // Every rule that referenced a deleted schedule is left orphaned
+        // (`.nullify`, not cascade-deleted — see spec §9) rather than
+        // silently removed, which means it stops applying to anything at
+        // all — a real change to what's schedulable, even though no
+        // rule's own fields were touched.
+        ScheduleDirtyState.shared.isDirty = true
     }
 
     private func moveSchedules(from source: IndexSet, to destination: Int) {
