@@ -161,7 +161,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
                 // candidate for it, full stop — see this method's doc
                 // comment.
                 .filter { $0.isEffectivelyEligible(for: rule) }
-                .sorted { taskOrdering($0, $1, asOf: date, calendar: calendar) }
+                .sorted { Self.taskOrdering($0, $1, asOf: date, calendar: calendar) }
 
             // Every task block already sitting inside this rule's own
             // window — whichever call actually placed it — counts against
@@ -580,7 +580,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
     /// to be chopped up to do the same — so, all else equal, one 2-hour
     /// task is preferred over four 30-minute divisible ones for filling
     /// a 2-hour window, rather than fragmenting it four ways.
-    private func taskOrdering(_ lhs: TaskItem, _ rhs: TaskItem, asOf date: Date, calendar: Calendar) -> Bool {
+    static func taskOrdering(_ lhs: TaskItem, _ rhs: TaskItem, asOf date: Date, calendar: Calendar) -> Bool {
         switch (lhs.slack(asOf: date, calendar: calendar), rhs.slack(asOf: date, calendar: calendar)) {
         case let (lhsSlack?, rhsSlack?) where lhsSlack != rhsSlack:
             return lhsSlack < rhsSlack
@@ -603,7 +603,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
         return !lhs.isDivisible && rhs.isDivisible
     }
 
-    private func priorityRank(_ priority: Priority) -> Int {
+    static func priorityRank(_ priority: Priority) -> Int {
         switch priority {
         case .high: return 3
         case .medium: return 2

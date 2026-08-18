@@ -113,7 +113,7 @@ struct ScheduleReviewView: View {
             .sheet(item: $pickerTarget) { block in
                 if let viewModel {
                     ReplacementPickerSheet(
-                        candidates: viewModel.replaceCandidates(from: allTasks, excluding: block),
+                        candidates: viewModel.replacementCandidates(from: allTasks, for: .occupiedBlock(block)),
                         onPick: { chosen in
                             viewModel.manualReplace(block, with: chosen)
                             pickerTarget = nil

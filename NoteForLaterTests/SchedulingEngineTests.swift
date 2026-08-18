@@ -794,4 +794,96 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertTrue(ScheduleDirtyState.shared.isDirty, "must be the same shared instance every time it's accessed")
         ScheduleDirtyState.shared.isDirty = false // leave it clean for any other test that reads it
     }
+
+    // MARK: - §8 — the consolidated replacement/insertion candidate filter
+
+    // NOTE: every test below is `async` even though `replacementCandidates`
+    // itself is synchronous, and they must stay that way. Constructing a
+    // `ScheduleReviewViewModel` inside a non-async XCTest method crashes
+    // the whole test runner with a malloc "pointer being freed was not
+    // allocated" before a single assertion runs — reproduced with a probe
+    // test whose entire body was one `ScheduleReviewViewModel.init` and
+    // nothing else, so it's nothing to do with this filter or these
+    // fixtures. Every pre-existing viewmodel test in this file happens to
+    // be async for its own reasons (it awaits a real async method), which
+    // is why this never surfaced before.
+
+    /// Builds a 60-minute block on `testDay` at 10am, occupied by its own
+    /// task, plus the viewmodel that owns the filter under test.
+    private func makeOccupiedBlock(on testDay: Date, shelf: Shelf, rule: SchedulingRule) -> (block: ScheduledBlock, viewModel: ScheduleReviewViewModel) {
+        let occupant = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        let start = calendar.date(byAdding: .hour, value: 10, to: testDay)!
+        let block = ScheduledBlock(date: testDay, startTime: start, endTime: calendar.date(byAdding: .hour, value: 1, to: start)!, task: occupant)
+        occupant.isScheduled = true
+        context.insert(block)
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: testDay)
+        return (block, viewModel)
+    }
+
+    /// The core §8 gap: pre-Phase-7 the picker offered any unscheduled
+    /// task on a shelf with enabled rules, whether or not the task was
+    /// actually toggled eligible for a rule covering that window.
+    func test_replacementCandidates_excludesTaskNotEligibleForAnyCoveringRule() async {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let (block, viewModel) = makeOccupiedBlock(on: testDay, shelf: shelf, rule: rule)
+
+        let eligible = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 30, isDivisible: false, minimumSegmentMinutes: 0)
+        // Same shelf, same everything — just never toggled in.
+        let notToggledIn = TaskItem(title: "Not Eligible", shelf: shelf, estimatedMinutes: 30)
+        context.insert(notToggledIn)
+        shelf.tasks = (shelf.tasks ?? []) + [notToggledIn]
+
+        let candidates = viewModel.replacementCandidates(from: [eligible, notToggledIn], for: .occupiedBlock(block))
+
+        XCTAssertTrue(candidates.contains { $0.id == eligible.id })
+        XCTAssertFalse(candidates.contains { $0.id == notToggledIn.id }, "a task never toggled eligible for any rule covering this window must not be offered")
+    }
+
+    /// §8's duration check — a task that can't fit the block it would be
+    /// taking over isn't a real candidate for it.
+    func test_replacementCandidates_excludesTaskLongerThanTheBlock() async {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let (block, viewModel) = makeOccupiedBlock(on: testDay, shelf: shelf, rule: rule)
+
+        let fits = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        let tooBig = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 90, isDivisible: false, minimumSegmentMinutes: 0)
+        // Divisible with a segment floor that does fit — allowed, since
+        // only one segment has to land in this block.
+        let divisibleFits = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 240, isDivisible: true, minimumSegmentMinutes: 30)
+
+        let candidates = viewModel.replacementCandidates(from: [fits, tooBig, divisibleFits], for: .occupiedBlock(block))
+
+        XCTAssertTrue(candidates.contains { $0.id == fits.id }, "exactly-fits must qualify")
+        XCTAssertFalse(candidates.contains { $0.id == tooBig.id }, "90 minutes can't occupy a 60-minute block")
+        XCTAssertTrue(candidates.contains { $0.id == divisibleFits.id }, "divisible with a 30-min floor fits a 60-min block one segment at a time")
+    }
+
+    /// The `.freeSlot` context differs from `.occupiedBlock` in its
+    /// exclusions only — no duration check (insertBlock sizes the block
+    /// to the task), and already-scheduled tasks never qualify since
+    /// there's nothing here to trade places with.
+    func test_replacementCandidates_freeSlot_excludesScheduled_andHonorsInboxFlag() async {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: testDay)
+        let slotStart = calendar.date(byAdding: .hour, value: 10, to: testDay)!
+
+        let unscheduled = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 30, isDivisible: false, minimumSegmentMinutes: 0)
+        let alreadyScheduled = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 30, isDivisible: false, minimumSegmentMinutes: 0)
+        alreadyScheduled.isScheduled = true
+        // No shelf at all — an unsorted Inbox task.
+        let inboxTask = TaskItem(title: "Unsorted", estimatedMinutes: 30)
+        context.insert(inboxTask)
+
+        let pool = [unscheduled, alreadyScheduled, inboxTask]
+        let withInbox = viewModel.replacementCandidates(from: pool, for: .freeSlot(startTime: slotStart, includingInbox: true))
+        let withoutInbox = viewModel.replacementCandidates(from: pool, for: .freeSlot(startTime: slotStart, includingInbox: false))
+
+        XCTAssertTrue(withInbox.contains { $0.id == unscheduled.id })
+        XCTAssertFalse(withInbox.contains { $0.id == alreadyScheduled.id }, "an empty slot has nothing to swap with, so a scheduled task never qualifies")
+        XCTAssertTrue(withInbox.contains { $0.id == inboxTask.id }, "includingInbox: true is what the long-press insert popover needs")
+        XCTAssertFalse(withoutInbox.contains { $0.id == inboxTask.id }, "includingInbox: false must exclude unsorted tasks")
+    }
 }

@@ -10,7 +10,9 @@ import SwiftData
 struct SchedulingRuleEditView: View {
     let rule: SchedulingRule
     @Environment(\.dismiss) private var dismiss
+    @Query(sort: \NamedSchedule.sortOrder) private var availableSchedules: [NamedSchedule]
 
+    @State private var showingSchedulePicker = false
     @State private var isEnabled: Bool
     @State private var fillStrategy: FillStrategy
     @State private var maxTotalMinutes: Int
@@ -38,8 +40,18 @@ struct SchedulingRuleEditView: View {
                 if let schedule = rule.namedSchedule {
                     LabeledContent(schedule.name, value: schedule.dayAndTimeText)
                 } else {
-                    Text("No schedule assigned — remove this and add it again from the shelf's Assigned Schedules section.")
-                        .foregroundStyle(.secondary)
+                    // §9.1: an orphan (its NamedSchedule was deleted —
+                    // the relationship is `.nullify` by design, see §9)
+                    // is the only way a rule ends up here without one;
+                    // ShelfEditView always assigns a schedule at
+                    // creation, so this is a recovery path, not a
+                    // validation gap. Reassigning in place beats the old
+                    // "delete this and re-add it" dead end, which threw
+                    // away the rule's own fill-strategy config for no
+                    // reason.
+                    Text("No schedule assigned — this rule won't pull any tasks until you reassign one.")
+                        .foregroundStyle(.red)
+                    Button("Reassign Schedule…") { showingSchedulePicker = true }
                 }
             }
 
@@ -81,6 +93,47 @@ struct SchedulingRuleEditView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button("Save") { save() }
+            }
+        }
+        .sheet(isPresented: $showingSchedulePicker) {
+            NavigationStack {
+                List {
+                    if availableSchedules.isEmpty {
+                        Text("No schedules yet. Create one in More > Schedules, then come back here to reassign it.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(availableSchedules) { schedule in
+                        // Deliberately not excluding schedules already on
+                        // this shelf's *other* rules the way ShelfEditView's
+                        // own picker does — that guard exists to stop the
+                        // same schedule being added twice as two separate
+                        // rules, but this rule already exists and is just
+                        // recovering the link it lost, so the only real
+                        // constraint is that some schedule gets picked.
+                        Button {
+                            rule.namedSchedule = schedule
+                            showingSchedulePicker = false
+                            // Rule windows drive placement (§6.1) — the
+                            // schedule this rule pulls on just changed
+                            // from "none" to a real one.
+                            ScheduleDirtyState.shared.isDirty = true
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(schedule.name)
+                                Text(schedule.dayAndTimeText)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .navigationTitle("Reassign Schedule")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { showingSchedulePicker = false }
+                    }
+                }
             }
         }
     }

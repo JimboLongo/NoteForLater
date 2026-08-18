@@ -151,7 +151,7 @@ struct NightlyReviewView: View {
             .sheet(item: $pickerTarget) { block in
                 if let tomorrowViewModel {
                     ReplacementPickerSheet(
-                        candidates: tomorrowViewModel.unscheduledCandidates(from: allTasks, excluding: block),
+                        candidates: tomorrowViewModel.replacementCandidates(from: allTasks, for: .occupiedBlock(block)),
                         onPick: { chosen in
                             tomorrowViewModel.manualReplace(block, with: chosen)
                             pickerTarget = nil
@@ -1763,7 +1763,18 @@ struct TaskReviewCard: View {
                         .foregroundStyle(.secondary)
                     ForEach(rules.sorted { $0.sortOrder < $1.sortOrder }) { rule in
                         let status = task.fitStatus(for: rule)
-                        let fits = status == .fits
+                        // §9.2: an orphaned rule (its NamedSchedule was
+                        // deleted — `.nullify`, by design) would otherwise
+                        // render an ordinary-looking window here, via
+                        // `summary`'s `effective*` fallbacks, with a live
+                        // toggle — while `generateProposedSchedule`'s own
+                        // `namedSchedule != nil` filter silently skips it.
+                        // That's the §9 trap: it looks scheduled, it never
+                        // schedules. Named explicitly and un-toggleable
+                        // instead, matching what ShelfEditView's rule list
+                        // already does.
+                        let isOrphaned = rule.namedSchedule == nil
+                        let fits = status == .fits && !isOrphaned
                         HStack(spacing: 10) {
                             Toggle(
                                 isOn: Binding(
@@ -1779,11 +1790,12 @@ struct TaskReviewCard: View {
 
                             VStack(alignment: .leading, spacing: 1) {
                                 HStack(spacing: 6) {
-                                    Text(rule.displayName.isEmpty ? rule.summary : rule.displayName)
+                                    Text(isOrphaned ? "No schedule assigned" : (rule.displayName.isEmpty ? rule.summary : rule.displayName))
                                         .font(.subheadline)
+                                        .foregroundStyle(isOrphaned ? .red : .primary)
                                         .lineLimit(1)
                                         .truncationMode(.tail)
-                                    if !rule.displayName.isEmpty {
+                                    if !isOrphaned, !rule.displayName.isEmpty {
                                         Text(rule.summary)
                                             .font(.caption2)
                                             .foregroundStyle(.secondary)
@@ -1791,7 +1803,11 @@ struct TaskReviewCard: View {
                                             .truncationMode(.tail)
                                     }
                                 }
-                                if let caption = eligibleScheduleCaption(for: status) {
+                                if isOrphaned {
+                                    Text("Won't pull any tasks until a schedule is reassigned")
+                                        .font(.caption2)
+                                        .foregroundStyle(.red)
+                                } else if let caption = eligibleScheduleCaption(for: status) {
                                     Text(caption)
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)

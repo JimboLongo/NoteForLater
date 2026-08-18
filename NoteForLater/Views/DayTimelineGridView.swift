@@ -1128,7 +1128,7 @@ private struct DayTimelineSegment: View {
             if let emptySlotTime {
                 EmptySlotPickerSheet(
                     time: emptySlotTime,
-                    candidates: viewModel.unscheduledCandidatesIncludingInbox(from: allTasks),
+                    candidates: viewModel.replacementCandidates(from: allTasks, for: .freeSlot(startTime: emptySlotTime, includingInbox: true)),
                     onPick: { task in
                         viewModel.insertBlock(for: task, startTime: emptySlotTime)
                         self.emptySlotTime = nil

@@ -938,7 +938,7 @@ final class ScheduleReviewViewModel {
     /// re-approval (and re-pushing) before it matches the calendar again.
     func autoReplace(_ block: ScheduledBlock, candidatePool: [TaskItem]) {
         let outgoing = block.task
-        let replacement = nextCandidate(from: candidatePool, excluding: outgoing)
+        let replacement = nextCandidate(from: candidatePool, block: block)
 
         outgoing?.isScheduled = false
         outgoing?.pushedCount += 1
@@ -1008,23 +1008,97 @@ final class ScheduleReviewViewModel {
         blocks.sort { $0.startTime < $1.startTime }
     }
 
-    /// Candidates for the Replace/Swap picker: on a schedulable shelf,
-    /// not the block's own current task, not already completed, and —
-    /// unlike `unscheduledCandidates` — not required to be unscheduled.
-    /// A candidate that's already scheduled elsewhere is included as
-    /// long as it has at most one active block and that block isn't
-    /// locked, since taking over its slot (Replace) or trading places
-    /// with it (Swap) both need a single, movable block to act on; a
-    /// divisible task split across several blocks, or one pinned via a
-    /// locked block, is left out rather than guessing which piece should
-    /// move.
-    func replaceCandidates(from allTasks: [TaskItem], excluding block: ScheduledBlock) -> [TaskItem] {
-        allTasks.filter { task in
-            guard task.shelf?.hasEnabledSchedulingRules ?? false, task.id != block.task?.id, !task.isCompleted else { return false }
-            guard task.isScheduled else { return true }
-            let activeBlocks = (task.scheduledBlocks ?? []).filter { !$0.isCompleted }
-            return activeBlocks.count <= 1 && !(activeBlocks.first?.isLocked ?? false)
+    /// Which window a replacement/insertion candidate is being evaluated
+    /// against — §8's eligibility/fit predicate (a rule whose window
+    /// actually covers the target instant, plus — for an occupied block
+    /// specifically — fitting its fixed duration) is identical either
+    /// way. Only the "is this candidate already spoken for" exclusion
+    /// differs: Replace/Swap can still take a candidate that's scheduled
+    /// elsewhere (see `occupiedBlock` below); an empty slot never can —
+    /// there's nothing here yet to trade places with, and `insertBlock`
+    /// just creates a fresh block rather than freeing an old one.
+    enum CandidateSlotContext {
+        /// Replace/Swap target. A candidate already scheduled elsewhere
+        /// may still qualify, but only if it has a single, unlocked,
+        /// incomplete block of its own to act on — Replace and Swap both
+        /// need one movable block, not a guess at which piece of a
+        /// divisible task's spread, or a user-pinned lock, should move.
+        case occupiedBlock(ScheduledBlock)
+        /// An empty slot — no existing occupant, and no fixed duration
+        /// yet (`insertBlock` sizes the new block to whichever task gets
+        /// picked), so only genuinely unscheduled tasks qualify and
+        /// there's no block-duration fit check to run.
+        /// `includingInbox` widens the pool to unsorted (no-shelf) tasks
+        /// too — only the long-press-to-insert popover wants that; the
+        /// auto-scheduler's own candidate pool never includes Inbox
+        /// tasks.
+        case freeSlot(startTime: Date, includingInbox: Bool)
+    }
+
+    /// The single filter behind every "what can go here" picker. The
+    /// Replace/Swap sheet, the empty-slot sheet, and Auto-Replace's own
+    /// candidate pool used to each carry a separate, drifting copy of
+    /// roughly this same predicate — one of them (the plain
+    /// `unscheduledCandidates(from:)`, pre-§8) had drifted all the way to
+    /// unused dead code, and another (Nightly Review's own Replace
+    /// picker) had quietly ended up narrower than the other two Replace
+    /// call sites. See `CandidateSlotContext` for what actually varies by
+    /// caller.
+    func replacementCandidates(from allTasks: [TaskItem], for context: CandidateSlotContext) -> [TaskItem] {
+        let calendar = Calendar.current
+        let startTime: Date
+        let excludingTaskID: UUID?
+        let blockDuration: Int?
+        switch context {
+        case .occupiedBlock(let block):
+            startTime = block.startTime
+            excludingTaskID = block.task?.id
+            blockDuration = block.durationMinutes
+        case .freeSlot(let slotStart, _):
+            startTime = slotStart
+            excludingTaskID = nil
+            blockDuration = nil
         }
+        let weekday = calendar.component(.weekday, from: startTime)
+
+        return allTasks.filter { task in
+            guard task.id != excludingTaskID, !task.isCompleted else { return false }
+
+            switch context {
+            case .occupiedBlock:
+                if task.isScheduled {
+                    let activeBlocks = (task.scheduledBlocks ?? []).filter { !$0.isCompleted }
+                    guard activeBlocks.count <= 1, !(activeBlocks.first?.isLocked ?? false) else { return false }
+                }
+            case .freeSlot(_, let includingInbox):
+                guard !task.isScheduled else { return false }
+                if task.shelf == nil, !includingInbox { return false }
+            }
+
+            guard let shelf = task.shelf else { return true } // unsorted Inbox task — nothing further to check
+            guard shelf.hasEnabledSchedulingRules, task.isEligibleToStart(on: startTime, calendar: calendar) else { return false }
+
+            let coveringRules = (shelf.schedulingRules ?? []).filter { rule in
+                rule.isEnabled && rule.effectiveDaysOfWeek.contains(weekday) && Self.ruleWindow(rule, contains: startTime, calendar: calendar)
+            }
+            guard coveringRules.contains(where: { task.isEffectivelyEligible(for: $0) }) else { return false }
+
+            if let blockDuration {
+                let fitsWhole = task.estimatedMinutes > 0 && task.estimatedMinutes <= blockDuration
+                let fitsDivisible = task.isDivisible && task.minimumSegmentMinutes > 0 && task.minimumSegmentMinutes <= blockDuration
+                guard fitsWhole || fitsDivisible else { return false }
+            }
+            return true
+        }
+    }
+
+    private static func ruleWindow(_ rule: SchedulingRule, contains instant: Date, calendar: Calendar) -> Bool {
+        guard
+            let windowStart = calendar.date(bySettingHour: rule.effectiveStartHour, minute: rule.effectiveStartMinute, second: 0, of: instant),
+            let windowEnd = calendar.date(bySettingHour: rule.effectiveEndHour, minute: rule.effectiveEndMinute, second: 0, of: instant),
+            windowStart < windowEnd
+        else { return false }
+        return instant >= windowStart && instant < windowEnd
     }
 
     private func needsReapproval(_ block: ScheduledBlock) {
@@ -1419,30 +1493,6 @@ final class ScheduleReviewViewModel {
         try? modelContext.save()
     }
 
-    /// Tasks eligible to fill an empty/replaced slot: unscheduled, on a schedulable shelf.
-    func unscheduledCandidates(from allTasks: [TaskItem], excluding block: ScheduledBlock) -> [TaskItem] {
-        allTasks.filter { ($0.shelf?.hasEnabledSchedulingRules ?? false) && !$0.isScheduled && $0.id != block.task?.id }
-    }
-
-    /// Same, but for tapping an open slot on the timeline grid — there's no
-    /// existing block/task to exclude yet.
-    func unscheduledCandidates(from allTasks: [TaskItem]) -> [TaskItem] {
-        allTasks.filter { ($0.shelf?.hasEnabledSchedulingRules ?? false) && !$0.isScheduled }
-    }
-
-    /// Same as `unscheduledCandidates(from:)`, but also includes unsorted
-    /// Inbox tasks (no shelf at all) — used by the timeline's
-    /// long-press-to-insert popover specifically, where you're manually
-    /// placing something rather than picking from the auto-scheduler's own
-    /// rule-gated candidate pool.
-    func unscheduledCandidatesIncludingInbox(from allTasks: [TaskItem]) -> [TaskItem] {
-        allTasks.filter { task in
-            guard !task.isScheduled else { return false }
-            guard let shelf = task.shelf else { return true }
-            return shelf.hasEnabledSchedulingRules
-        }
-    }
-
     /// Creates a brand-new block for `task` at `startTime` — reached by
     /// tapping an open slot on the timeline grid and picking a candidate.
     /// Sized by the task's own estimated duration, or a 30-minute default
@@ -1458,31 +1508,19 @@ final class ScheduleReviewViewModel {
         blocks.sort { $0.startTime < $1.startTime }
     }
 
-    /// Same ordering AISchedulingService uses when picking tasks to
-    /// generate a schedule: priority first, then whichever has been
-    /// sitting on the shelf longest (oldest `createdAt` first), then due
-    /// date as the final tiebreaker.
-    private func nextCandidate(from pool: [TaskItem], excluding outgoing: TaskItem?) -> TaskItem? {
-        pool
-            .filter { ($0.shelf?.hasEnabledSchedulingRules ?? false) && !$0.isScheduled && $0.id != outgoing?.id }
-            .sorted { lhs, rhs in
-                if lhs.priority != rhs.priority {
-                    return priorityRank(lhs.priority) > priorityRank(rhs.priority)
-                }
-                if lhs.createdAt != rhs.createdAt {
-                    return lhs.createdAt < rhs.createdAt
-                }
-                return (lhs.dueDate ?? .distantFuture) < (rhs.dueDate ?? .distantFuture)
-            }
+    /// §5.1/§8: same `taskOrdering` the auto-scheduler itself sorts
+    /// candidates by, not a separate priority→createdAt→dueDate
+    /// comparator. Filtered through `replacementCandidates` first — Auto
+    /// only ever offers a genuinely unscheduled task (`.occupiedBlock`
+    /// already widens the pool to scheduled-elsewhere candidates for the
+    /// *manual* picker, but `autoReplace` itself has no logic to free a
+    /// replacement's old block the way `manualReplace` does, so taking
+    /// one here would silently leave it double-booked).
+    private func nextCandidate(from pool: [TaskItem], block: ScheduledBlock) -> TaskItem? {
+        let calendar = Calendar.current
+        return replacementCandidates(from: pool, for: .occupiedBlock(block))
+            .filter { !$0.isScheduled }
+            .sorted { MockAISchedulingService.taskOrdering($0, $1, asOf: block.date, calendar: calendar) }
             .first
-    }
-
-    private func priorityRank(_ priority: Priority) -> Int {
-        switch priority {
-        case .high: return 3
-        case .medium: return 2
-        case .low: return 1
-        case .unset: return 0
-        }
     }
 }

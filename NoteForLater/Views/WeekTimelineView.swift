@@ -349,7 +349,7 @@ struct WeekTimelineView: View {
         }
         .sheet(item: $replacementPickerBlock) { block in
             ReplacementPickerSheet(
-                candidates: viewModel.replaceCandidates(from: allTasks, excluding: block),
+                candidates: viewModel.replacementCandidates(from: allTasks, for: .occupiedBlock(block)),
                 onPick: { chosen in
                     viewModel.manualReplace(block, with: chosen)
                     replacementPickerBlock = nil

@@ -365,32 +365,31 @@ No immediate calendar placement required. The Tomorrow step's regeneration picks
 
 ---
 
-## 8. Replace Task picker
+## 8. Replace Task picker — ✅ done, Phase 7
 
-**Current:** `ReplacementPickerSheet` lists every unscheduled task grouped by shelf, unfiltered.
+**Was:** four separate, drifting candidate filters — `replaceCandidates` (Replace/Swap), `unscheduledCandidates(from:excluding:)` (Nightly Review's Replace picker, quietly narrower than the other two Replace call sites), `unscheduledCandidates(from:)` (**dead code** — never called), and `unscheduledCandidatesIncludingInbox` (empty-slot). None checked eligibility, start date, or duration fit.
 
-**Required:** filter `candidates` to tasks that could actually occupy the target block:
+**Now:** one function, `ScheduleReviewViewModel.replacementCandidates(from:for:)`, with the slot context as a parameter — `CandidateSlotContext.occupiedBlock(ScheduledBlock)` or `.freeSlot(startTime:includingInbox:)`. The eligibility/fit predicate is identical for both; only the exclusions differ:
 
-- `isEligibleToStart(on: block.date)`
-- `isEffectivelyEligible(for:)` for the rule owning that window
-- fits the block's duration, or is divisible with `minimumSegmentMinutes <= blockDuration`
+- **Shared predicate:** not completed; `isEligibleToStart(on:)`; shelf has enabled rules; at least one enabled rule whose `effectiveDaysOfWeek` + `effective{Start,End}{Hour,Minute}` window actually covers the slot instant, and for which `isEffectivelyEligible(for:)` is true.
+- **`.occupiedBlock` only:** excludes the block's own current task; a candidate already scheduled elsewhere still qualifies, but only with exactly one active, unlocked, incomplete block of its own (Replace frees it, Swap trades with it — both need a single movable block). Also applies the block's fixed duration as a fit check: `estimatedMinutes <= blockDuration`, or divisible with `minimumSegmentMinutes <= blockDuration`.
+- **`.freeSlot` only:** requires genuinely unscheduled (nothing here to trade with; `insertBlock` creates a fresh block). No duration check — the new block is sized to whichever task is picked. `includingInbox` widens to unsorted no-shelf tasks, which only the long-press-to-insert popover wants.
 
-Sort by §5.1. Apply the same filter to `EmptySlotPickerSheet` in `DayTimelineGridView.swift` — same operation from a different entry point.
-
-The **Auto** button (`autoReplace`) currently sorts by priority then due date; update to §5.1.
+Sorted by §5.1 via `AISchedulingService.taskOrdering` (now `static`, was `private`). The **Auto** button's own `nextCandidate` no longer carries a separate priority→createdAt→dueDate comparator; it reuses `taskOrdering` too, and further narrows to unscheduled candidates only — `autoReplace` has no logic to free a replacement's existing block the way `manualReplace` does, so taking a scheduled-elsewhere candidate would silently double-book it.
 
 ---
 
-## 9. Rule editor
+## 9. Rule editor — ✅ done, Phase 7
 
-**Current trap:** `generateProposedSchedule` filters on `rule.namedSchedule != nil`. A rule with a custom window and no linked schedule renders a normal-looking summary (via the `effective*` fallbacks), appears in the shelf's rule list, appears in the task card with a live toggle — and never schedules anything. No error, no visual difference.
+**The trap:** `generateProposedSchedule` filters on `rule.namedSchedule != nil`. A rule with no linked schedule renders a normal-looking summary (via the `effective*` fallbacks), appears in the shelf's rule list, appears in the task card with a live toggle — and never schedules anything. No error, no visual difference.
 
-**Required:**
+**§9.1 as originally written is dropped.** It called for disabling Save until a `NamedSchedule` is selected, plus an inline "create new schedule" shortcut — written against `e449f65`, assuming `SchedulingRuleEditView` could produce a rule with no schedule. It can't: rules are only ever created by `ShelfEditView.assignSchedule(_:)`, which assigns a `NamedSchedule` in the same breath. A Save guard would have been validating an unreachable state.
 
-1. `SchedulingRuleEditView` — disable Save until a `NamedSchedule` is selected. Provide an inline "Create new schedule" shortcut so the user isn't bounced to More → Schedules.
-2. When `namedSchedule == nil` (orphaned by a schedule deletion), render the rule row in red with **"No schedule assigned"** in place of the summary — in both the shelf rule list and the task card's Eligible Schedules section.
+**What actually ships instead — the recovery path.** `namedSchedule == nil` is reachable only one way: a `NamedSchedule` was deleted out from under the rule (`.nullify`). So `SchedulingRuleEditView`'s nil case now offers **"Reassign Schedule…"**, opening a picker in place, replacing the old dead-end text ("remove this and add it again from the shelf's Assigned Schedules section") that threw away the rule's own fill-strategy config for no reason. Reassigning sets `ScheduleDirtyState.shared.isDirty` per §6.1. Unlike `ShelfEditView`'s picker, this one does not exclude schedules already used by the shelf's other rules — that guard prevents adding the same schedule twice as two rules, but this rule already exists and is only recovering a lost link.
 
-Do **not** cascade-delete rules when a `NamedSchedule` is deleted. Wiping rules across every shelf is a bigger surprise than a visible orphan. Keep `.nullify`.
+**§9.2 unchanged and shipped.** The shelf rule list already handled this (red "No Schedule Assigned — won't pull any tasks", `ShelfEditView.swift`). The task card's Eligible Schedules section did not — it fell through to `summary`'s `effective*` fallbacks and rendered an ordinary window with a live toggle. Now shows red **"No schedule assigned"** plus "Won't pull any tasks until a schedule is reassigned", with the toggle disabled.
+
+**Cascade:** already correct, no change — `@Relationship(deleteRule: .nullify) var namedSchedule: NamedSchedule?` (`SchedulingRule.swift:58`). Wiping rules across every shelf is a bigger surprise than a visible orphan.
 
 ---
 
