@@ -325,47 +325,77 @@ final class TaskItem {
         isEligible(for: rule) && rule.canEverFit(estimatedMinutes: estimatedMinutes, isDivisible: isDivisible, minimumSegmentMinutes: minimumSegmentMinutes)
     }
 
-    /// Minutes of headroom before `dueDate` becomes mathematically
-    /// impossible to hit — negative once there's no longer enough
-    /// calendar time left for whatever's still unplaced (`remainingMinutes`),
-    /// regardless of whether any specific rule window actually has room.
-    /// `nil` when there's no due date at all (nothing to measure against).
-    /// `date` is the day being evaluated from — during a multi-day walk
-    /// (`AISchedulingService.taskOrdering`) that's the day currently
-    /// being packed, not necessarily `.now`, so ordering on an out day
-    /// reflects how much room is left as of *that* day, not today's.
-    func slack(asOf date: Date = .now) -> Int? {
+    /// The effective deadline instant — midnight at the end of
+    /// `dueDate`'s own calendar day, not the literal time-of-day
+    /// `dueDate` happens to carry. `dueDate` almost never carries a
+    /// time the user actually chose as a deadline: it auto-fills to
+    /// `.now` the instant "Has due date" flips to Yes (see
+    /// `dueDatePicked`'s own doc comment), and even a genuinely picked
+    /// date typically comes from a date-only picker that leaves that
+    /// same incidental time-of-day attached underneath. "Due Friday"
+    /// means anytime Friday, not the literal minute the field happened
+    /// to get its value — so the deadline this measures against is a
+    /// whole day, not an instant. Every at-risk computation below reads
+    /// this instead of `dueDate` directly, for the same reason.
+    private func endOfDueDate(calendar: Calendar) -> Date? {
         guard let dueDate else { return nil }
-        let minutesUntilDue = Int(dueDate.timeIntervalSince(date) / 60)
+        return calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: dueDate))
+    }
+
+    /// Minutes of headroom before `dueDate`'s own day becomes
+    /// mathematically impossible to hit — negative once there's no
+    /// longer enough calendar time left for whatever's still unplaced
+    /// (`remainingMinutes`), regardless of whether any specific rule
+    /// window actually has room. `nil` when there's no due date at all
+    /// (nothing to measure against). `date` is the day being evaluated
+    /// from — during a multi-day walk (`AISchedulingService
+    /// .taskOrdering`) that's the day currently being packed, not
+    /// necessarily `.now`, so ordering on an out day reflects how much
+    /// room is left as of *that* day, not today's.
+    func slack(asOf date: Date = .now, calendar: Calendar = .current) -> Int? {
+        guard let deadline = endOfDueDate(calendar: calendar) else { return nil }
+        let minutesUntilDue = Int(deadline.timeIntervalSince(date) / 60)
         return minutesUntilDue - remainingMinutes
     }
 
     /// A task is at risk in one of two distinct ways, both surfaced the
     /// same way on the task card:
     /// - Still has unplaced work (`remainingMinutes > 0`) and no longer
-    ///   enough raw calendar time left to place it before `dueDate`
-    ///   (`slack(asOf:) < 0`) — the forward-looking case, purely
-    ///   mathematical, no simulation of actual rule-window contention.
-    /// - Already has an active (not completed) block that ends *after*
-    ///   `dueDate` — the packer placed it, just too late. This is a
-    ///   fact already sitting in `scheduledBlocks`, not something slack
-    ///   alone can see: a fully-placed task (`remainingMinutes == 0`)
-    ///   always reads as healthy under slack math, even when what it
-    ///   was placed *into* blows straight past the deadline. This is
-    ///   the more common real-world case — the packer did its job, the
-    ///   result just doesn't satisfy the deadline — so it can't be left
-    ///   out.
+    ///   enough raw calendar time left to place it before `dueDate`'s
+    ///   own day ends (`slack(asOf:) < 0`) — the forward-looking case,
+    ///   purely mathematical, no simulation of actual rule-window
+    ///   contention.
+    /// - Already has an active (not completed) block that ends after
+    ///   `dueDate`'s own day — the packer placed it, just too late.
+    ///   This is a fact already sitting in `scheduledBlocks`, not
+    ///   something slack alone can see: a fully-placed task
+    ///   (`remainingMinutes == 0`) always reads as healthy under slack
+    ///   math, even when what it was placed *into* blows straight past
+    ///   the deadline. This is the more common real-world case — the
+    ///   packer did its job, the result just doesn't satisfy the
+    ///   deadline — so it can't be left out.
+    ///
+    /// Skipped entirely — always `false` — while `dueDatePicked` is
+    /// still `false`: `dueDate` auto-fills to `.now` the instant "Has
+    /// due date" flips to Yes, purely so the date picker has something
+    /// to show, before anyone's actually chosen a real deadline.
+    /// Without this, a task the user hasn't gotten to yet would flag
+    /// itself at risk (and, via `AISchedulingService.taskOrdering`,
+    /// jump the queue ahead of every task with a real, deliberately
+    /// tight deadline) off a placeholder value nobody chose.
+    ///
     /// Neither branch accounts for actual future rule-window contention
     /// (a task that's mathematically fine today but will lose a
     /// bidding war for capacity next week) — that's a real gap, deferred
     /// to Nightly Review's own post-regeneration audit (§7.1) rather
     /// than simulated here.
-    func isAtRisk(asOf date: Date = .now) -> Bool {
-        if remainingMinutes > 0, let slack = slack(asOf: date), slack < 0 {
+    func isAtRisk(asOf date: Date = .now, calendar: Calendar = .current) -> Bool {
+        guard dueDatePicked else { return false }
+        if remainingMinutes > 0, let slack = slack(asOf: date, calendar: calendar), slack < 0 {
             return true
         }
-        guard let dueDate else { return false }
-        return (scheduledBlocks ?? []).contains { !$0.isCompleted && $0.endTime > dueDate }
+        guard let deadline = endOfDueDate(calendar: calendar) else { return false }
+        return (scheduledBlocks ?? []).contains { !$0.isCompleted && $0.endTime > deadline }
     }
 
     /// Names the actual reason `isAtRisk` is true, for the task card's
@@ -378,19 +408,21 @@ final class TaskItem {
     /// all evaluate to `.exceedsConstraint` (or `.needsDuration`/
     /// `.needsMinimumSegment`) has real rules selected; reporting "no
     /// eligible schedule" for that case would name the wrong blocker.
-    /// `nil` when the task isn't at risk at all. Takes `asOf` (default
-    /// `.now`, matching `slack`/`isAtRisk`) rather than hardcoding real
-    /// wall-clock time internally — both so the "past due" check below
-    /// stays consistent with whatever moment `isAtRisk` itself was
-    /// evaluated against, and so this is actually testable against a
-    /// fixed date rather than only ever reflecting whenever the test
-    /// happens to run.
-    func atRiskBlocker(asOf date: Date = .now) -> String? {
-        guard isAtRisk(asOf: date) else { return nil }
-        if let dueDate, (scheduledBlocks ?? []).contains(where: { !$0.isCompleted && $0.endTime > dueDate }) {
+    /// `nil` when the task isn't at risk at all (including the
+    /// `dueDatePicked == false` case `isAtRisk` itself skips). Takes
+    /// `asOf`/`calendar` (defaults matching `slack`/`isAtRisk`) rather
+    /// than hardcoding real wall-clock time internally — both so the
+    /// "past due" check below stays consistent with whatever moment
+    /// `isAtRisk` itself was evaluated against, and so this is actually
+    /// testable against a fixed date rather than only ever reflecting
+    /// whenever the test happens to run.
+    func atRiskBlocker(asOf date: Date = .now, calendar: Calendar = .current) -> String? {
+        guard isAtRisk(asOf: date, calendar: calendar) else { return nil }
+        let deadline = endOfDueDate(calendar: calendar)
+        if let deadline, (scheduledBlocks ?? []).contains(where: { !$0.isCompleted && $0.endTime > deadline }) {
             return "Scheduled past its due date"
         }
-        if let dueDate, dueDate < date {
+        if let deadline, deadline < date {
             return "Past due"
         }
         // Two separate axes: whether this task has actually toggled

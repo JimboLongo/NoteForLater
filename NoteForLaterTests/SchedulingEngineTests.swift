@@ -338,8 +338,12 @@ final class SchedulingEngineTests: XCTestCase {
         let atRisk = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
         atRisk.title = "At Risk"
         atRisk.priority = .low
-        // 30 minutes until due, 60 minutes of work left — slack -30.
-        atRisk.dueDate = calendar.date(byAdding: .minute, value: 30, to: testDay)!
+        // `slack` measures to the *end* of `dueDate`'s own day, not the
+        // literal instant (see `TaskItem.endOfDueDate`) — so "due later
+        // today" is never enough on its own to go negative; this has to
+        // be due on an *earlier* calendar day than the one being packed.
+        // Due yesterday, 60 minutes of work still owed today → slack -60.
+        atRisk.dueDate = calendar.date(byAdding: .day, value: -1, to: testDay)!
 
         let comfortable = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
         comfortable.title = "Comfortable"
@@ -408,32 +412,35 @@ final class SchedulingEngineTests: XCTestCase {
     }
 
     /// §12.14a — slack, priority, and `createdAt` all tied → larger
-    /// `remainingMinutes` first. Because `slack` is itself derived from
-    /// `remainingMinutes` (`slack = minutesUntilDue - remainingMinutes`),
-    /// two tasks can't have both an equal `dueDate` and an equal slack
-    /// once their remaining sizes differ — so this deliberately uses
-    /// *different* due dates, each offset by exactly its own task's size,
-    /// to engineer identical slack while isolating the final tiebreak
-    /// tier rather than accidentally re-testing tier 1.
+    /// `remainingMinutes` first. Simplest possible tie: no due date on
+    /// either task. `slack(asOf:)` returns `nil` for both, and
+    /// `taskOrdering`'s switch treats `(nil, nil)` as equal (falls
+    /// through to the next tier) — same as any other genuinely-tied
+    /// pair, without needing to engineer matching due dates. (A due-date
+    /// construction here would also have to fight `slack`'s day-level
+    /// granularity — see `TaskItem.endOfDueDate` — since it only sees
+    /// which *day* a task is due, not the time, so two tasks can't have
+    /// both a differing `remainingMinutes` and a genuinely-equal slack
+    /// unless their due dates differ by a whole multiple of 1440
+    /// minutes, which forces unrealistically large task sizes. No due
+    /// date at all sidesteps that entirely.)
     func test_ordering_allTiersEqual_largerRemainingMinutesFirst() async throws {
         let testDay = day(2026, 1, 5)
         let (shelf, rule) = makeShelf(fillStrategy: .maxTaskCount, maxTaskCount: 1, maxMinutesPerTask: 120)
         let createdAt = testDay
-        let targetSlack = 1000
 
         let small = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 30, isDivisible: false, minimumSegmentMinutes: 0)
         small.title = "Small"
         small.priority = .medium
         small.createdAt = createdAt
-        small.dueDate = calendar.date(byAdding: .minute, value: targetSlack + 30, to: testDay)!
 
         let large = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 90, isDivisible: false, minimumSegmentMinutes: 0)
         large.title = "Large"
         large.priority = .medium
         large.createdAt = createdAt
-        large.dueDate = calendar.date(byAdding: .minute, value: targetSlack + 90, to: testDay)!
 
-        XCTAssertEqual(small.slack(asOf: testDay), large.slack(asOf: testDay), "fixture invalid — slack must actually be equal for this to isolate the remainingMinutes tiebreak")
+        XCTAssertNil(small.slack(asOf: testDay, calendar: calendar))
+        XCTAssertNil(large.slack(asOf: testDay, calendar: calendar))
 
         let blocks = try await service.generateProposedSchedule(
             shelves: [shelf], habits: [], freeSlots: [businessHoursSlot(on: testDay)],
@@ -483,15 +490,20 @@ final class SchedulingEngineTests: XCTestCase {
     }
 
     /// Exactly zero slack is not negative — the boundary itself must not
-    /// read as at risk.
+    /// read as at risk. Slack measures to the *end* of `dueDate`'s own
+    /// day (`TaskItem.endOfDueDate`), so hitting exactly zero requires
+    /// `remainingMinutes` to equal the full stretch from `now` to
+    /// midnight — 1440 minutes when `now` is itself midnight, as it is
+    /// here via `day(...)`.
     func test_isAtRisk_exactlyZeroSlack_notAtRisk() {
         let shelf = Shelf(name: "Test Shelf")
-        let task = TaskItem(title: "Zero Slack", shelf: shelf, estimatedMinutes: 60)
+        let task = TaskItem(title: "Zero Slack", shelf: shelf, estimatedMinutes: 1440)
+        task.dueDatePicked = true
         let now = day(2026, 1, 5)
-        task.dueDate = calendar.date(byAdding: .minute, value: 60, to: now)!
+        task.dueDate = now // due today — end of day is exactly 1440 minutes away
 
-        XCTAssertEqual(task.slack(asOf: now), 0)
-        XCTAssertFalse(task.isAtRisk(asOf: now))
+        XCTAssertEqual(task.slack(asOf: now, calendar: calendar), 0)
+        XCTAssertFalse(task.isAtRisk(asOf: now, calendar: calendar))
     }
 
     /// Correction 1 — a task fully placed (`remainingMinutes == 0`, so
@@ -507,11 +519,15 @@ final class SchedulingEngineTests: XCTestCase {
         context.insert(task)
         task.remainingMinutes = 0
         task.isScheduled = true
+        task.dueDatePicked = true
         let now = day(2026, 1, 5)
-        task.dueDate = calendar.date(byAdding: .hour, value: 2, to: now)!
-        let blockStart = calendar.date(byAdding: .hour, value: 3, to: now)! // starts after the deadline
+        task.dueDate = now // due today — deadline is midnight starting tomorrow
+        // Placed tomorrow, cleanly past the deadline (not just past the
+        // literal `dueDate` instant, which same-day math no longer
+        // treats as "late" at all — see `TaskItem.endOfDueDate`).
+        let blockStart = calendar.date(byAdding: .day, value: 1, to: now)!
         let blockEnd = calendar.date(byAdding: .minute, value: 60, to: blockStart)!
-        let block = ScheduledBlock(date: now, startTime: blockStart, endTime: blockEnd, task: task)
+        let block = ScheduledBlock(date: blockStart, startTime: blockStart, endTime: blockEnd, task: task)
         context.insert(block)
         try context.save()
 
@@ -520,8 +536,8 @@ final class SchedulingEngineTests: XCTestCase {
         // slack's sign — proving this test actually exercises the second
         // (scheduled-past-deadline) branch, not a slack coincidence.
         XCTAssertEqual(task.remainingMinutes, 0)
-        XCTAssertTrue(task.isAtRisk(asOf: now))
-        XCTAssertEqual(task.atRiskBlocker(asOf: now), "Scheduled past its due date")
+        XCTAssertTrue(task.isAtRisk(asOf: now, calendar: calendar))
+        XCTAssertEqual(task.atRiskBlocker(asOf: now, calendar: calendar), "Scheduled past its due date")
     }
 
     /// Correction 2 — a task with a real rule toggled on that fails its
@@ -534,12 +550,17 @@ final class SchedulingEngineTests: XCTestCase {
         let (shelf, rule) = makeShelf(fillStrategy: .maxTaskCount, maxTaskCount: 2, maxMinutesPerTask: 15)
         let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
         let now = day(2026, 1, 5)
-        // Negative slack: 10 minutes until due, 60 minutes of work left.
-        task.dueDate = calendar.date(byAdding: .minute, value: 10, to: now)!
+        task.dueDatePicked = true
+        // Due yesterday — slack measures to the end of that day, already
+        // behind `now`, so 60 minutes of remaining work guarantees
+        // negative slack regardless of time-of-day (see `TaskItem
+        // .endOfDueDate`; a due time later *today* wouldn't be enough on
+        // its own anymore).
+        task.dueDate = calendar.date(byAdding: .day, value: -1, to: now)!
 
         XCTAssertFalse(task.includedSchedulingRuleIDs.isEmpty, "fixture invalid — task must actually be toggled eligible for this to test the right thing")
-        XCTAssertTrue(task.isAtRisk(asOf: now))
-        XCTAssertEqual(task.atRiskBlocker(asOf: now), "Exceeds every eligible schedule's time constraint")
+        XCTAssertTrue(task.isAtRisk(asOf: now, calendar: calendar))
+        XCTAssertEqual(task.atRiskBlocker(asOf: now, calendar: calendar), "Exceeds every eligible schedule's time constraint")
     }
 
     /// `slack(asOf:)` measures from whatever day is passed, not real
@@ -556,8 +577,8 @@ final class SchedulingEngineTests: XCTestCase {
         let earlyDay = day(2026, 1, 5) // 5 days before the deadline
         let laterDay = day(2026, 1, 8) // 2 days before the deadline
 
-        let earlySlack = task.slack(asOf: earlyDay)
-        let laterSlack = task.slack(asOf: laterDay)
+        let earlySlack = task.slack(asOf: earlyDay, calendar: calendar)
+        let laterSlack = task.slack(asOf: laterDay, calendar: calendar)
 
         XCTAssertNotNil(earlySlack)
         XCTAssertNotNil(laterSlack)
@@ -566,5 +587,54 @@ final class SchedulingEngineTests: XCTestCase {
         // the day passed in rather than being pinned to a single value.
         XCTAssertGreaterThan(earlySlack!, laterSlack!)
         XCTAssertEqual(earlySlack! - laterSlack!, 3 * 24 * 60, "the 3-day gap between the two `asOf` days should show up minute-for-minute in the slack difference")
+    }
+
+    // MARK: - Review follow-up: dueDate's time-of-day must not drive risk
+
+    /// A task due today at 9am must not read as at risk (or past due) at
+    /// 5pm the same day — `dueDate`'s time-of-day is never something the
+    /// user actually chose as a deadline (it auto-fills to `.now`, and
+    /// even a real pick usually comes from a date-only picker leaving
+    /// that same incidental time attached underneath — see `TaskItem
+    /// .endOfDueDate`), so "due today" has to mean the whole day, not
+    /// whatever minute the field happened to get its value.
+    func test_isAtRisk_dueTodayAt9am_notAtRiskAt5pm() {
+        let shelf = Shelf(name: "Test Shelf")
+        let task = TaskItem(title: "Due Today", shelf: shelf, estimatedMinutes: 120)
+        let testDay = day(2026, 1, 5)
+        task.dueDatePicked = true
+        task.dueDate = calendar.date(byAdding: .hour, value: 9, to: testDay)!
+        let fivePM = calendar.date(byAdding: .hour, value: 17, to: testDay)!
+
+        // Sanity check: the literal due *instant* really has passed by
+        // 5pm — proving a healthy result here comes from the end-of-day
+        // fix, not from the due time coincidentally still being ahead.
+        XCTAssertLessThan(task.dueDate!, fivePM)
+
+        XCTAssertFalse(task.isAtRisk(asOf: fivePM, calendar: calendar))
+        XCTAssertNil(task.atRiskBlocker(asOf: fivePM, calendar: calendar))
+    }
+
+    /// `dueDate` auto-fills to `.now` the instant "Has due date" flips
+    /// to Yes, purely so the picker has something to show — before
+    /// `dueDatePicked` is `true`, that value is a placeholder nobody
+    /// actually chose, not a real deadline. `isAtRisk` must never flag
+    /// (or `taskOrdering`-adjacent code prioritize) a task off of it.
+    func test_isAtRisk_dueDatePickedFalse_autoFilledDateNeverAtRisk() {
+        let shelf = Shelf(name: "Test Shelf")
+        let task = TaskItem(title: "Auto-Filled Date", shelf: shelf, estimatedMinutes: 120)
+        let now = calendar.date(byAdding: .hour, value: 23, to: day(2026, 1, 5))! // 11pm
+        task.dueDate = now // simulates the auto-fill-to-.now behavior
+        task.dueDatePicked = false // never actually confirmed
+
+        // Sanity check: without the `dueDatePicked` gate, this would
+        // already read as at risk — only 1 hour left before midnight,
+        // 2 hours of work still owed — proving the gate is doing real
+        // work here, not coincidentally agreeing with an already-healthy
+        // fixture.
+        XCTAssertLessThan(task.slack(asOf: now, calendar: calendar) ?? 0, 0)
+
+        XCTAssertFalse(task.isAtRisk(asOf: now, calendar: calendar))
+        XCTAssertNil(task.atRiskBlocker(asOf: now, calendar: calendar))
     }
 }
