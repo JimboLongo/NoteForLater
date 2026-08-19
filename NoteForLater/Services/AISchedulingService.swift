@@ -13,8 +13,20 @@ import Foundation
 /// the night before — not the only way a day ever gets populated in the
 /// first place.
 ///
-/// TODO(Claude Code): Replace the greedy mock packer with a real call to the
-/// Claude API (Messages API) — same shape, just smarter task selection.
+/// NOT a placeholder for a model-driven packer. An earlier TODO here
+/// planned to "replace the greedy mock packer with a real Claude API
+/// call — same shape, just smarter task selection." That plan is
+/// explicitly abandoned: after the scheduling-spec work the packer
+/// honors eligibility, fit status, minimum segments, slack ordering and
+/// per-rule caps, and it's deterministic and unit-tested. Swapping it
+/// for a model call would trade all of that away in the one part of the
+/// system that most needs to be predictable.
+///
+/// The Claude API work that IS worth doing lives off this path entirely
+/// — estimating `estimatedMinutes`/`isDivisible`/`minimumSegmentMinutes`
+/// for tasks captured without them, which §3.3 made permanently
+/// unschedulable. See "§10 Follow-On Work" in
+/// docs/NoteForLater-Scheduling-Spec.md.
 protocol AISchedulingServiceProtocol: AnyObject {
     /// A task only ever gets pulled into a rule's window if it's been
     /// explicitly toggled eligible for that specific schedule on its own

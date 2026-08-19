@@ -395,12 +395,46 @@ Sorted by §5.1 via `AISchedulingService.taskOrdering` (now `static`, was `priva
 
 ## 10. Out of scope
 
-- Raising or removing the 30-day horizon (§6.4)
-- Batching `fetchFreeSlots` into a single ranged `freeBusy` call — worthwhile, separate
-- Real Claude API scheduling (`MockAISchedulingService` remains the implementation)
-- Background regeneration / `BGAppRefreshTask` (`NoteForLaterApp.swift:187`)
-- Splitting `DayTimelineGridView.swift` (2,243 lines) and `NightlyReviewView.swift` (1,922 lines)
-- Shelf-clearance projection ("when will this shelf empty")
+Out of scope **for phases 1–7**. Four of these have since been promoted to prioritized follow-on work — see §10 Follow-On Work below, which supersedes the middle four bullets here.
+
+- ~~Raising or removing the 30-day horizon (§6.4)~~ — **resolved** in Phase 5 (`e18ef4e`) by stall detection rather than a horizon change; see Open Decisions for the tradeoff it introduced
+- Batching `fetchFreeSlots` into a single ranged `freeBusy` call → **now Follow-On #1**
+- Real Claude API scheduling → **now Follow-On #2**, substantially reframed
+- Background regeneration / `BGAppRefreshTask` → **now Follow-On #3**
+- Splitting `DayTimelineGridView.swift` / `NightlyReviewView.swift` → **now Follow-On #4**
+- Shelf-clearance projection ("when will this shelf empty") — still out of scope, unscheduled
+
+---
+
+## §10 Follow-On Work
+
+Priority order. #3 depends on #1; #1, #2, and #4 are independent of each other.
+
+### 1. Batch `fetchFreeSlots` into one ranged call
+
+First because it's nearly free. `GoogleCalendarService.fetchBusyRanges(from:to:)` (`CalendarService.swift:218`) is **already** range-based — it POSTs a single `freeBusy` query for an arbitrary span. What's missing is only that `fetchFreeSlots(for:)` (`CalendarService.swift:84`) calls it one day at a time, then does the busy→free subtraction locally.
+
+Add a `fetchFreeSlots(from:to:)` that makes **one** `fetchBusyRanges` call across the whole walk span and slices per-day locally, applying `workingHoursRange(for:)` per day (it varies by day, so the slicing can't be a naive even split). The existing per-day method stays as a thin wrapper for callers that genuinely want one day.
+
+Why it matters more now than when it was first deferred: Phase 5's dirty flush escalates to `regenerateFromNow` on **every** Calendar appear after an edit, and that walk runs up to `taskStallThresholdDays` (14) task days plus `habitPopulationDays` (30) habit days — each currently its own network round-trip. `FakeCalendarService.fetchFreeSlotsCallCount` already exists in the test suite and asserts exactly this count, so the batching work has a ready-made regression check.
+
+### 2. Claude API for duration and divisibility estimation
+
+**Reframed.** The old framing (still in the `TODO` this item replaces) was "replace the greedy mock packer with a real Claude call — same shape, just smarter task selection." That's no longer the right goal: after phases 1–7 the packer is good. It honors eligibility, fit status, minimum segments, slack ordering, and per-rule caps, and it's deterministic and testable. Replacing it with a model call would trade all of that for nondeterminism in the one part of the system that most needs to be predictable.
+
+What the packer genuinely cannot do is **judgment**, and §3.3 turned that gap into a hard failure: a task with no duration is now permanently unschedulable. So anything captured without one — voice capture, Home Screen quick add, receipt scan — lands on a shelf and sits there dead until a human opens the card and fills in duration/divisibility by hand.
+
+That's the job worth a model call: **estimate `estimatedMinutes`, `isDivisible`, and `minimumSegmentMinutes` from the task's title and notes.** It fits the constraints well — one call per task, cacheable on the task, off the hot scheduling path entirely, and a wrong answer is a bad *suggestion* the user can correct on the card rather than a wrecked calendar. Surface estimates as suggestions, not silent writes.
+
+Possible second job, same call or a later one: **semantic placement hints the rule system can't express** — "this needs a clear head, put it early", "batch these two together". The rule model has no vocabulary for either.
+
+### 3. `BGAppRefreshTask` background regeneration
+
+`NoteForLaterApp.swift:215` carries the existing TODO. Deliberately **after #1**: a background refresh that fires a regeneration walk currently costs up to ~44 sequential network round-trips per run, which is a poor fit for a background task's execution budget and would burn battery for it. Once regeneration is one ranged call, this becomes reasonable to schedule.
+
+### 4. Split the two oversized views
+
+Pure maintenance, no dependency on the others, do it whenever. `DayTimelineGridView.swift` is 2,309 lines and `NightlyReviewView.swift` is 2,179. Both have accreted several independent responsibilities — `NightlyReviewView.swift` alone holds the six-step flow, `TaskReviewCard` (the shared commit point behind every Save/Move/Skip in the app, §6.1), and the At-Risk step added in Phase 6.
 
 ---
 
