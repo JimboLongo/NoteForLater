@@ -47,6 +47,7 @@ struct NoteForLaterApp: App {
         Self.unscheduleTwoMinuteTaskBlocksIfNeeded(container: sharedModelContainer)
         Self.cancelLegacyIndividualReminderNotificationsIfNeeded()
         Self.backfillRemainingMinutesIfNeeded(container: sharedModelContainer)
+        Self.repairDrainedRemainingMinutesIfNeeded(container: sharedModelContainer)
     }
 
     /// One-time launch migration: `TaskItem.remainingMinutes` is new — a
@@ -73,6 +74,48 @@ struct NoteForLaterApp: App {
         } catch {
             // Leave the flag unset so this retries next launch instead of
             // silently leaving every existing task's remaining minutes at 0.
+        }
+    }
+
+    /// One-time launch repair, deliberately **separate** from
+    /// `backfillRemainingMinutesIfNeeded` above rather than folded into
+    /// it. That one is the original §1.1 schema backfill and blanket-sets
+    /// every task to its full estimate; this one repairs damage from a
+    /// later bug and must *not* touch correctly-scheduled tasks. They
+    /// answer different questions and have their own flags, so a device
+    /// that already ran the first still gets this.
+    ///
+    /// Four call sites used to delete a `ScheduledBlock` without restoring
+    /// the minutes it represented (see `ScheduleReviewViewModel
+    /// .removeBlock`), permanently destroying that time. A task could end
+    /// up incomplete with `remainingMinutes == 0` and nothing scheduled,
+    /// which makes it invisible to the scheduler *and* to every
+    /// "why wasn't this placed" surface. Fixing the leak doesn't repair
+    /// tasks already damaged by it.
+    ///
+    /// Per-task logic — including which tasks are deliberately left
+    /// untouched — lives in `TaskItem.repairedRemainingMinutes()`.
+    private static func repairDrainedRemainingMinutesIfNeeded(container: ModelContainer) {
+        let flagKey = "didRepairDrainedRemainingMinutes.v1"
+        guard !UserDefaults.standard.bool(forKey: flagKey) else { return }
+
+        let context = ModelContext(container)
+        guard let tasks = try? context.fetch(FetchDescriptor<TaskItem>()) else { return }
+        var repairedCount = 0
+        for task in tasks {
+            guard let repaired = task.repairedRemainingMinutes() else { continue }
+            task.remainingMinutes = repaired
+            repairedCount += 1
+        }
+        do {
+            try context.save()
+            UserDefaults.standard.set(true, forKey: flagKey)
+            if repairedCount > 0 {
+                print("[migration] repaired remainingMinutes on \(repairedCount) task(s)")
+            }
+        } catch {
+            // Flag stays unset so this retries next launch rather than
+            // leaving drained tasks permanently unschedulable.
         }
     }
 

@@ -814,6 +814,202 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertFalse(viewModel.tasksThatDidNotFit.isEmpty, "tasks left unplaced when the cap binds must be surfaced")
     }
 
+    // MARK: - Migration: repairing remainingMinutes drained by the leak
+
+    /// No blocks at all — the whole estimate is owed. This is the shape of
+    /// the four tasks found drained in the real device store.
+    func test_repairedRemainingMinutes_noBlocks_resetsToEstimate() {
+        let shelf = Shelf(name: "S")
+        let task = TaskItem(title: "Drained", shelf: shelf, estimatedMinutes: 120)
+        task.remainingMinutes = 0
+        XCTAssertEqual(task.repairedRemainingMinutes(), 120)
+    }
+
+    /// Partial blocks — only the unplaced remainder is owed. Nothing in
+    /// the store matches this today, but divisible tasks reach it
+    /// routinely now that the packer places whole segments.
+    func test_repairedRemainingMinutes_partialBlocks_returnsEstimateMinusPlaced() throws {
+        let testDay = day(2026, 1, 5)
+        let shelf = Shelf(name: "S")
+        context.insert(shelf)
+        let task = TaskItem(title: "Half placed", shelf: shelf, estimatedMinutes: 240, isDivisible: true, minimumSegmentMinutes: 60)
+        task.remainingMinutes = 0 // drained by the leak
+        context.insert(task)
+
+        // Two 60-minute segments placed = 120 of 240.
+        var blocks: [ScheduledBlock] = []
+        for hour in [9, 14] {
+            let start = calendar.date(byAdding: .hour, value: hour, to: testDay)!
+            let block = ScheduledBlock(date: testDay, startTime: start, endTime: calendar.date(byAdding: .minute, value: 60, to: start)!, task: task)
+            context.insert(block)
+            blocks.append(block)
+        }
+        task.scheduledBlocks = blocks
+
+        XCTAssertEqual(task.placedMinutes, 120)
+        XCTAssertEqual(task.repairedRemainingMinutes(), 120, "only the time not yet on the calendar is owed back")
+    }
+
+    /// Blocks already cover the estimate — leave it completely alone.
+    /// This is "Investigate Sub Item IDs": resetting it would re-offer 120
+    /// minutes already sitting on the calendar.
+    func test_repairedRemainingMinutes_fullyPlaced_returnsNil() throws {
+        let testDay = day(2026, 1, 5)
+        let shelf = Shelf(name: "S")
+        context.insert(shelf)
+        let task = TaskItem(title: "Fully placed", shelf: shelf, estimatedMinutes: 120)
+        task.remainingMinutes = 0
+        task.isScheduled = true
+        context.insert(task)
+        let start = calendar.date(byAdding: .hour, value: 9, to: testDay)!
+        let block = ScheduledBlock(date: testDay, startTime: start, endTime: calendar.date(byAdding: .minute, value: 120, to: start)!, task: task)
+        context.insert(block)
+        task.scheduledBlocks = [block]
+
+        XCTAssertNil(task.repairedRemainingMinutes(), "a correctly fully-scheduled task must never be touched")
+    }
+
+    /// A completed block's time was genuinely spent, so it doesn't count
+    /// as "placed" and doesn't protect the task from repair either.
+    func test_repairedRemainingMinutes_completedBlocksDoNotCountAsPlaced() throws {
+        let testDay = day(2026, 1, 5)
+        let shelf = Shelf(name: "S")
+        context.insert(shelf)
+        let task = TaskItem(title: "Had a completed block", shelf: shelf, estimatedMinutes: 120)
+        task.remainingMinutes = 0
+        context.insert(task)
+        let start = calendar.date(byAdding: .hour, value: 9, to: testDay)!
+        let block = ScheduledBlock(date: testDay, startTime: start, endTime: calendar.date(byAdding: .minute, value: 120, to: start)!, task: task)
+        block.isCompleted = true
+        context.insert(block)
+        task.scheduledBlocks = [block]
+
+        XCTAssertEqual(task.placedMinutes, 0, "completed time is spent, not reserved")
+    }
+
+    func test_repairedRemainingMinutes_skipsCompletedRecurringAndDurationlessTasks() {
+        let shelf = Shelf(name: "S")
+
+        let completed = TaskItem(title: "Done", shelf: shelf, estimatedMinutes: 120)
+        completed.remainingMinutes = 0
+        completed.isCompleted = true
+        XCTAssertNil(completed.repairedRemainingMinutes())
+
+        let recurring = TaskItem(title: "Recurring", shelf: shelf, estimatedMinutes: 30)
+        recurring.isRecurring = true
+        recurring.remainingMinutes = 0
+        XCTAssertNil(recurring.repairedRemainingMinutes(), "recurring tasks never drain remainingMinutes, so there's nothing to repair")
+
+        let noDuration = TaskItem(title: "No duration", shelf: shelf, estimatedMinutes: 0)
+        XCTAssertNil(noDuration.repairedRemainingMinutes())
+    }
+
+    /// Already-correct values are left alone, so the migration is a no-op
+    /// on a healthy store and safe to re-run.
+    func test_repairedRemainingMinutes_alreadyCorrect_returnsNil() {
+        let shelf = Shelf(name: "S")
+        let task = TaskItem(title: "Healthy", shelf: shelf, estimatedMinutes: 120)
+        XCTAssertEqual(task.remainingMinutes, 120)
+        XCTAssertNil(task.repairedRemainingMinutes())
+    }
+
+    // MARK: - remainingMinutes must survive every block deletion
+
+    /// Builds a task fully placed into one block, i.e. the state
+    /// `pack()` leaves behind: remainingMinutes drained to 0,
+    /// isScheduled true, one block accounting for the whole estimate.
+    private func makePlacedTask(minutes: Int = 120) -> (shelf: Shelf, rule: SchedulingRule, task: TaskItem, block: ScheduledBlock, day: Date) {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: minutes, isDivisible: false, minimumSegmentMinutes: 0)
+        task.remainingMinutes = 0
+        task.isScheduled = true
+        let start = calendar.date(byAdding: .hour, value: 9, to: testDay)!
+        let block = ScheduledBlock(date: testDay, startTime: start, endTime: calendar.date(byAdding: .minute, value: minutes, to: start)!, task: task)
+        context.insert(block)
+        task.scheduledBlocks = [block]
+        return (shelf, rule, task, block, testDay)
+    }
+
+    /// `deleteBlock` is the user's swipe. It means "not here, not now" —
+    /// the deferral it records via `pushedCount` — not "this work is
+    /// done," which is what completing the block means. Before the fix it
+    /// destroyed the task's remaining time outright, which is how a
+    /// routine swipe turned into a permanently unschedulable task.
+    func test_deleteBlock_restoresRemainingMinutes() async throws {
+        let fixture = makePlacedTask()
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: fixture.day)
+
+        viewModel.deleteBlock(fixture.block)
+
+        XCTAssertEqual(fixture.task.remainingMinutes, 120, "a swipe defers the work; it must not destroy it")
+        XCTAssertFalse(fixture.task.isScheduled)
+        XCTAssertEqual(fixture.task.pushedCount, 1, "still recorded as a deferral")
+    }
+
+    /// `manualReplace` frees whatever block the incoming task already held
+    /// elsewhere. That task is moving, not abandoning the work.
+    func test_manualReplace_restoresRemainingMinutesOnTheFreedBlock() async throws {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+
+        let outgoing = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        let targetStart = calendar.date(byAdding: .hour, value: 14, to: testDay)!
+        let targetBlock = ScheduledBlock(date: testDay, startTime: targetStart, endTime: calendar.date(byAdding: .minute, value: 60, to: targetStart)!, task: outgoing)
+        context.insert(targetBlock)
+
+        // The incoming task already holds its own block elsewhere.
+        let incoming = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 120, isDivisible: false, minimumSegmentMinutes: 0)
+        incoming.remainingMinutes = 0
+        incoming.isScheduled = true
+        let oldStart = calendar.date(byAdding: .hour, value: 9, to: testDay)!
+        let oldBlock = ScheduledBlock(date: testDay, startTime: oldStart, endTime: calendar.date(byAdding: .minute, value: 120, to: oldStart)!, task: incoming)
+        context.insert(oldBlock)
+        incoming.scheduledBlocks = [oldBlock]
+
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: testDay)
+        viewModel.manualReplace(targetBlock, with: incoming)
+
+        XCTAssertEqual(incoming.remainingMinutes, 120, "the freed block's minutes must come back — the task moved, it didn't finish")
+    }
+
+    /// The highest-frequency leak: `trimOverflowingRuleBlocksAcrossFutureDays`
+    /// runs at the top of every `autoPlaceEligibleTasks`, so on essentially
+    /// every Calendar appear. It sweeps blocks whose task is no longer
+    /// eligible for the rule that placed them.
+    func test_trimSweepOfIneligibleBlock_restoresRemainingMinutes() async throws {
+        let fixture = makePlacedTask()
+        // Make it ineligible for the rule that placed it, so the trim
+        // sweep picks the block up.
+        fixture.task.setEligible(false, for: fixture.rule)
+
+        let futureDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+        let start = calendar.date(byAdding: .hour, value: 9, to: futureDay)!
+        fixture.block.date = futureDay
+        fixture.block.startTime = start
+        fixture.block.endTime = calendar.date(byAdding: .minute, value: 120, to: start)!
+
+        let calendarService = FakeCalendarService()
+        calendarService.freeSlotsProvider = { [self.businessHoursSlot(on: $0)] }
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: futureDay)
+
+        await viewModel.autoPlaceEligibleTasks(shelves: [fixture.shelf], habits: [], eligibleHoursWindows: [])
+
+        XCTAssertEqual(fixture.task.remainingMinutes, 120, "the trim sweep must give back the time it reclaims — this is the leak that ran on every Calendar appear")
+    }
+
+    /// The counterpart guard: a *completed* block's time was genuinely
+    /// spent, so removal must NOT hand it back.
+    func test_completedBlockRemoval_doesNotRestore() async throws {
+        let fixture = makePlacedTask()
+        fixture.block.isCompleted = true
+
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: fixture.day)
+        await viewModel.purgeCompletedBlocks()
+
+        XCTAssertEqual(fixture.task.remainingMinutes, 0, "completed work must stay spent — restoring it would resurrect finished time")
+    }
+
     // MARK: - Unplaced reasons — one coarse explanation per task per walk
 
     /// Builds a shelf whose single rule runs on `daysOfWeek` between the

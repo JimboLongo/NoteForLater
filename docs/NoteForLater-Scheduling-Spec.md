@@ -408,7 +408,7 @@ Out of scope **for phases 1–7**. Four of these have since been promoted to pri
 
 ## §10 Follow-On Work
 
-Priority order. #3 depends on #1; #1, #2, and #4 are independent of each other.
+Priority order. #3 depends on #1; #1, #2, #4, and #5 are independent of each other.
 
 ### 1. Batch `fetchFreeSlots` into one ranged call
 
@@ -432,7 +432,21 @@ Possible second job, same call or a later one: **semantic placement hints the ru
 
 `NoteForLaterApp.swift:215` carries the existing TODO. Deliberately **after #1**: a background refresh that fires a regeneration walk currently costs up to ~44 sequential network round-trips per run, which is a poor fit for a background task's execution budget and would burn battery for it. Once regeneration is one ranged call, this becomes reasonable to schedule.
 
-### 4. Split the two oversized views
+### 4. Make synchronous viewmodel construction in tests fail loudly
+
+Constructing a `ScheduleReviewViewModel` inside a **non-`async`** XCTest method corrupts the heap and takes down the whole test runner with `malloc: pointer being freed was not allocated`, before any assertion runs. Full diagnosis in the Open Decisions entry above: `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` makes the class implicitly `@MainActor`, so its `deinit` is an isolated deinit, and releasing one with no enclosing Swift Task trips a runtime bug in task-local scope teardown.
+
+The failure mode is the problem, not just the bug. It produces no message naming the cause, no failing assertion, and no pointer to the offending test — just a truncated run and a restart loop. **It has already been walked into twice by the same person who wrote the warning comment about it**, once while adding the §8 candidate-filter tests and again while adding the block-deletion regression tests. A comment in one file is evidently not sufficient guardrail.
+
+Worth investigating whether this can be made self-announcing, roughly in order of preference:
+
+- A test-only helper (e.g. `makeViewModel(...)` on the test case) that is itself `async`, so a synchronous test simply cannot call it and fails to compile rather than at runtime.
+- An `XCTestCase` subclass or `setUp` assertion that detects a synchronous test method and fails with a real message.
+- Failing that, a lint or CI grep for `ScheduleReviewViewModel(` inside a `func test_...()` lacking `async`.
+
+Not urgent — no user-facing impact, tests currently pass. But the cost is paid in confusing debugging sessions each time, and the first option is cheap.
+
+### 5. Split the two oversized views
 
 Pure maintenance, no dependency on the others, do it whenever. `DayTimelineGridView.swift` is 2,309 lines and `NightlyReviewView.swift` is 2,179. Both have accreted several independent responsibilities — `NightlyReviewView.swift` alone holds the six-step flow, `TaskReviewCard` (the shared commit point behind every Save/Move/Skip in the app, §6.1), and the At-Risk step added in Phase 6.
 

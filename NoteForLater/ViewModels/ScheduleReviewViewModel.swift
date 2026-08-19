@@ -452,8 +452,7 @@ final class ScheduleReviewViewModel {
         guard !stale.isEmpty else { return }
         let staleIDs = Set(stale.map(\.id))
         for block in stale {
-            block.habit = nil
-            modelContext.delete(block)
+            removeBlock(block)
         }
         // Saved explicitly here rather than left to the caller's own
         // save below — that one's skipped entirely whenever there's
@@ -567,9 +566,7 @@ final class ScheduleReviewViewModel {
                 guard task.isEligible(for: rule), !violatesMinimumSegment else {
                     for block in group.segments {
                         block.task?.isScheduled = false
-                        block.task = nil
-                        block.habit = nil
-                        modelContext.delete(block)
+                        removeBlock(block)
                     }
                     didTrim = true
                     continue
@@ -600,9 +597,7 @@ final class ScheduleReviewViewModel {
                 guard let excess = groups.popLast() else { break }
                 for block in excess.segments {
                     block.task?.isScheduled = false
-                    block.task = nil
-                    block.habit = nil
-                    modelContext.delete(block)
+                    removeBlock(block)
                 }
                 didTrim = true
             }
@@ -676,18 +671,7 @@ final class ScheduleReviewViewModel {
         var survivingBlocks = allBlocks
         for block in allBlocks where block.approvalStatus != .approved && !block.isLocked && !block.isCompleted && block.startTime >= cutoff {
             block.task?.isScheduled = false
-            restoreRemainingMinutes(for: block)
-            // Explicitly clears the task/habit's to-one inverse before the
-            // delete, rather than letting SwiftData's delete-rule nullify
-            // sort it out on its own — otherwise a task picked up by a
-            // *new* block later in this same run (before this delete has
-            // actually settled) can find its `scheduledBlock` inverse
-            // still claimed by the one being removed, which SwiftData
-            // reports as a hard "relationship already has a value but
-            // it's not the target" crash rather than silently overwriting it.
-            block.task = nil
-            block.habit = nil
-            modelContext.delete(block)
+            removeBlock(block)
             survivingBlocks.removeAll { $0.id == block.id }
         }
         // Flushed explicitly rather than left to autosave — the walk below
@@ -1394,12 +1378,12 @@ final class ScheduleReviewViewModel {
         if let eventID = block.googleEventID {
             Task { try? await calendarService.deleteEvent(eventID: eventID) }
         }
-        // See the matching comment in `regenerateFromNow` — clears the
-        // task/habit inverse explicitly before the delete so it can't be
-        // left claiming this block once it's gone.
-        block.task = nil
-        block.habit = nil
-        modelContext.delete(block)
+        // Restores, like every other deferral. A swipe means "not here,
+        // not now" — completing the block is the separate gesture that
+        // means the work is actually done, and `pushedCount` above is
+        // itself the record of a deferral. Discarding the work outright
+        // would need its own deliberate action, not a swipe side effect.
+        removeBlock(block)
         blocks.removeAll { $0.id == block.id }
     }
 
@@ -1440,8 +1424,9 @@ final class ScheduleReviewViewModel {
         outgoing?.pushedCount += 1
 
         for oldBlock in (newTask.scheduledBlocks ?? []) where oldBlock.id != block.id && !oldBlock.isCompleted {
-            oldBlock.task = nil
-            modelContext.delete(oldBlock)
+            // The candidate keeps the time it had placed elsewhere — it's
+            // moving to this block, not abandoning that work.
+            removeBlock(oldBlock)
             blocks.removeAll { $0.id == oldBlock.id }
         }
 
@@ -1654,8 +1639,7 @@ final class ScheduleReviewViewModel {
                 if let eventID = block.googleEventID {
                     try? await calendarService.deleteEvent(eventID: eventID)
                 }
-                block.task = nil
-                modelContext.delete(block)
+                removeBlock(block)
                 blocks.removeAll { $0.id == block.id }
                 // A recurring task (see `Shelf.isRecurringTasks`) is one
                 // TaskItem shared across every occurrence's own block —
@@ -1669,8 +1653,7 @@ final class ScheduleReviewViewModel {
                 if let eventID = block.googleEventID {
                     try? await calendarService.deleteEvent(eventID: eventID)
                 }
-                block.habit = nil
-                modelContext.delete(block)
+                removeBlock(block)
                 blocks.removeAll { $0.id == block.id }
             }
         }
@@ -1719,13 +1702,10 @@ final class ScheduleReviewViewModel {
                     task.isScheduled = false
                 }
             }
-            restoreRemainingMinutes(for: block)
             if let eventID = block.googleEventID {
                 try? await calendarService.deleteEvent(eventID: eventID)
             }
-            block.task = nil
-            block.habit = nil
-            modelContext.delete(block)
+            removeBlock(block)
             blocks.removeAll { $0.id == block.id }
         }
         try? modelContext.save()
@@ -1907,6 +1887,38 @@ final class ScheduleReviewViewModel {
         task.remainingMinutes = min(task.estimatedMinutes, task.remainingMinutes + block.durationMinutes)
     }
 
+    /// The single way a `ScheduledBlock` is removed. **Use this rather
+    /// than calling `modelContext.delete` on a block directly.**
+    ///
+    /// Restoring is the default because forgetting it is silent and
+    /// unrecoverable: `pack()` decrements `remainingMinutes` when it
+    /// places a block, so a delete that skips the restore permanently
+    /// destroys that time. Four separate call sites had independently
+    /// grown the same delete-without-restore shape — the two
+    /// `trimOverflowingRuleBlocks` branches, `deleteBlock`, and
+    /// `manualReplace` — which is how two real tasks ended up incomplete
+    /// with `remainingMinutes = 0` and nothing scheduled. Three other
+    /// paths got it right. Nothing about the old shape made the
+    /// difference visible, and nothing stopped a fifth being written the
+    /// same way.
+    ///
+    /// Completed blocks are safe to pass: `restoreRemainingMinutes`
+    /// already no-ops on them, since their time was genuinely spent.
+    ///
+    /// Also clears the task/habit inverse before deleting — otherwise a
+    /// task claimed by a *new* block later in the same run can find its
+    /// inverse still held by the one being removed, which SwiftData
+    /// reports as a hard "relationship already has a value but it's not
+    /// the target" crash rather than silently overwriting it.
+    private func removeBlock(_ block: ScheduledBlock, restoringRemainingMinutes: Bool = true) {
+        if restoringRemainingMinutes {
+            restoreRemainingMinutes(for: block)
+        }
+        block.task = nil
+        block.habit = nil
+        modelContext.delete(block)
+    }
+
     /// "Assume Not Completed" — the fast alternative to reviewing each
     /// overdue block one at a time: unschedules every one of them (same as
     /// swiping it away in the review list) so a following
@@ -1948,18 +1960,10 @@ final class ScheduleReviewViewModel {
         for block in toClear {
             block.task?.isScheduled = false
             block.task?.pushedCount += 1
-            restoreRemainingMinutes(for: block)
             if let eventID = block.googleEventID {
                 try? await calendarService.deleteEvent(eventID: eventID)
             }
-            // See the matching comment in `regenerateFromNow` — clearing
-            // the inverse explicitly before the delete avoids a SwiftData
-            // "relationship already has a value but it's not the target"
-            // crash when a new block claims this same task/habit shortly
-            // after (regenerateFromNow always runs right after this).
-            block.task = nil
-            block.habit = nil
-            modelContext.delete(block)
+            removeBlock(block)
             blocks.removeAll { $0.id == block.id }
         }
         // Flushed explicitly rather than left to autosave — the caller

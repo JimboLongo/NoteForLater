@@ -276,6 +276,47 @@ final class TaskItem {
         return segmentOptionCandidates.filter { $0 < minutes && minutes % $0 == 0 }
     }
 
+    /// Minutes currently accounted for by this task's own incomplete
+    /// blocks. Completed blocks are excluded deliberately — their time
+    /// was genuinely spent, not merely reserved.
+    var placedMinutes: Int {
+        (scheduledBlocks ?? [])
+            .filter { !$0.isCompleted }
+            .reduce(0) { $0 + Int($1.endTime.timeIntervalSince($1.startTime) / 60) }
+    }
+
+    /// What `remainingMinutes` *should* be, given the blocks this task
+    /// actually holds — or `nil` when it should be left exactly as it is.
+    ///
+    /// Repairs the damage from the delete-without-restore leak (see
+    /// `ScheduleReviewViewModel.removeBlock`), which destroyed minutes
+    /// permanently whenever a block was swept by the rule trim, swiped
+    /// away, or freed by a replace.
+    ///
+    /// Three cases, and the first one matters most:
+    ///
+    /// - **Blocks already cover the estimate → `nil`, leave alone.** This
+    ///   is an ordinary fully-scheduled task; `remainingMinutes == 0` is
+    ///   correct for it. Resetting it would re-offer work already sitting
+    ///   on the calendar and double-schedule it.
+    /// - **No blocks → the full estimate.** Nothing is placed, so nothing
+    ///   is owed against it. The lost time isn't recoverable from block
+    ///   durations here (there are none), so the whole estimate is the
+    ///   only safe answer.
+    /// - **Partial blocks → estimate minus placed.** Exactly the time not
+    ///   yet on the calendar.
+    ///
+    /// Returns `nil` for anything completed, recurring (those never drain
+    /// `remainingMinutes` at all), or without a duration, and for values
+    /// already correct.
+    func repairedRemainingMinutes() -> Int? {
+        guard !isCompleted, !isRecurring, estimatedMinutes > 0 else { return nil }
+        let placed = placedMinutes
+        guard placed < estimatedMinutes else { return nil }
+        let repaired = estimatedMinutes - placed
+        return repaired == remainingMinutes ? nil : repaired
+    }
+
     /// Forces `isDivisible`/`minimumSegmentMinutes` into a state the
     /// packer can actually satisfy. Call after **any** write to
     /// `estimatedMinutes` or `isDivisible` — notably shelf moves, which
