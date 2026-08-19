@@ -126,9 +126,18 @@ final class SchedulingEngineTests: XCTestCase {
         )
 
         XCTAssertEqual(blocks.count, 1)
-        XCTAssertEqual(blocks.first?.durationMinutes, 50)
+        // Was 50 (the rule's whole remaining budget) with 70 left over.
+        // Those numbers encoded the orphan bug: 50 isn't a multiple of
+        // this task's own 30-minute segment floor, and 70 left over means
+        // future placements take 60 and strand a 10-minute remainder no
+        // slot is ever allowed to accept. The budget is now floored to a
+        // whole segment, so both the placed amount and what's left stay
+        // multiples of 30. The property this test exists for — that
+        // partial placement drains `remainingMinutes` and never touches
+        // `estimatedMinutes` — is unchanged and still asserted below.
+        XCTAssertEqual(blocks.first?.durationMinutes, 30)
         XCTAssertEqual(task.estimatedMinutes, 120)
-        XCTAssertEqual(task.remainingMinutes, 70)
+        XCTAssertEqual(task.remainingMinutes, 90)
         XCTAssertFalse(task.isScheduled)
     }
 
@@ -803,6 +812,181 @@ final class SchedulingEngineTests: XCTestCase {
         // The backlog didn't fit in the horizon, so the leftovers must be
         // reported rather than chased to whatever distant day they'd fit.
         XCTAssertFalse(viewModel.tasksThatDidNotFit.isEmpty, "tasks left unplaced when the cap binds must be surfaced")
+    }
+
+    // MARK: - Divisibility invariants — whole segments, no orphan remainders
+
+    /// The regression test for the reported bug: a 4-hour task divisible
+    /// into 2-hour segments, against a rule whose remaining budget is 3.5
+    /// hours. `minutesNeeded` was set to the raw 210-minute budget, and
+    /// `place`'s whole-task fast path put all 210 minutes in ONE block —
+    /// never reaching the segment-splitting loop — leaving a 30-minute
+    /// remainder that no future slot could accept, since every slot is
+    /// gated on holding a full 2-hour segment. The task then sat
+    /// permanently unschedulable while still counting as remaining work.
+    ///
+    /// Note the budget, not the slot, is what caps this. A slot too small
+    /// to hold the whole task simply places nothing that day and tries
+    /// again tomorrow, which was never the bug.
+    func test_divisibleTask_budgetFlooredToWholeSegments_noOrphanRemainder() async throws {
+        let testDay = day(2026, 1, 5)
+        // 210-minute budget: 1.75 segments' worth, deliberately not a
+        // multiple of the 120-minute segment size.
+        let (shelf, rule) = makeShelf(fillStrategy: .maxDuration, maxTotalMinutes: 210)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 240, isDivisible: true, minimumSegmentMinutes: 120)
+
+        let blocks = try await service.generateProposedSchedule(
+            shelves: [shelf],
+            habits: [],
+            freeSlots: [businessHoursSlot(on: testDay)],
+            eligibleHoursWindows: [],
+            date: testDay,
+            existingBlocks: []
+        )
+
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks.first?.durationMinutes, 120, "must place one whole 2-hour segment, not the raw 210-minute budget")
+        XCTAssertEqual(task.remainingMinutes, 120, "the remainder must stay a placeable multiple of the segment size, never a 30-minute orphan")
+    }
+
+    /// The slot-splitting path: two slots, neither able to hold the whole
+    /// task, each taking a whole segment rather than whatever it happens
+    /// to hold.
+    func test_divisibleTask_splitAcrossSlots_takesWholeSegmentsOnly() async throws {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 240, isDivisible: true, minimumSegmentMinutes: 120)
+
+        // 3.5 hours then 2 hours. The first slot must yield 120, not 210 —
+        // taking 210 used to leave 30 minutes, which the second slot then
+        // rounded back UP to a full 120, over-placing the task by 90
+        // minutes total.
+        let morning = calendar.date(byAdding: .hour, value: 8, to: testDay)!
+        let afternoon = calendar.date(byAdding: .hour, value: 14, to: testDay)!
+        let blocks = try await service.generateProposedSchedule(
+            shelves: [shelf],
+            habits: [],
+            freeSlots: [
+                TimeSlot(start: morning, end: calendar.date(byAdding: .minute, value: 210, to: morning)!),
+                TimeSlot(start: afternoon, end: calendar.date(byAdding: .hour, value: 2, to: afternoon)!)
+            ],
+            eligibleHoursWindows: [],
+            date: testDay,
+            existingBlocks: []
+        )
+
+        XCTAssertEqual(blocks.map(\.durationMinutes), [120, 120], "every segment must be a whole multiple, and the total must not exceed the task")
+        XCTAssertEqual(task.remainingMinutes, 0)
+    }
+
+    /// The same task across two separate whole-segment slots drains fully.
+    func test_divisibleTask_twoWholeSegmentSlots_placesBoth() async throws {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 240, isDivisible: true, minimumSegmentMinutes: 120)
+
+        let morning = calendar.date(byAdding: .hour, value: 9, to: testDay)!
+        let afternoon = calendar.date(byAdding: .hour, value: 14, to: testDay)!
+        let blocks = try await service.generateProposedSchedule(
+            shelves: [shelf],
+            habits: [],
+            freeSlots: [
+                TimeSlot(start: morning, end: calendar.date(byAdding: .hour, value: 2, to: morning)!),
+                TimeSlot(start: afternoon, end: calendar.date(byAdding: .hour, value: 2, to: afternoon)!)
+            ],
+            eligibleHoursWindows: [],
+            date: testDay,
+            existingBlocks: []
+        )
+
+        XCTAssertEqual(blocks.count, 2)
+        XCTAssertEqual(blocks.map(\.durationMinutes), [120, 120])
+        XCTAssertEqual(task.remainingMinutes, 0)
+    }
+
+    /// The whole-task fast path is untouched — a slot big enough for the
+    /// entire task still places it in one block rather than chunking it.
+    func test_divisibleTask_wholeTaskFastPath_stillPlacesInOneBlock() async throws {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 240, isDivisible: true, minimumSegmentMinutes: 120)
+
+        let blocks = try await service.generateProposedSchedule(
+            shelves: [shelf],
+            habits: [],
+            freeSlots: [businessHoursSlot(on: testDay)],
+            eligibleHoursWindows: [],
+            date: testDay,
+            existingBlocks: []
+        )
+
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks.first?.durationMinutes, 240)
+        XCTAssertEqual(task.remainingMinutes, 0)
+    }
+
+    func test_validSegmentOptions_onlyProperDivisors() {
+        XCTAssertEqual(TaskItem.validSegmentOptions(for: 45), [15])
+        XCTAssertEqual(TaskItem.validSegmentOptions(for: 60), [15, 30])
+        XCTAssertEqual(TaskItem.validSegmentOptions(for: 90), [15, 30, 45])
+        XCTAssertEqual(TaskItem.validSegmentOptions(for: 240), [15, 30, 60, 120])
+        XCTAssertEqual(TaskItem.validSegmentOptions(for: 25), [], "no candidate divides 25 evenly — divisibility isn't expressible")
+        XCTAssertEqual(TaskItem.validSegmentOptions(for: 50), [])
+        XCTAssertEqual(TaskItem.validSegmentOptions(for: 0), [])
+    }
+
+    func test_validateDivisibility_snapsDownToLargestValidDivisor() {
+        let shelf = Shelf(name: "Test Shelf")
+        let task = TaskItem(title: "T", shelf: shelf, estimatedMinutes: 60, isDivisible: true, minimumSegmentMinutes: 30)
+        // 45 has only 15 as a divisor, so a 30-minute segment is invalid.
+        task.estimatedMinutes = 45
+        XCTAssertTrue(task.validateDivisibility())
+        XCTAssertEqual(task.minimumSegmentMinutes, 15, "must snap DOWN, never up to a coarser chunk than chosen")
+        XCTAssertTrue(task.isDivisible)
+    }
+
+    func test_validateDivisibility_clearsDivisibilityWhenNoDivisorExists() {
+        let shelf = Shelf(name: "Test Shelf")
+        let task = TaskItem(title: "T", shelf: shelf, estimatedMinutes: 60, isDivisible: true, minimumSegmentMinutes: 30)
+        task.estimatedMinutes = 25
+        XCTAssertTrue(task.validateDivisibility())
+        XCTAssertFalse(task.isDivisible, "25 minutes can't be split evenly by any offered segment")
+        XCTAssertEqual(task.minimumSegmentMinutes, 0)
+    }
+
+    func test_validateDivisibility_nonDivisibleAlwaysClearsSegment() {
+        let shelf = Shelf(name: "Test Shelf")
+        let task = TaskItem(title: "T", shelf: shelf, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 30)
+        XCTAssertTrue(task.validateDivisibility())
+        XCTAssertEqual(task.minimumSegmentMinutes, 0)
+    }
+
+    /// The shelf-move path specifically — `resolvedDuration` rewrites
+    /// `estimatedMinutes` without the user touching divisibility, which is
+    /// how a stale segment size survives into the packer.
+    func test_validateDivisibility_afterShelfMoveResolvedDuration() {
+        let source = Shelf(name: "Source")
+        let target = Shelf(name: "Target")
+        target.tracksDuration = true
+        target.defaultDurationMinutes = 45
+        context.insert(source)
+        context.insert(target)
+
+        let task = TaskItem(title: "T", shelf: source, estimatedMinutes: 60, isDivisible: true, minimumSegmentMinutes: 30)
+        context.insert(task)
+
+        // Mirrors what TaskCardSheet/TaskReviewQueueSheet do on a move.
+        task.shelf = target
+        task.estimatedMinutes = target.resolvedDuration(candidateMinutes: task.estimatedMinutes)
+        task.validateDivisibility()
+
+        if task.estimatedMinutes == 45 {
+            XCTAssertEqual(task.minimumSegmentMinutes, 15, "a 30-minute segment can't survive a move to a 45-minute duration")
+        }
+        XCTAssertTrue(
+            task.minimumSegmentMinutes == 0 || task.estimatedMinutes % task.minimumSegmentMinutes == 0,
+            "whatever the resolved duration turned out to be, the segment must evenly divide it"
+        )
     }
 
     // MARK: - Walk termination — recurring tasks must not defeat stall detection

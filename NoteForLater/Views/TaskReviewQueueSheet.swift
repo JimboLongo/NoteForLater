@@ -71,6 +71,10 @@ struct TaskReviewQueueSheet: View {
                                 currentTask.isDivisible = false
                                 currentTask.minimumSegmentMinutes = 0
                             }
+                            // See the matching call in TaskCardSheet's own
+                            // move handler — `resolvedDuration` above can
+                            // invalidate the segment size.
+                            currentTask.validateDivisibility()
                             if !shelf.effectiveTracksDueDates {
                                 currentTask.dueDate = nil
                             }

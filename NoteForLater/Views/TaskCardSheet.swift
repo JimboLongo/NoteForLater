@@ -45,6 +45,11 @@ struct TaskCardSheet: View {
                         task.isDivisible = false
                         task.minimumSegmentMinutes = 0
                     }
+                    // The duration just changed via `resolvedDuration`, which
+                    // can invalidate a segment size chosen against the old
+                    // one — re-validate rather than leaving the packer a
+                    // remainder it can never place.
+                    task.validateDivisibility()
                     if !shelf.effectiveTracksDueDates {
                         task.dueDate = nil
                     }
@@ -175,6 +180,7 @@ struct TaskEditSnapshot: Equatable {
         task.isDivisible = isDivisible
         task.minimumSegmentMinutes = minimumSegmentMinutes
         task.isDivisibleDecided = isDivisibleDecided
+        task.validateDivisibility()
         task.tags = tags
         task.includedSchedulingRuleIDs = includedSchedulingRuleIDs
         task.attributeReviewSnoozedUntil = attributeReviewSnoozedUntil

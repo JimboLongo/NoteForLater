@@ -419,7 +419,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             // offer than its original stated size.
             let baseMinutes = task.remainingMinutes
 
-            let minutesNeeded: Int
+            var minutesNeeded: Int
             switch rule.fillStrategy {
             case .fillToFit:
                 minutesNeeded = baseMinutes
@@ -443,10 +443,27 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
                     continue // too long for a single capped session and can't be split
                 }
             }
-            guard minutesNeeded > 0 else { continue }
             // A divisible task with no minimum segment chosen yet ("Not
             // Selected") can't be split safely — treat it as not ready.
             guard !task.isDivisible || task.minimumSegmentMinutes > 0 else { continue }
+            // The two branches above can set `minutesNeeded` to a rule's
+            // leftover budget or per-task cap — arbitrary numbers with no
+            // relationship to this task's segment size. Asking for such an
+            // amount is what actually produced the reported orphan: a
+            // 4-hour task with 2-hour segments against a 3.5-hour budget
+            // asked for 210 minutes, and `place`'s whole-task fast path
+            // happily put all 210 in ONE block (never reaching the
+            // segment-splitting loop at all), leaving 30 minutes that no
+            // future slot could ever accept.
+            //
+            // Flooring here rather than only inside `place` is load-bearing
+            // for exactly that reason: the fast path bypasses the loop, so
+            // a fix confined to the loop would not have addressed the
+            // reported case.
+            if task.isDivisible {
+                minutesNeeded = (minutesNeeded / task.minimumSegmentMinutes) * task.minimumSegmentMinutes
+            }
+            guard minutesNeeded > 0 else { continue }
             // A divisible task's own minimum chunk size is a hard floor —
             // if this rule's own per-task cap (Max Task Count) or
             // remaining budget (Max Total Duration) can't offer at least
@@ -507,13 +524,24 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
         for slot in slots {
             guard remaining > 0 else { break }
             guard slot.durationMinutes >= minimumSegment else { continue }
-            // A trailing sliver smaller than the task's own configured
-            // minimum chunk is never scheduled — the guard above already
-            // guarantees this slot can hold at least `minimumSegment`, so
-            // rounding the final piece up to it (rather than the smaller
-            // `remaining`) trades a few extra minutes on the calendar for
-            // never producing a segment under the floor the user chose.
-            let take = remaining >= minimumSegment ? min(remaining, slot.durationMinutes) : minimumSegment
+            // Every piece taken is a whole multiple of `minimumSegment`,
+            // never just whatever the slot happens to hold. Taking
+            // `min(remaining, slot.durationMinutes)` instead meant a
+            // 3.5-hour slot absorbed 3.5 hours of a 4-hour task with
+            // 2-hour segments, stranding a 30-minute remainder that no
+            // slot could ever accept (the guard above rejects anything
+            // under 2 hours). The task then sat unschedulable forever
+            // while still counting as remaining work — the exact
+            // condition that drove the unbounded walk fixed in 99996ab.
+            //
+            // Because `remaining` therefore stays a multiple of
+            // `minimumSegment` throughout, it can never drop below it
+            // mid-placement, which is why the old round-up branch
+            // (`: minimumSegment`) is gone rather than kept: it was only
+            // reachable via the sliver this now prevents.
+            let usable = (slot.durationMinutes / minimumSegment) * minimumSegment
+            guard usable > 0 else { continue }
+            let take = min(remaining, usable)
             let segmentEnd = slot.start.addingTimeInterval(TimeInterval(take * 60))
             segments.append((slot.start, segmentEnd))
             remaining -= take

@@ -253,6 +253,67 @@ final class TaskItem {
     /// instead of "No" reading as already picked.
     var isDivisibleDecided: Bool = false
 
+    /// The chunk sizes worth offering as a minimum segment, in general —
+    /// not a uniform step, just the values that make sense to a person.
+    /// `validSegmentOptions(for:)` is what any UI should actually show.
+    static let segmentOptionCandidates = [15, 30, 45, 60, 90, 120, 240]
+
+    /// Which of `segmentOptionCandidates` evenly divide `minutes` and are
+    /// strictly smaller than it.
+    ///
+    /// Strictly smaller because a segment the size of the whole task is
+    /// what "not divisible" already means. Evenly dividing because the
+    /// packer only ever takes whole multiples of the segment size (see
+    /// `AISchedulingService.place`) — offering 45 for a 60-minute task
+    /// would guarantee a 15-minute remainder that no slot is allowed to
+    /// accept, stranding the task permanently.
+    ///
+    /// Empty for durations with no divisor in the list at all (25, 50,
+    /// 100…). Callers must disable divisibility in that case rather than
+    /// showing an empty picker.
+    static func validSegmentOptions(for minutes: Int) -> [Int] {
+        guard minutes > 0 else { return [] }
+        return segmentOptionCandidates.filter { $0 < minutes && minutes % $0 == 0 }
+    }
+
+    /// Forces `isDivisible`/`minimumSegmentMinutes` into a state the
+    /// packer can actually satisfy. Call after **any** write to
+    /// `estimatedMinutes` or `isDivisible` — notably shelf moves, which
+    /// rewrite the duration via `Shelf.resolvedDuration(candidateMinutes:)`
+    /// without the user touching the divisibility controls at all.
+    ///
+    /// Single definition on the model rather than repeated at each call
+    /// site, for the same reason `isSchedulableBacklog` is: several
+    /// screens write these fields, and a rule enforced in only some of
+    /// them isn't an invariant.
+    ///
+    /// Snaps **down** to the largest valid divisor rather than up, so a
+    /// task never silently ends up chunked more coarsely than the user
+    /// asked for. Returns whether anything actually changed, so a caller
+    /// can surface the change instead of applying it invisibly.
+    @discardableResult
+    func validateDivisibility() -> Bool {
+        let previousDivisible = isDivisible
+        let previousSegment = minimumSegmentMinutes
+
+        guard isDivisible else {
+            minimumSegmentMinutes = 0
+            return previousSegment != 0
+        }
+
+        let options = TaskItem.validSegmentOptions(for: estimatedMinutes)
+        if options.isEmpty {
+            // Nothing can divide this duration evenly — divisibility is
+            // not expressible, so it's cleared rather than left pointing
+            // at a segment size the packer would refuse to honor.
+            isDivisible = false
+            minimumSegmentMinutes = 0
+        } else if !options.contains(minimumSegmentMinutes) {
+            minimumSegmentMinutes = options.last ?? 0
+        }
+        return isDivisible != previousDivisible || minimumSegmentMinutes != previousSegment
+    }
+
     /// SchedulingRule IDs (from this task's shelf) that this task IS
     /// eligible to be pulled by — opt-in, not opt-out: empty (the default)
     /// means eligible for none of the shelf's rules until the user

@@ -359,6 +359,11 @@ struct ShelfEditView: View {
                 task.estimatedMinutes = 0
                 task.isDivisible = false
                 task.minimumSegmentMinutes = 0
+                // Redundant alongside the two explicit clears above, but
+                // kept so this stays correct by construction if that
+                // clearing is ever relaxed — the invariant belongs to the
+                // model, not to each caller remembering it.
+                task.validateDivisibility()
             }
         }
         if shelf.isKitchen || !hasDueDates {

@@ -874,9 +874,13 @@ struct TaskReviewCard: View {
     /// sizes actually worth picking from directly. See `durationWheelOptions`
     /// below for why this alone isn't always enough.
     private static let durationOptions = [15, 30, 45, 60, 90, 120, 240, 480]
-    /// Not a uniform step — these are the actual chunk sizes worth
-    /// offering for a divisible task's minimum segment.
-    private static let divisibleSegmentOptions = [15, 30, 45, 60, 90, 120, 240]
+    /// Segment sizes valid for *this* task's current duration — only
+    /// values that evenly divide it, so the packer can never be left with
+    /// a remainder too small to place (see `TaskItem.validSegmentOptions`).
+    /// Computed, not a static list: it has to track duration edits.
+    private var segmentOptions: [Int] {
+        TaskItem.validSegmentOptions(for: task.estimatedMinutes)
+    }
 
     /// `durationOptions`, plus the task's own current value slotted in if
     /// it isn't already one of them — a divisible task's remaining time
@@ -1635,9 +1639,11 @@ struct TaskReviewCard: View {
                             task.isDivisibleDecided = true
                             task.isDivisible = true
                             // Same reasoning as the Duration wheel above —
-                            // needs a value actually in its own range.
-                            if task.minimumSegmentMinutes <= 0 {
-                                task.minimumSegmentMinutes = Self.divisibleSegmentOptions.first ?? 15
+                            // needs a value actually in its own range, and
+                            // now also one that evenly divides the task's
+                            // duration (see `validSegmentOptions(for:)`).
+                            if !segmentOptions.contains(task.minimumSegmentMinutes) {
+                                task.minimumSegmentMinutes = segmentOptions.first ?? 0
                             }
                         }
                     } label: {
@@ -1650,6 +1656,8 @@ struct TaskReviewCard: View {
                             .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)
+                    .disabled(segmentOptions.isEmpty)
+                    .opacity(segmentOptions.isEmpty ? 0.4 : 1)
 
                     Button {
                         focusedField = nil
@@ -1671,9 +1679,9 @@ struct TaskReviewCard: View {
                     }
                     .buttonStyle(.plain)
 
-                    if isDivisibleYesSelected {
+                    if isDivisibleYesSelected, !segmentOptions.isEmpty {
                         Picker("Minimum Segment", selection: $task.minimumSegmentMinutes) {
-                            ForEach(Self.divisibleSegmentOptions, id: \.self) { minutes in
+                            ForEach(segmentOptions, id: \.self) { minutes in
                                 Text(TaskItem.durationLabel(for: minutes))
                                     .font(.subheadline.weight(.semibold))
                                     .tag(minutes)
@@ -1685,8 +1693,25 @@ struct TaskReviewCard: View {
                         .clipped()
                     }
                 }
+                if segmentOptions.isEmpty, task.estimatedMinutes > 0 {
+                    // Stated rather than left as a toggle that silently
+                    // refuses to turn on — a disabled control with no
+                    // reason reads as broken.
+                    Text("A \(TaskItem.durationLabel(for: task.estimatedMinutes)) task can't be split into even segments.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.top, 4)
+            .onChange(of: task.estimatedMinutes) {
+                // Duration edits can invalidate a segment size chosen
+                // earlier, including clearing divisibility entirely when
+                // the new duration has no divisor at all. Re-validating
+                // here (not only on save) means the controls above show
+                // that consequence at the moment it happens, rather than
+                // the user discovering it later.
+                task.validateDivisibility()
+            }
             .disabled(!durationAllowed)
             .opacity(durationAllowed ? 1 : 0.4)
             .animation(.easeInOut(duration: 0.15), value: task.isDivisibleDecided)
