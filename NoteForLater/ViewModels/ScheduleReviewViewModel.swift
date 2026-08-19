@@ -18,6 +18,19 @@ final class ScheduleReviewViewModel {
     var targetDate: Date
     var isGenerating = false
     var errorMessage: String?
+    /// How many days the most recent `autoPlaceEligibleTasks` /
+    /// `regenerateFromNow` walk actually visited.
+    ///
+    /// Exists for tests. Before batching, a test could prove stall
+    /// detection had stopped the walk by counting the fake's per-day
+    /// `fetchFreeSlots` calls — one call per day visited made the call
+    /// count a faithful proxy for walk length. Batching destroys that
+    /// proxy: the walk now issues exactly one ranged call covering a
+    /// fixed `freeSlotPrefetchDays` window no matter where it actually
+    /// stops, so network-call counts can no longer distinguish a walk
+    /// that halted at day 14 from one that ran to day 30. This records
+    /// the thing that test actually cared about, directly.
+    private(set) var lastWalkDayCount = 0
 
     init(
         modelContext: ModelContext,
@@ -150,9 +163,20 @@ final class ScheduleReviewViewModel {
         // day-count cap. Reset to 0 any day that places at least one
         // task block, incremented otherwise.
         var consecutiveDaysWithoutTaskPlacement = 0
+        // One ranged call up front instead of one per iteration below.
+        // Days past this window (rare — see `freeSlotPrefetchDays`) fall
+        // through to the per-day call, preserving the `try?`/`break`
+        // handling this loop already had.
+        let prefetched = await prefetchFreeSlots(from: cursorDay, days: Self.freeSlotPrefetchDays)
 
         while dayIndex == 0 || (consecutiveDaysWithoutTaskPlacement < Self.taskStallThresholdDays && hasRemainingSchedulableWork(shelves: shelves)) {
-            guard var freeSlots = try? await calendarService.fetchFreeSlots(for: cursorDay) else { break }
+            let resolvedSlots: [TimeSlot]?
+            if let cached = prefetched[calendar.startOfDay(for: cursorDay)] {
+                resolvedSlots = cached
+            } else {
+                resolvedSlots = try? await calendarService.fetchFreeSlots(for: cursorDay)
+            }
+            guard var freeSlots = resolvedSlots else { break }
             let dayBlocks = allBlocksNow.filter { calendar.isDate($0.date, inSameDayAs: cursorDay) }
             for existing in dayBlocks {
                 freeSlots = subtracting(existing.startTime..<existing.endTime, from: freeSlots)
@@ -180,6 +204,7 @@ final class ScheduleReviewViewModel {
             cursorDay = calendar.date(byAdding: .day, value: 1, to: cursorDay) ?? cursorDay
             dayIndex += 1
         }
+        lastWalkDayCount = dayIndex
 
         if anyInserted {
             try? modelContext.save()
@@ -460,14 +485,14 @@ final class ScheduleReviewViewModel {
         var dayIndex = 0
         // Habits recur forever by design (see doc comment above) — a
         // habit alone never lets the walk stop on its own, so its own
-        // reason to keep going is capped at a sane rolling horizon.
+        // reason to keep going is capped at a sane rolling horizon
+        // (`Self.habitPopulationDays`).
         // Tasks, on the other hand, actually run out: `hasRemainingSchedulableWork`
         // only ever counts a task that's both eligible for one of its
         // shelf's rules and genuinely able to fit it (see `SchedulingRule
         // .canEverFit`), so it's guaranteed to go false once everything
         // real is placed — a task that can never fit anywhere is already
         // excluded, not counted as "remaining" forever.
-        let habitPopulationDays = 30
         var newBlocks: [ScheduledBlock] = []
         let keepWalkingForHabits = hasSchedulableHabits(habits: habits)
         // Bounds the *task* side of the walk without a flat day-count
@@ -476,12 +501,23 @@ final class ScheduleReviewViewModel {
         // this is purely about whether the task backlog is making
         // progress), incremented otherwise.
         var consecutiveDaysWithoutTaskPlacement = 0
+        // Same batching as `autoPlaceEligibleTasks` — one ranged call up
+        // front, per-day fallback beyond the window. The `try`/`catch`
+        // below is unchanged: a cache hit simply skips the throwing call,
+        // and a miss still routes through it, so a genuine fetch failure
+        // sets `completedFully = false` and breaks exactly as before.
+        let prefetched = await prefetchFreeSlots(from: cursorDay, days: Self.freeSlotPrefetchDays)
 
         while dayIndex == 0
-            || (dayIndex < habitPopulationDays && keepWalkingForHabits)
+            || (dayIndex < Self.habitPopulationDays && keepWalkingForHabits)
             || (consecutiveDaysWithoutTaskPlacement < Self.taskStallThresholdDays && hasRemainingSchedulableWork(shelves: shelves)) {
             do {
-                var freeSlots = try await calendarService.fetchFreeSlots(for: cursorDay)
+                var freeSlots: [TimeSlot]
+                if let cached = prefetched[calendar.startOfDay(for: cursorDay)] {
+                    freeSlots = cached
+                } else {
+                    freeSlots = try await calendarService.fetchFreeSlots(for: cursorDay)
+                }
                 if dayIndex == 0 && calendar.isDateInToday(cursorDay) {
                     // Today only offers up whatever's still ahead of the
                     // cutoff — everything earlier is already past, so it's
@@ -535,6 +571,7 @@ final class ScheduleReviewViewModel {
             cursorDay = calendar.date(byAdding: .day, value: 1, to: cursorDay) ?? cursorDay
             dayIndex += 1
         }
+        lastWalkDayCount = dayIndex
         try? modelContext.save()
 
         let combined = survivingBlocks + newBlocks
@@ -597,6 +634,44 @@ final class ScheduleReviewViewModel {
     /// day is for a finite task backlog); it's governed purely by
     /// `habitPopulationDays` instead.
     private static let taskStallThresholdDays = 14
+
+    /// How far ahead `regenerateFromNow` keeps walking purely to lay down
+    /// habit occurrences. Habits recur forever, so unlike the task side
+    /// there's nothing that can ever "run out" to stop the walk — this is
+    /// the horizon that does it. Was a local `let` inside
+    /// `regenerateFromNow`; promoted to a shared constant so
+    /// `freeSlotPrefetchDays` below can be derived from it.
+    private static let habitPopulationDays = 30
+
+    /// How many days of free/busy to pull in the single ranged call each
+    /// walk makes up front (see `prefetchFreeSlots(from:days:)`).
+    ///
+    /// Derived, never hardcoded: it has to cover whichever of the two
+    /// walk-termination conditions runs longer. `regenerateFromNow` walks
+    /// at least `habitPopulationDays` whenever any habit exists, and the
+    /// task side can then run a further `taskStallThresholdDays` past
+    /// that before stalling out, so their sum is the horizon that covers
+    /// the realistic worst case in one request.
+    ///
+    /// It is deliberately NOT a hard cap on the walk. A task backlog that
+    /// places something every 10-13 days never trips the stall counter,
+    /// so a walk can legitimately run past this window; days beyond it
+    /// fall back to the per-day `fetchFreeSlots(for:)` rather than
+    /// re-batching or truncating. That keeps the pathological case
+    /// correct while costing nothing in the common one.
+    private static let freeSlotPrefetchDays = habitPopulationDays + taskStallThresholdDays
+
+    /// One ranged free/busy call covering `days` days from `startDay`,
+    /// keyed by `startOfDay` for direct cursor lookup. Returns `[:]` on
+    /// failure rather than throwing — a miss just sends each day down the
+    /// per-day fallback path, which carries the caller's own existing
+    /// error handling, so a failed pre-fetch degrades to exactly the
+    /// behavior this optimization replaced instead of failing the walk.
+    private func prefetchFreeSlots(from startDay: Date, days: Int) async -> [Date: [TimeSlot]] {
+        let calendar = Calendar.current
+        guard let end = calendar.date(byAdding: .day, value: days, to: calendar.startOfDay(for: startDay)) else { return [:] }
+        return (try? await calendarService.fetchFreeSlots(from: startDay, to: end)) ?? [:]
+    }
 
     /// Deliberately does NOT call `TaskItem.isEffectivelyEligible` —
     /// inlines the same check against `remainingMinutes` instead of

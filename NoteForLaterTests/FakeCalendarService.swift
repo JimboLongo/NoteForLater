@@ -14,6 +14,14 @@ final class FakeCalendarService: CalendarServiceProtocol {
     var enabledCalendarIDs: [String] = ["primary"]
 
     var freeSlotsToReturn: [TimeSlot] = []
+    /// Overrides `freeSlotsToReturn` with slots built for whichever day is
+    /// actually being asked about. `freeSlotsToReturn` is a single fixed
+    /// array reused for every date, which is fine when a test only cares
+    /// about one day or expects nothing to place — but a multi-day walk
+    /// that needs real placements on later days gets slots anchored to the
+    /// wrong date, and the packer discards them. Set this instead in that
+    /// case.
+    var freeSlotsProvider: ((Date) -> [TimeSlot])?
     var busyBlocksToReturn: [TimeSlot] = []
     var eventsToReturn: [CalendarEventSummary] = []
     private(set) var deletedEventIDs: [String] = []
@@ -34,7 +42,7 @@ final class FakeCalendarService: CalendarServiceProtocol {
 
     func fetchFreeSlots(for date: Date) async throws -> [TimeSlot] {
         fetchFreeSlotsCallCount += 1
-        return freeSlotsToReturn
+        return freeSlotsProvider?(date) ?? freeSlotsToReturn
     }
 
     /// Serves the same fixed `freeSlotsToReturn` for every day in the
@@ -46,7 +54,7 @@ final class FakeCalendarService: CalendarServiceProtocol {
         lastRangedRequest = (start, end)
         var result: [Date: [TimeSlot]] = [:]
         for day in calendarDays(from: start, to: end) {
-            result[day] = freeSlotsToReturn
+            result[day] = freeSlotsProvider?(day) ?? freeSlotsToReturn
         }
         return result
     }

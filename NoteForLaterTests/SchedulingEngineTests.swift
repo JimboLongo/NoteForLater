@@ -717,9 +717,122 @@ final class SchedulingEngineTests: XCTestCase {
         // ScheduleReviewViewModel, so asserted here as a literal) — the
         // walk visiting exactly this many days, not 365 and not
         // unboundedly many, is the actual thing this test is proving.
-        XCTAssertEqual(calendarService.fetchFreeSlotsCallCount, 14)
+        //
+        // Read off `lastWalkDayCount` rather than the fake's call count:
+        // batching means the walk issues one ranged call covering a fixed
+        // 44-day window regardless of where it stops, so a call count can
+        // no longer tell a 14-day walk apart from a 30-day one. Asserting
+        // the requested *span* wouldn't work either — that's always 44.
+        XCTAssertEqual(viewModel.lastWalkDayCount, 14)
         XCTAssertFalse(task.isScheduled)
         XCTAssertEqual(task.remainingMinutes, 30)
+
+        // And the batching itself: one ranged call, and no per-day
+        // fallback, since 14 days is comfortably inside the 44-day
+        // pre-fetch window.
+        XCTAssertEqual(calendarService.fetchFreeSlotsRangedCallCount, 1)
+        XCTAssertEqual(calendarService.fetchFreeSlotsCallCount, 0)
+        // 44 == freeSlotPrefetchDays (habitPopulationDays 30 +
+        // taskStallThresholdDays 14), both private — asserted as a
+        // literal for the same reason as the 14 above.
+        let requested = try XCTUnwrap(calendarService.lastRangedRequest)
+        XCTAssertEqual(calendarDays(from: requested.start, to: requested.end, calendar: calendar).count, 44)
+    }
+
+    /// The fallback path that keeps the pre-fetch horizon from silently
+    /// becoming a cap. A task backlog that places something every 13 days
+    /// never trips the 14-day stall counter, so the walk legitimately runs
+    /// past the 44-day pre-fetched window — those days must come from the
+    /// per-day call rather than being truncated or re-batched.
+    ///
+    /// Without this test, a future change to the ranged call could break
+    /// the fallback and nothing would catch it: every other test's walk
+    /// fits inside the window.
+    func test_autoPlaceEligibleTasks_walkPastPrefetchWindow_fallsBackPerDay() async throws {
+        let shelf = Shelf(name: "Test Shelf")
+        context.insert(shelf)
+        // Only Mondays, so placement happens once every 7 days — enough
+        // to keep resetting the stall counter (7 < 14) so the walk never
+        // stalls, and it only stops once the backlog genuinely runs out.
+        let schedule = NamedSchedule(name: "Mondays", daysOfWeek: [2], startHour: 0, startMinute: 0, endHour: 23, endMinute: 59)
+        context.insert(schedule)
+        let rule = SchedulingRule(shelf: shelf, fillStrategy: .maxTaskCount, maxTaskCount: 1, maxMinutesPerTask: 60)
+        rule.namedSchedule = schedule
+        context.insert(rule)
+        shelf.schedulingRules = [rule]
+
+        // 10 tasks, one placeable per Monday → ~70 days of walking, well
+        // past the 44-day pre-fetch window.
+        var tasks: [TaskItem] = []
+        for index in 0..<10 {
+            let task = TaskItem(title: "Task \(index)", shelf: shelf, estimatedMinutes: 60)
+            task.setEligible(true, for: rule)
+            context.insert(task)
+            tasks.append(task)
+        }
+        shelf.tasks = tasks
+
+        let testDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+        let calendarService = FakeCalendarService()
+        // Per-day slots, not a fixed array: this walk needs real
+        // placements on days far past `testDay`, and slots anchored to
+        // the wrong date get discarded by the packer.
+        calendarService.freeSlotsProvider = { [self.businessHoursSlot(on: $0)] }
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: testDay)
+
+        await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+
+        XCTAssertGreaterThan(viewModel.lastWalkDayCount, 44, "fixture invalid — the walk has to actually leave the pre-fetch window for this test to mean anything")
+        XCTAssertEqual(calendarService.fetchFreeSlotsRangedCallCount, 1, "the walk must pre-fetch exactly once, not re-batch when it runs past the window")
+        XCTAssertGreaterThan(calendarService.fetchFreeSlotsCallCount, 0, "days past the pre-fetch window must fall back to the per-day call, not be dropped")
+        // The fallback should account for exactly the overshoot — every
+        // day inside the window came from the batch.
+        XCTAssertEqual(calendarService.fetchFreeSlotsCallCount, viewModel.lastWalkDayCount - 44)
+    }
+
+    // MARK: - Follow-On #1 — per-day slicing of a shared multi-day busy list
+
+    /// The case the ranged fetch introduces and the per-day fetch never
+    /// could: one busy list covering many days is handed to *every* day in
+    /// the span, so each day has to clamp it to its own window. An event
+    /// crossing midnight must not surface as busy time on the next day.
+    func test_freeSlotsInWindow_clampsBusyRangeCrossingMidnight() {
+        let day = self.day(2026, 1, 5)
+        let nextDay = self.day(2026, 1, 6)
+        // 11pm on day 1 → 1am on day 2.
+        let overnight = TimeSlot(
+            start: calendar.date(byAdding: .hour, value: 23, to: day)!,
+            end: calendar.date(byAdding: .hour, value: 1, to: nextDay)!
+        )
+        let fullDay = { (d: Date) in (start: d, end: self.calendar.date(byAdding: .day, value: 1, to: d)!) }
+
+        let dayOne = freeSlots(inWindow: fullDay(day), busy: [overnight])
+        XCTAssertEqual(dayOne.count, 1)
+        XCTAssertEqual(dayOne.first?.start, day)
+        XCTAssertEqual(dayOne.first?.end, calendar.date(byAdding: .hour, value: 23, to: day)!, "day one's free time must end where the overnight event starts")
+
+        let dayTwo = freeSlots(inWindow: fullDay(nextDay), busy: [overnight])
+        XCTAssertEqual(dayTwo.count, 1)
+        XCTAssertEqual(dayTwo.first?.start, calendar.date(byAdding: .hour, value: 1, to: nextDay)!, "day two must start free at 1am, when the overnight event actually ends")
+        XCTAssertEqual(dayTwo.first?.end, self.day(2026, 1, 7))
+    }
+
+    /// A busy range belonging to some other day entirely is ignored rather
+    /// than clipping the day being sliced — the common case, since a 44-day
+    /// batch means almost every entry belongs to a different day.
+    func test_freeSlotsInWindow_ignoresBusyRangeFromAnotherDay() {
+        let day = self.day(2026, 1, 5)
+        let elsewhere = TimeSlot(
+            start: calendar.date(byAdding: .hour, value: 10, to: self.day(2026, 1, 20))!,
+            end: calendar.date(byAdding: .hour, value: 11, to: self.day(2026, 1, 20))!
+        )
+        let window = (start: day, end: calendar.date(byAdding: .day, value: 1, to: day)!)
+
+        let result = freeSlots(inWindow: window, busy: [elsewhere])
+
+        XCTAssertEqual(result.count, 1, "an unrelated day's event must leave this day untouched")
+        XCTAssertEqual(result.first?.start, window.start)
+        XCTAssertEqual(result.first?.end, window.end)
     }
 
     // MARK: - §6 — why the dirty flag has to escalate to regenerateFromNow
