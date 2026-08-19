@@ -169,6 +169,40 @@ final class ScheduleReviewViewModel {
     /// the thing that test actually cared about, directly.
     private(set) var lastWalkDayCount = 0
 
+    /// Tail of the chain of walks on **this** view model. Each new walk
+    /// awaits the previous one before starting, so two can never read the
+    /// same day's free slots and both place into it.
+    ///
+    /// Waiting rather than dropping, deliberately. A dropped sync would
+    /// mean a day-swipe silently places nothing — a worse and much more
+    /// confusing bug than the one being fixed, and invisible until someone
+    /// noticed an empty day.
+    ///
+    /// **Per-instance only, and that is a known limitation rather than an
+    /// oversight.** `NightlyReviewView` builds its own separate
+    /// `ScheduleReviewViewModel` (`tomorrowViewModel`), which this chain
+    /// cannot serialize against. It's left that way because the captured
+    /// reproduction showed all 51 walk runs — and all 10 overlapping
+    /// pairs — on a single instance, so cross-instance contention is
+    /// unproven rather than shown to be harmless. Serializing across
+    /// instances needs shared state (an actor or a singleton), which is a
+    /// heavier change than the evidence currently justifies. The overlap
+    /// invariant at insertion (`insertSchedulerBlock`) is the backstop
+    /// that covers it regardless of which instance places the block.
+    private var walkChain: Task<Void, Never>?
+
+    /// Runs `body` after whatever walk is already in flight on this
+    /// instance, and doesn't return until `body` itself has finished.
+    private func serializingWalk(_ body: @escaping @MainActor () async -> Void) async {
+        let previous = walkChain
+        let task = Task { @MainActor in
+            await previous?.value
+            await body()
+        }
+        walkChain = task
+        await task.value
+    }
+
     // TEMPORARY DIAGNOSTIC (docs/double-booking-plan.md step 1) — remove
     // once the double-booking cause is confirmed and fixed.
     //
@@ -260,8 +294,7 @@ final class ScheduleReviewViewModel {
             // scheduled or just trim its remaining time (divisible tasks
             // that only got part of their time placed stay unscheduled).
             for block in proposed {
-                diagLogInsert(diagRun, site: "generateProposedSchedule", block: block) // TEMPORARY DIAGNOSTIC
-                modelContext.insert(block)
+                insertSchedulerBlock(block, runID: diagRun, site: "generateProposedSchedule")
             }
             blocks = proposed.sorted { $0.startTime < $1.startTime }
         } catch {
@@ -324,6 +357,12 @@ final class ScheduleReviewViewModel {
     /// `ScheduleReviewView.twoMinuteTasksSection`, an untimed checklist
     /// instead of a calendar block.
     func autoPlaceEligibleTasks(shelves: [Shelf], habits: [Habit], eligibleHoursWindows: [EligibleHoursWindow]) async {
+        await serializingWalk { [self] in
+            await performAutoPlaceEligibleTasks(shelves: shelves, habits: habits, eligibleHoursWindows: eligibleHoursWindows)
+        }
+    }
+
+    private func performAutoPlaceEligibleTasks(shelves: [Shelf], habits: [Habit], eligibleHoursWindows: [EligibleHoursWindow]) async {
         let diagRun = Self.diagRunID() // TEMPORARY DIAGNOSTIC
         diagLog(diagRun, "ENTER autoPlaceEligibleTasks targetDate=\(targetDate)")
         defer { diagLog(diagRun, "EXIT  autoPlaceEligibleTasks") }
@@ -385,12 +424,14 @@ final class ScheduleReviewViewModel {
                 date: cursorDay,
                 existingBlocks: dayBlocks
             ), !newBlocks.isEmpty {
-                for block in newBlocks {
-                    diagLogInsert(diagRun, site: "autoPlaceEligibleTasks", block: block) // TEMPORARY DIAGNOSTIC
-                    modelContext.insert(block)
-                }
-                allBlocksNow += newBlocks
-                anyInserted = true
+                // Only blocks the overlap invariant actually accepted
+                // count from here on — a rejected one was never inserted,
+                // so treating it as placed would both mark the day as
+                // progress (resetting the stall counter) and show a block
+                // in the UI that isn't in the store.
+                let insertedBlocks = newBlocks.filter { insertSchedulerBlock($0, runID: diagRun, site: "autoPlaceEligibleTasks") }
+                allBlocksNow += insertedBlocks
+                anyInserted = anyInserted || !insertedBlocks.isEmpty
                 // Recurring tasks are excluded deliberately. This counter
                 // measures whether the *backlog* is making progress, and
                 // a recurring task places itself on every occurrence day
@@ -405,9 +446,9 @@ final class ScheduleReviewViewModel {
                 // `hasRemainingSchedulableWork` went false, which for a
                 // task that fits nowhere nearby meant crawling ~1046 days
                 // to the first day it happened to fit.
-                placedTaskBlockToday = newBlocks.contains { $0.task != nil && !($0.task?.isRecurring ?? false) }
+                placedTaskBlockToday = insertedBlocks.contains { $0.task != nil && !($0.task?.isRecurring ?? false) }
                 if calendar.isDate(cursorDay, inSameDayAs: targetDate) {
-                    blocks = (blocks + newBlocks).sorted { $0.startTime < $1.startTime }
+                    blocks = (blocks + insertedBlocks).sorted { $0.startTime < $1.startTime }
                 }
             }
             consecutiveDaysWithoutTaskPlacement = placedTaskBlockToday ? 0 : consecutiveDaysWithoutTaskPlacement + 1
@@ -646,6 +687,15 @@ final class ScheduleReviewViewModel {
     /// to be retried later instead of being dropped here.
     @discardableResult
     func regenerateFromNow(shelves: [Shelf], habits: [Habit], eligibleHoursWindows: [EligibleHoursWindow]) async -> Bool {
+        var completed = false
+        await serializingWalk { [self] in
+            completed = await performRegenerateFromNow(shelves: shelves, habits: habits, eligibleHoursWindows: eligibleHoursWindows)
+        }
+        return completed
+    }
+
+    @discardableResult
+    private func performRegenerateFromNow(shelves: [Shelf], habits: [Habit], eligibleHoursWindows: [EligibleHoursWindow]) async -> Bool {
         let diagRun = Self.diagRunID() // TEMPORARY DIAGNOSTIC
         diagLog(diagRun, "ENTER regenerateFromNow targetDate=\(targetDate)")
         defer { diagLog(diagRun, "EXIT  regenerateFromNow") }
@@ -761,9 +811,7 @@ final class ScheduleReviewViewModel {
                     date: cursorDay,
                     existingBlocks: survivingBlocks.filter { calendar.isDate($0.date, inSameDayAs: cursorDay) }
                 )
-                for block in dayBlocks {
-                    diagLogInsert(diagRun, site: "regenerateFromNow", block: block) // TEMPORARY DIAGNOSTIC
-                    modelContext.insert(block)
+                for block in dayBlocks where insertSchedulerBlock(block, runID: diagRun, site: "regenerateFromNow") {
                     newBlocks.append(block)
                 }
                 // Recurring tasks excluded — see the matching comment in
@@ -1910,6 +1958,53 @@ final class ScheduleReviewViewModel {
     /// inverse still held by the one being removed, which SwiftData
     /// reports as a hard "relationship already has a value but it's not
     /// the target" crash rather than silently overwriting it.
+    /// The one place a **scheduler-placed** block enters the store.
+    /// Refuses to insert a task block that would overlap an existing task
+    /// block, and returns whether it inserted.
+    ///
+    /// Defense in depth alongside `serializingWalk`, not a substitute for
+    /// it. Serialization removes the cause; this catches the symptom
+    /// regardless of cause — including from a view model instance the
+    /// chain can't see, or from some future write path nobody has thought
+    /// of yet. It would have caught the original double-booking the first
+    /// time it happened rather than after a database pull.
+    ///
+    /// **Exemptions, all deliberate:**
+    /// - *Habit* blocks may overlap anything. Habits are allowed to
+    ///   double-book by design (see `AISchedulingService
+    ///   .placeHabitsAndRecurringTasks`).
+    /// - *Recurring task* blocks are placed at their own fixed anchor by
+    ///   that same pass and may also overlap. Whether they should is a
+    ///   real open question, but it is not this bug and changing it here
+    ///   would be a silent behavior change.
+    /// - *User drags* never come through here — `insertBlock(for:startTime:)`
+    ///   is the manual path, and a deliberate drag onto an occupied slot
+    ///   stays possible.
+    @discardableResult
+    private func insertSchedulerBlock(_ block: ScheduledBlock, runID: String, site: String) -> Bool {
+        if let task = block.task, !task.isRecurring {
+            let existing = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+            let conflict = existing.first { other in
+                guard other.id != block.id, !other.isCompleted else { return false }
+                guard let otherTask = other.task, !otherTask.isRecurring else { return false }
+                return block.startTime < other.endTime && other.startTime < block.endTime
+            }
+            if let conflict {
+                let formatter = DateFormatter()
+                formatter.dateFormat = "MM-dd HH:mm"
+                DiagFileLog.write("[\(diagInstanceTag)/\(runID)] REJECTED site=\(site) \"\(task.title)\" \(formatter.string(from: block.startTime))–\(formatter.string(from: block.endTime)) — would overlap \"\(conflict.task?.title ?? "?")\"")
+                // Never inserted, so it must not leave a half-attached
+                // relationship behind.
+                block.task = nil
+                block.habit = nil
+                return false
+            }
+        }
+        diagLogInsert(runID, site: site, block: block) // TEMPORARY DIAGNOSTIC
+        modelContext.insert(block)
+        return true
+    }
+
     private func removeBlock(_ block: ScheduledBlock, restoringRemainingMinutes: Bool = true) {
         // TEMPORARY DIAGNOSTIC (docs/double-booking-plan.md step 1) —
         // without this, one run that inserts, removes, then re-inserts at

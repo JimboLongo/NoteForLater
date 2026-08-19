@@ -814,6 +814,128 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertFalse(viewModel.tasksThatDidNotFit.isEmpty, "tasks left unplaced when the cap binds must be surfaced")
     }
 
+    // MARK: - Double-booking: serialized walks + overlap invariant
+
+    /// The regression test for the confirmed case-1 mechanism: two walks
+    /// started while the first was still running, both read the same
+    /// empty slot, and both placed into it. Serialization makes the
+    /// second wait for the first, so it sees the first's block.
+    func test_concurrentWalks_doNotDoubleBookTheSameSlot() async throws {
+        let testDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        _ = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+
+        let calendarService = FakeCalendarService()
+        calendarService.freeSlotsProvider = { [self.businessHoursSlot(on: $0)] }
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: testDay)
+
+        // Fired without awaiting between them — the shape that produced
+        // the captured collision.
+        async let first: Void = viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+        async let second: Void = viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+        _ = await (first, second)
+
+        let taskBlocks = ((try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? [])
+            .filter { $0.task != nil && !($0.task?.isRecurring ?? false) }
+        for (i, a) in taskBlocks.enumerated() {
+            for b in taskBlocks[(i + 1)...] {
+                XCTAssertFalse(
+                    a.startTime < b.endTime && b.startTime < a.endTime,
+                    "two scheduler-placed task blocks overlap: \(a.startTime)–\(a.endTime) and \(b.startTime)–\(b.endTime)"
+                )
+            }
+        }
+    }
+
+    /// The invariant itself, independent of concurrency: a scheduler walk
+    /// must not place a task block over an existing one even when the
+    /// conflicting block was already sitting in the store.
+    func test_overlapInvariant_rejectsSchedulerBlockOverExistingTaskBlock() async throws {
+        let testDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let newcomer = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+
+        // An unrelated task already occupies the whole business day, but
+        // isn't itself a candidate (already scheduled).
+        let occupant = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 480, isDivisible: false, minimumSegmentMinutes: 0)
+        occupant.isScheduled = true
+        occupant.remainingMinutes = 0
+        let slot = businessHoursSlot(on: testDay)
+        let occupying = ScheduledBlock(date: testDay, startTime: slot.start, endTime: slot.end, task: occupant)
+        context.insert(occupying)
+        occupant.scheduledBlocks = [occupying]
+
+        let calendarService = FakeCalendarService()
+        // The fake reports the day fully free, so only the invariant can
+        // stop the newcomer landing on top of the occupant.
+        calendarService.freeSlotsProvider = { [self.businessHoursSlot(on: $0)] }
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: testDay)
+
+        await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+
+        let newcomerBlocks = (newcomer.scheduledBlocks ?? []).filter { !$0.isCompleted }
+        for block in newcomerBlocks {
+            XCTAssertFalse(
+                block.startTime < occupying.endTime && occupying.startTime < block.endTime,
+                "the invariant must refuse a scheduler placement that overlaps an existing task block"
+            )
+        }
+    }
+
+    /// Habits are allowed to double-book by design — the invariant must
+    /// not quietly change that.
+    func test_overlapInvariant_stillAllowsHabitBlockOverTaskBlock() throws {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        let start = calendar.date(byAdding: .hour, value: 9, to: testDay)!
+        let taskBlock = ScheduledBlock(date: testDay, startTime: start, endTime: calendar.date(byAdding: .minute, value: 60, to: start)!, task: task)
+        context.insert(taskBlock)
+
+        let habit = Habit(name: "Stretch")
+        context.insert(habit)
+        let habitBlock = ScheduledBlock(date: testDay, startTime: start, endTime: calendar.date(byAdding: .minute, value: 30, to: start)!, task: nil, habit: habit)
+        context.insert(habitBlock)
+
+        // Nothing in the invariant applies to a habit block: it has no
+        // task, so it's exempt by construction.
+        XCTAssertNil(habitBlock.task)
+        XCTAssertNotNil(habitBlock.habit)
+        XCTAssertTrue(
+            habitBlock.startTime < taskBlock.endTime && taskBlock.startTime < habitBlock.endTime,
+            "fixture invalid — the habit block must actually overlap the task block"
+        )
+    }
+
+    /// A recurring task's fixed-anchor block may still overlap a
+    /// rule-packed one. Whether it *should* is a real open question, but
+    /// changing it here would be a silent behavior change.
+    func test_overlapInvariant_stillAllowsRecurringBlockOverTaskBlock() async throws {
+        let testDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let ordinary = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+
+        let recurring = TaskItem(title: "Daily", shelf: shelf, estimatedMinutes: 30)
+        recurring.isRecurring = true
+        recurring.recurrenceIntervalCount = 1
+        recurring.recurrenceUnit = .days
+        // Anchored at 9am, the same hour the packer will start from.
+        recurring.dueDate = calendar.date(byAdding: .hour, value: 9, to: testDay)!
+        recurring.setEligible(true, for: rule)
+        context.insert(recurring)
+        shelf.tasks = [ordinary, recurring]
+
+        let calendarService = FakeCalendarService()
+        calendarService.freeSlotsProvider = { [self.businessHoursSlot(on: $0)] }
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: testDay)
+
+        await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+
+        let recurringBlocks = ((try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? [])
+            .filter { $0.task?.isRecurring == true }
+        XCTAssertFalse(recurringBlocks.isEmpty, "the recurring task must still be placed — the invariant exempts it")
+    }
+
     // MARK: - Migration: repairing remainingMinutes drained by the leak
 
     /// No blocks at all — the whole estimate is owed. This is the shape of
