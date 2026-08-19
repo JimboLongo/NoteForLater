@@ -1,31 +1,43 @@
 import Foundation
 
-/// TEMPORARY DIAGNOSTIC INFRASTRUCTURE (docs/double-booking-plan.md
-/// step 1) — remove along with its call sites once the double-booking
-/// cause is confirmed.
+/// On-device diagnostic log, kept as permanent infrastructure.
 ///
-/// Appends diagnostic lines to a file inside the app's own Documents
-/// directory, to be pulled afterwards with:
+/// Built during the double-booking investigation and deliberately not
+/// removed with the rest of that instrumentation. Two things were learned
+/// the expensive way and are worth keeping available:
+///
+/// 1. **`print` alone is not a diagnostic channel on a real device.**
+///    Reading it needs a live `devicectl --console` session, which is
+///    tied to one process lifetime — and that failed twice, once to the
+///    streaming session's own timeout and once when the app was simply
+///    backgrounded and relaunched. Both produced an empty capture, which
+///    is indistinguishable from "the bug didn't happen." For an
+///    intermittent bug that ambiguity costs entire reproduction sessions.
+/// 2. **Bugs in this scheduler surface as state, not crashes.** Silent
+///    drains, phantom placements and double-books leave no trace unless
+///    something wrote one at the time.
+///
+/// Its only current caller is the overlap rejection in
+/// `ScheduleReviewViewModel.insertSchedulerBlock`, which should never
+/// fire — a line in this file means the scheduler tried to double-book
+/// and was stopped, and is worth investigating rather than ignoring.
+/// Adding a temporary call site for the next investigation costs one line.
+///
+/// Appends to a file inside the app's own Documents directory, pulled
+/// afterwards with:
 ///
 ///     xcrun devicectl device copy from --device <id> \
 ///       --domain-type appDataContainer \
 ///       --domain-identifier com.jimbo.NoteForLater \
 ///       --source Documents --destination <dir>
 ///
-/// Replaces streaming over `devicectl ... --console`, which failed twice
-/// for different reasons: once when the streaming session's own timeout
-/// SIGTERM'd the app mid-session, and once when the app exited cleanly
-/// (backgrounded) and iOS relaunched it, silently orphaning the capture
-/// so an entire reproduction attempt recorded nothing. Both failures look
-/// identical to "the bug didn't reproduce," which is the worst possible
-/// ambiguity for an intermittent bug.
-///
 /// A file in the container survives app restarts, backgrounding, screen
-/// locks, and needs no live tunnel — so a reproduction attempt can take
-/// as long as it takes.
+/// locks, and needs no live tunnel — so a capture can span as long as it
+/// needs to, and nothing is lost to a dropped session.
 enum DiagFileLog {
-    /// Serial, so concurrent walks — the very thing under investigation —
-    /// can't interleave mid-line or race the file handle.
+    /// Serial, so concurrent writers can't interleave mid-line or race
+    /// the file handle — the scheduling walks that call into this can run
+    /// from several independent tasks.
     private static let queue = DispatchQueue(label: "com.jimbo.NoteForLater.diaglog")
 
     private static let fileURL: URL? = {

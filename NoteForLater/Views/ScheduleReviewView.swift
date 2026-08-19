@@ -275,14 +275,6 @@ struct ScheduleReviewView: View {
     /// clears the flag so the next sync goes back to the light path
     /// until something changes again. See spec §6.
     private func syncSchedule() async {
-        // TEMPORARY DIAGNOSTIC (docs/double-booking-plan.md step 1) —
-        // logs the *caller* side, so an overlapping pair is visible as two
-        // syncSchedule entries before either exits. Several independent
-        // `Task { }` blocks reach here (appear, day change, prev/next,
-        // go-to-today) with no guard between them.
-        let syncID = String(UUID().uuidString.prefix(4))
-        DiagFileLog.write("[sync/\(syncID)] ENTER syncSchedule dirty=\(ScheduleDirtyState.shared.isDirty)")
-        defer { DiagFileLog.write("[sync/\(syncID)] EXIT  syncSchedule") }
         guard let vm = viewModel else { return }
         if ScheduleDirtyState.shared.isDirty {
             let completedFully = await vm.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)

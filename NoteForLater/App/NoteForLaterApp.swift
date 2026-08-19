@@ -46,7 +46,7 @@ struct NoteForLaterApp: App {
         Self.renamePantryShelfToKitchenIfNeeded(container: sharedModelContainer)
         Self.unscheduleTwoMinuteTaskBlocksIfNeeded(container: sharedModelContainer)
         Self.cancelLegacyIndividualReminderNotificationsIfNeeded()
-        DiagFileLog.markLaunch() // TEMPORARY DIAGNOSTIC
+        DiagFileLog.markLaunch()
         Self.backfillRemainingMinutesIfNeeded(container: sharedModelContainer)
         Self.repairDrainedRemainingMinutesIfNeeded(container: sharedModelContainer)
     }
