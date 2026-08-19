@@ -140,6 +140,28 @@ final class ScheduleReviewViewModel {
     /// that halted at day 14 from one that ran to day 30. This records
     /// the thing that test actually cared about, directly.
     private(set) var lastWalkDayCount = 0
+
+    // TEMPORARY DIAGNOSTIC (docs/double-booking-plan.md step 1) — remove
+    // once the double-booking cause is confirmed and fixed.
+    //
+    // A short per-instance tag plus a per-invocation run ID is what
+    // distinguishes "one walk placed both blocks" from "two walks each
+    // placed one," which is the whole question step 1 has to answer.
+    // Instance tag matters too: NightlyReviewView drives a *separate*
+    // ScheduleReviewViewModel (its `tomorrowViewModel`), so two runs can
+    // be concurrent across instances, not just within one.
+    private let diagInstanceTag = String(UUID().uuidString.prefix(4))
+    private static func diagRunID() -> String { String(UUID().uuidString.prefix(6)) }
+    private func diagLog(_ runID: String, _ message: String) {
+        print("[DIAG \(diagInstanceTag)/\(runID)] \(Date().formatted(date: .omitted, time: .standard)) \(message)")
+    }
+    private func diagLogInsert(_ runID: String, site: String, block: ScheduledBlock) {
+        let kind = block.task != nil ? "task" : (block.habit != nil ? "habit" : "empty")
+        let title = block.task?.title ?? block.habit?.name ?? "—"
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM-dd HH:mm"
+        print("[DIAG \(diagInstanceTag)/\(runID)] INSERT site=\(site) kind=\(kind) \"\(title)\" \(formatter.string(from: block.startTime))–\(formatter.string(from: block.endTime))")
+    }
     /// Tasks the most recent walk finished without managing to place —
     /// still unscheduled, still eligible for an enabled rule, still able
     /// to fit one in principle, but no day inside the walk's horizon had
@@ -180,6 +202,9 @@ final class ScheduleReviewViewModel {
     /// NoteForLaterApp / TODO for BackgroundTasks wiring) and manually via
     /// a "Regenerate" button.
     func generateProposedSchedule(shelves: [Shelf], habits: [Habit], eligibleHoursWindows: [EligibleHoursWindow]) async {
+        let diagRun = Self.diagRunID() // TEMPORARY DIAGNOSTIC
+        diagLog(diagRun, "ENTER generateProposedSchedule targetDate=\(targetDate)")
+        defer { diagLog(diagRun, "EXIT  generateProposedSchedule") }
         isGenerating = true
         errorMessage = nil
         defer { isGenerating = false }
@@ -207,6 +232,7 @@ final class ScheduleReviewViewModel {
             // scheduled or just trim its remaining time (divisible tasks
             // that only got part of their time placed stay unscheduled).
             for block in proposed {
+                diagLogInsert(diagRun, site: "generateProposedSchedule", block: block) // TEMPORARY DIAGNOSTIC
                 modelContext.insert(block)
             }
             blocks = proposed.sorted { $0.startTime < $1.startTime }
@@ -270,7 +296,13 @@ final class ScheduleReviewViewModel {
     /// `ScheduleReviewView.twoMinuteTasksSection`, an untimed checklist
     /// instead of a calendar block.
     func autoPlaceEligibleTasks(shelves: [Shelf], habits: [Habit], eligibleHoursWindows: [EligibleHoursWindow]) async {
-        guard targetDate >= Calendar.current.startOfDay(for: .now) else { return }
+        let diagRun = Self.diagRunID() // TEMPORARY DIAGNOSTIC
+        diagLog(diagRun, "ENTER autoPlaceEligibleTasks targetDate=\(targetDate)")
+        defer { diagLog(diagRun, "EXIT  autoPlaceEligibleTasks") }
+        guard targetDate >= Calendar.current.startOfDay(for: .now) else {
+            diagLog(diagRun, "early-return: targetDate is in the past")
+            return
+        }
         removeStaleNonSpecificHabitBlocksAcrossFutureDays()
         trimOverflowingRuleBlocksAcrossFutureDays(shelves: shelves)
 
@@ -326,6 +358,7 @@ final class ScheduleReviewViewModel {
                 existingBlocks: dayBlocks
             ), !newBlocks.isEmpty {
                 for block in newBlocks {
+                    diagLogInsert(diagRun, site: "autoPlaceEligibleTasks", block: block) // TEMPORARY DIAGNOSTIC
                     modelContext.insert(block)
                 }
                 allBlocksNow += newBlocks
@@ -590,6 +623,9 @@ final class ScheduleReviewViewModel {
     /// to be retried later instead of being dropped here.
     @discardableResult
     func regenerateFromNow(shelves: [Shelf], habits: [Habit], eligibleHoursWindows: [EligibleHoursWindow]) async -> Bool {
+        let diagRun = Self.diagRunID() // TEMPORARY DIAGNOSTIC
+        diagLog(diagRun, "ENTER regenerateFromNow targetDate=\(targetDate)")
+        defer { diagLog(diagRun, "EXIT  regenerateFromNow") }
         isGenerating = true
         errorMessage = nil
         defer { isGenerating = false }
@@ -714,6 +750,7 @@ final class ScheduleReviewViewModel {
                     existingBlocks: survivingBlocks.filter { calendar.isDate($0.date, inSameDayAs: cursorDay) }
                 )
                 for block in dayBlocks {
+                    diagLogInsert(diagRun, site: "regenerateFromNow", block: block) // TEMPORARY DIAGNOSTIC
                     modelContext.insert(block)
                     newBlocks.append(block)
                 }
@@ -1816,6 +1853,9 @@ final class ScheduleReviewViewModel {
     /// left unchecked there gets freed up for tomorrow's generation even
     /// when `reviewDate` isn't today.
     func clearIncompletePastBlocks(allBlocks: [ScheduledBlock], cutoff: Date = .now) async {
+        let diagRun = Self.diagRunID() // TEMPORARY DIAGNOSTIC
+        diagLog(diagRun, "ENTER clearIncompletePastBlocks cutoff=\(cutoff)")
+        defer { diagLog(diagRun, "EXIT  clearIncompletePastBlocks") }
         // Deliberately ignores isLocked — a lock only pins a block within
         // a day's own layout. Once that day is over, protecting it here
         // would make it immortal: it still matches reviewableBlocks'
@@ -1826,6 +1866,7 @@ final class ScheduleReviewViewModel {
         // shelf to be rescheduled. Locking still protects present/future
         // blocks everywhere else (regenerateFromNow etc).
         let toClear = allBlocks.filter { !$0.isCompleted && $0.startTime < cutoff }
+        diagLog(diagRun, "clearing \(toClear.count) past incomplete block(s)") // TEMPORARY DIAGNOSTIC
         for block in toClear {
             block.task?.isScheduled = false
             block.task?.pushedCount += 1
@@ -1861,6 +1902,7 @@ final class ScheduleReviewViewModel {
         let minutes = isEstimated ? 30 : task.estimatedMinutes
         let endTime = startTime.addingTimeInterval(TimeInterval(minutes * 60))
         let block = ScheduledBlock(date: targetDate, startTime: startTime, endTime: endTime, task: task, isEstimatedDuration: isEstimated)
+        diagLogInsert("manual", site: "insertBlock(user)", block: block) // TEMPORARY DIAGNOSTIC
         modelContext.insert(block)
         task.isScheduled = true
         blocks.append(block)
