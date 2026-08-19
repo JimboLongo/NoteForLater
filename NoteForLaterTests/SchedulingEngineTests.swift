@@ -814,6 +814,201 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertFalse(viewModel.tasksThatDidNotFit.isEmpty, "tasks left unplaced when the cap binds must be surfaced")
     }
 
+    // MARK: - Unplaced reasons — one coarse explanation per task per walk
+
+    /// Builds a shelf whose single rule runs on `daysOfWeek` between the
+    /// given hours, plus a viewmodel and a `testDay` guaranteed to be a
+    /// Monday so weekday-restricted fixtures are deterministic.
+    private func makeReasonFixture(
+        daysOfWeek: [Int],
+        startHour: Int = 0,
+        endHour: Int = 23,
+        fillStrategy: FillStrategy = .fillToFit,
+        maxTaskCount: Int = 2,
+        maxMinutesPerTask: Int = 15
+    ) -> (shelf: Shelf, rule: SchedulingRule, testDay: Date) {
+        let shelf = Shelf(name: "Test Shelf")
+        context.insert(shelf)
+        let schedule = NamedSchedule(name: "Window", daysOfWeek: daysOfWeek, startHour: startHour, startMinute: 0, endHour: endHour, endMinute: 59)
+        context.insert(schedule)
+        let rule = SchedulingRule(shelf: shelf, fillStrategy: fillStrategy, maxTotalMinutes: 120, maxTaskCount: maxTaskCount, maxMinutesPerTask: maxMinutesPerTask)
+        rule.namedSchedule = schedule
+        context.insert(rule)
+        shelf.schedulingRules = [rule]
+
+        // Next Monday at least 3 days out — future relative to real `.now`
+        // (autoPlaceEligibleTasks early-returns on past days) and a fixed
+        // weekday so day-of-week fixtures behave predictably.
+        var day = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+        while calendar.component(.weekday, from: day) != 2 {
+            day = calendar.date(byAdding: .day, value: 1, to: day)!
+        }
+        return (shelf, rule, day)
+    }
+
+    private func runWalk(shelf: Shelf, testDay: Date, freeSlots: @escaping (Date) -> [TimeSlot]) async -> ScheduleReviewViewModel {
+        let calendarService = FakeCalendarService()
+        calendarService.freeSlotsProvider = freeSlots
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: testDay)
+        await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+        return viewModel
+    }
+
+    /// A rule whose schedule has no days at all never applies, so the walk
+    /// never even considers the task.
+    func test_unplacedReason_noEligibleDays() async throws {
+        let (shelf, rule, testDay) = makeReasonFixture(daysOfWeek: [])
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+
+        let viewModel = await runWalk(shelf: shelf, testDay: testDay) { [self.businessHoursSlot(on: $0)] }
+
+        let entry = try XCTUnwrap(viewModel.tasksThatDidNotFit.first { $0.task.id == task.id })
+        XCTAssertEqual(entry.reason, .noEligibleDays)
+        XCTAssertEqual(entry.eligibleDayCount, 0)
+    }
+
+    /// A Mondays-only rule comes up ~2 times in a 14-day stall window —
+    /// rare-window territory, distinct from never applying at all.
+    func test_unplacedReason_fewEligibleDays() async throws {
+        let (shelf, rule, testDay) = makeReasonFixture(daysOfWeek: [2])
+        // Bigger than any opening, so it never places and the walk stalls.
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 600, isDivisible: false, minimumSegmentMinutes: 0)
+
+        let viewModel = await runWalk(shelf: shelf, testDay: testDay) { [self.businessHoursSlot(on: $0)] }
+
+        let entry = try XCTUnwrap(viewModel.tasksThatDidNotFit.first { $0.task.id == task.id })
+        XCTAssertEqual(entry.reason, .fewEligibleDays)
+        XCTAssertLessThanOrEqual(entry.eligibleDayCount, 3)
+        XCTAssertGreaterThan(entry.eligibleDayCount, 0)
+    }
+
+    /// Every eligible day exists but is completely booked.
+    func test_unplacedReason_noFreeTime() async throws {
+        let (shelf, rule, testDay) = makeReasonFixture(daysOfWeek: [1, 2, 3, 4, 5, 6, 7])
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+
+        let viewModel = await runWalk(shelf: shelf, testDay: testDay) { _ in [] }
+
+        let entry = try XCTUnwrap(viewModel.tasksThatDidNotFit.first { $0.task.id == task.id })
+        XCTAssertEqual(entry.reason, .noFreeTime)
+        XCTAssertEqual(entry.totalFreeMinutes, 0)
+    }
+
+    /// Plenty of total free time, but chopped into pieces too short for
+    /// one whole segment.
+    func test_unplacedReason_noContiguousSlot() async throws {
+        let (shelf, rule, testDay) = makeReasonFixture(daysOfWeek: [1, 2, 3, 4, 5, 6, 7])
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 240, isDivisible: true, minimumSegmentMinutes: 120)
+
+        // Four 30-minute openings a day: 120 minutes total, longest 30.
+        let viewModel = await runWalk(shelf: shelf, testDay: testDay) { day in
+            (0..<4).map { index in
+                let start = self.calendar.date(byAdding: .hour, value: 9 + index * 2, to: day)!
+                return TimeSlot(start: start, end: self.calendar.date(byAdding: .minute, value: 30, to: start)!)
+            }
+        }
+
+        let entry = try XCTUnwrap(viewModel.tasksThatDidNotFit.first { $0.task.id == task.id })
+        XCTAssertEqual(entry.reason, .noContiguousSlot)
+        XCTAssertGreaterThan(entry.totalFreeMinutes, 0, "free time exists — it's the fragmentation that blocks it")
+        XCTAssertEqual(entry.maxContiguousSlotMinutes, 30)
+        XCTAssertEqual(entry.requiredMinutes, 120, "a divisible task needs one whole segment, not its whole duration")
+    }
+
+    /// Pins the documented priority order: a task satisfying BOTH
+    /// `.noContiguousSlot` and `.ruleBudgetFull` must resolve to the
+    /// former, because that one is measured and the latter is inferred by
+    /// elimination.
+    func test_unplacedReason_priorityOrder_contiguousSlotBeatsBudgetFull() async throws {
+        // `.maxDuration` with a 120-minute budget, deliberately chosen so
+        // BOTH tasks still pass `canEverFit` (a task that fails it is an
+        // At-Risk case and never reaches this list at all — see the test
+        // below). The filler drains the whole budget, and separately no
+        // single opening is long enough for `blocked`'s 2-hour segment.
+        let (shelf, rule, testDay) = makeReasonFixture(
+            daysOfWeek: [1, 2, 3, 4, 5, 6, 7],
+            fillStrategy: .maxDuration
+        )
+        rule.maxTotalMinutes = 120
+        // Created first, so `taskOrdering`'s createdAt tiebreak runs it
+        // first and it consumes the budget before `blocked` is reached.
+        let filler = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 120, isDivisible: true, minimumSegmentMinutes: 30)
+        let blocked = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 240, isDivisible: true, minimumSegmentMinutes: 120)
+
+        // Four 30-minute openings: 120 minutes total (exactly the filler's
+        // size), longest 30 — far short of `blocked`'s 120-minute segment.
+        let viewModel = await runWalk(shelf: shelf, testDay: testDay) { day in
+            (0..<4).map { index in
+                let start = self.calendar.date(byAdding: .hour, value: 9 + index * 2, to: day)!
+                return TimeSlot(start: start, end: self.calendar.date(byAdding: .minute, value: 30, to: start)!)
+            }
+        }
+
+        XCTAssertTrue(filler.isScheduled, "fixture invalid — the filler must actually consume the budget")
+        let entry = try XCTUnwrap(viewModel.tasksThatDidNotFit.first { $0.task.id == blocked.id })
+        XCTAssertEqual(entry.reason, .noContiguousSlot, "the measured reason must win over the inferred fallback")
+    }
+
+    /// The walk hit `maxWalkDays` with viable days still ahead of it.
+    func test_unplacedReason_horizonReached() async throws {
+        // Mondays only, one task per Monday: placement keeps resetting the
+        // stall counter (7 < 14) so the walk runs all the way to the cap
+        // with backlog still outstanding.
+        let (shelf, rule, testDay) = makeReasonFixture(
+            daysOfWeek: [2],
+            fillStrategy: .maxTaskCount,
+            maxTaskCount: 1,
+            maxMinutesPerTask: 60
+        )
+        var tasks: [TaskItem] = []
+        for index in 0..<10 {
+            let task = TaskItem(title: "Task \(index)", shelf: shelf, estimatedMinutes: 60)
+            task.setEligible(true, for: rule)
+            context.insert(task)
+            tasks.append(task)
+        }
+        shelf.tasks = tasks
+
+        let viewModel = await runWalk(shelf: shelf, testDay: testDay) { [self.businessHoursSlot(on: $0)] }
+
+        XCTAssertEqual(viewModel.lastWalkDayCount, 44, "fixture invalid — the walk must actually reach the cap")
+        let entry = try XCTUnwrap(viewModel.tasksThatDidNotFit.first)
+        XCTAssertEqual(entry.reason, .horizonReached)
+    }
+
+    /// A task that places normally produces no entry at all.
+    func test_unplacedReason_taskThatFits_producesNoEntry() async throws {
+        let (shelf, rule, testDay) = makeReasonFixture(daysOfWeek: [1, 2, 3, 4, 5, 6, 7])
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+
+        let viewModel = await runWalk(shelf: shelf, testDay: testDay) { [self.businessHoursSlot(on: $0)] }
+
+        XCTAssertTrue(task.isScheduled)
+        XCTAssertTrue(viewModel.tasksThatDidNotFit.isEmpty)
+    }
+
+    /// Guards the boundary from `99996ab`: a task failing `canEverFit`
+    /// belongs to At-Risk, not here, and must not appear in this list even
+    /// though it's unscheduled.
+    func test_unplacedReason_taskFailingCanEverFit_isNotListed() async throws {
+        let (shelf, rule, testDay) = makeReasonFixture(
+            daysOfWeek: [1, 2, 3, 4, 5, 6, 7],
+            fillStrategy: .maxTaskCount,
+            maxTaskCount: 5,
+            maxMinutesPerTask: 30
+        )
+        // 60 minutes against a 30-minute per-task cap — can never fit.
+        let tooBig = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+
+        let viewModel = await runWalk(shelf: shelf, testDay: testDay) { [self.businessHoursSlot(on: $0)] }
+
+        XCTAssertFalse(tooBig.isScheduled)
+        XCTAssertFalse(
+            viewModel.tasksThatDidNotFit.contains { $0.task.id == tooBig.id },
+            "a task that can never fit any rule is an At-Risk case, not an unplaced-this-walk case"
+        )
+    }
+
     // MARK: - Divisibility invariants — whole segments, no orphan remainders
 
     /// The regression test for the reported bug: a 4-hour task divisible
@@ -1080,7 +1275,7 @@ final class SchedulingEngineTests: XCTestCase {
 
         await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
 
-        XCTAssertTrue(viewModel.tasksThatDidNotFit.contains { $0.id == neverFits.id }, "an unplaceable task must be surfaced, not silently dropped")
+        XCTAssertTrue(viewModel.tasksThatDidNotFit.contains { $0.task.id == neverFits.id }, "an unplaceable task must be surfaced, not silently dropped")
         XCTAssertFalse(neverFits.isScheduled)
         XCTAssertTrue((neverFits.scheduledBlocks ?? []).isEmpty, "it must not get a block at some far-future day")
     }

@@ -7,6 +7,115 @@ import Observation
 /// delete (swipe left), auto-replace (swipe right), long-press to manually
 /// replace, and — on today specifically — mark complete or push to another
 /// day.
+/// Why a task the walk finished without placing didn't fit.
+///
+/// Distinct from `SchedulingFitStatus`, which is a *static* judgment about
+/// a rule's own caps and whose `.exceedsConstraint` case is deliberately
+/// excluded from this list (that's the At-Risk path). Every task reaching
+/// here already returns `.fits`: it could be placed in principle, but no
+/// day inside the walk's horizon actually had room.
+///
+/// Derived in the fixed priority order the cases are listed in, so the
+/// result is deterministic when several apply at once. The order runs
+/// from most specific and directly measured to least: `.ruleBudgetFull`
+/// is last because it is the only one inferred *by elimination* rather
+/// than measured — the walk saw eligible days with usable free time and
+/// still placed nothing, so the rule's own caps are what's left. Anything
+/// measurable has to be ruled out before falling back to it.
+enum UnplacedReason {
+    /// The rule's window never applied on any day in the horizon.
+    case noEligibleDays
+    /// The rule applied on only a handful of days — a rare-window rule.
+    /// Separate from `.noEligibleDays` because the fix differs: widening
+    /// an existing window versus it never coming up at all.
+    case fewEligibleDays
+    /// Eligible days existed but were completely booked.
+    case noFreeTime
+    /// Free time existed but no single stretch was long enough for one
+    /// whole segment (or the whole task, if it isn't divisible).
+    case noContiguousSlot
+    /// Viable days probably remained — the walk stopped at `maxWalkDays`.
+    case horizonReached
+    /// Inferred by elimination: eligible days with usable free time, yet
+    /// nothing placed, so the rule's task-count/duration caps were
+    /// consumed by other tasks.
+    ///
+    /// **Believed unreachable in practice, and deliberately kept anyway.**
+    /// A rule's budget resets each day, so for this to be the standing
+    /// explanation something must consume it on *every* day of the walk.
+    /// Only `pack()` spends that budget, and `pack()` excludes recurring
+    /// tasks (`AISchedulingService.swift:168`) — so the consumption has to
+    /// come from ordinary tasks placing repeatedly, which resets the stall
+    /// counter, which runs the walk to `maxWalkDays`, which makes
+    /// `.horizonReached` true and claims the case first. No fixture could
+    /// be built that reaches this branch through the public API, so it has
+    /// no test; the alternative was contriving one that asserted something
+    /// other than what it claimed. It stays because the derivation needs a
+    /// total fallback and "no reason at all" would be worse — but if you
+    /// ever see it in the UI, that itself is the finding: something about
+    /// budget accounting or walk termination has changed.
+    case ruleBudgetFull
+}
+
+/// A task the walk couldn't place, with the reason and the numbers behind
+/// it, so the UI can say something specific rather than restating an enum.
+struct UnplacedTask: Identifiable {
+    let task: TaskItem
+    let reason: UnplacedReason
+    /// The rule this was judged against — whichever of the task's
+    /// eligible rules came up on the most days, i.e. the one that had the
+    /// best chance and still didn't manage it.
+    let rule: SchedulingRule?
+    let eligibleDayCount: Int
+    let totalFreeMinutes: Int
+    let maxContiguousSlotMinutes: Int
+    /// One whole segment for a divisible task, otherwise the whole thing.
+    let requiredMinutes: Int
+
+    var id: UUID { task.id }
+
+    private var ruleName: String {
+        guard let rule else { return "its schedule" }
+        return rule.displayName.isEmpty ? rule.summary : rule.displayName
+    }
+
+    /// A plain sentence naming the rule and the actual numbers.
+    var explanation: String {
+        switch reason {
+        case .noEligibleDays:
+            return "\(ruleName) never came up in the days checked."
+        case .fewEligibleDays:
+            return "\(ruleName) only came up on \(eligibleDayCount) day\(eligibleDayCount == 1 ? "" : "s"), and \(eligibleDayCount == 1 ? "it was" : "they were") already taken."
+        case .noFreeTime:
+            return "\(ruleName) came up on \(eligibleDayCount) days, all of them fully booked."
+        case .noContiguousSlot:
+            return "Needs \(TaskItem.durationLabel(for: requiredMinutes)) in one stretch, but the longest opening under \(ruleName) was \(TaskItem.durationLabel(for: maxContiguousSlotMinutes))."
+        case .horizonReached:
+            return "Ran out of days to check before this fit under \(ruleName)."
+        case .ruleBudgetFull:
+            return "\(ruleName) had room in the day but its own limits were already used up by other tasks."
+        }
+    }
+
+    /// What the user can actually do about it.
+    var suggestedAction: String {
+        switch reason {
+        case .noEligibleDays, .fewEligibleDays:
+            return "Widen this schedule's days or hours."
+        case .noFreeTime:
+            return "Your calendar is full during this window."
+        case .noContiguousSlot:
+            return task.isDivisible
+                ? "Lower this task's minimum segment size."
+                : "Make this task divisible, or shorten it."
+        case .horizonReached:
+            return "Nothing is misconfigured — this is a capacity limit."
+        case .ruleBudgetFull:
+            return "Raise this schedule's task or time limit, or reprioritize."
+        }
+    }
+}
+
 @Observable
 final class ScheduleReviewViewModel {
     private let modelContext: ModelContext
@@ -38,7 +147,19 @@ final class ScheduleReviewViewModel {
     /// before) was to keep crawling forward until the task finally fit,
     /// which put blocks ~1046 days out where they're functionally
     /// invisible.
-    private(set) var tasksThatDidNotFit: [TaskItem] = []
+    private(set) var tasksThatDidNotFit: [UnplacedTask] = []
+
+    /// Per-rule tallies gathered as a walk runs, purely so a reason can be
+    /// derived afterwards. Deliberately assembled out here rather than
+    /// threaded through `AISchedulingService.pack()`: that would mean
+    /// changing the packer's return signature to report per-day outcomes,
+    /// which is the invasive version of this feature. Nothing here reads
+    /// the packer's internals or affects placement in any way.
+    private struct RuleWalkStats {
+        var eligibleDayCount = 0
+        var totalFreeMinutes = 0
+        var maxContiguousSlotMinutes = 0
+    }
 
     init(
         modelContext: ModelContext,
@@ -171,6 +292,7 @@ final class ScheduleReviewViewModel {
         // day-count cap. Reset to 0 any day that places at least one
         // task block, incremented otherwise.
         var consecutiveDaysWithoutTaskPlacement = 0
+        var ruleStats: [UUID: RuleWalkStats] = [:]
         // One ranged call up front instead of one per iteration below.
         // Days past this window (rare — see `freeSlotPrefetchDays`) fall
         // through to the per-day call, preserving the `try?`/`break`
@@ -190,6 +312,10 @@ final class ScheduleReviewViewModel {
             for existing in dayBlocks {
                 freeSlots = subtracting(existing.startTime..<existing.endTime, from: freeSlots)
             }
+            // Tallied from the post-subtraction slots — what's genuinely
+            // still open, not what the calendar reported before existing
+            // blocks were accounted for.
+            accumulateRuleStats(&ruleStats, shelves: shelves, day: cursorDay, freeSlots: freeSlots, calendar: calendar)
             var placedTaskBlockToday = false
             if let newBlocks = try? await schedulingService.generateProposedSchedule(
                 shelves: shelves,
@@ -231,7 +357,7 @@ final class ScheduleReviewViewModel {
         // Empty whenever the walk stopped because the backlog genuinely
         // ran out; non-empty only when it stopped on the stall counter or
         // `maxWalkDays` with work still outstanding.
-        tasksThatDidNotFit = remainingSchedulableTasks(shelves: shelves)
+        tasksThatDidNotFit = unplacedTasks(shelves: shelves, stats: ruleStats, hitHorizon: dayIndex >= Self.maxWalkDays)
 
         if anyInserted {
             try? modelContext.save()
@@ -528,6 +654,7 @@ final class ScheduleReviewViewModel {
         // this is purely about whether the task backlog is making
         // progress), incremented otherwise.
         var consecutiveDaysWithoutTaskPlacement = 0
+        var ruleStats: [UUID: RuleWalkStats] = [:]
         // Same batching as `autoPlaceEligibleTasks` — one ranged call up
         // front, per-day fallback beyond the window. The `try`/`catch`
         // below is unchanged: a cache hit simply skips the throwing call,
@@ -574,6 +701,10 @@ final class ScheduleReviewViewModel {
                 for protected in protectedSurviving {
                     freeSlots = subtracting(protected.startTime..<protected.endTime, from: freeSlots)
                 }
+                // See the matching call in `autoPlaceEligibleTasks` —
+                // tallied after every subtraction, so it reflects what's
+                // actually still open.
+                accumulateRuleStats(&ruleStats, shelves: shelves, day: cursorDay, freeSlots: freeSlots, calendar: calendar)
                 let dayBlocks = try await schedulingService.generateProposedSchedule(
                     shelves: shelves,
                     habits: habits,
@@ -602,7 +733,7 @@ final class ScheduleReviewViewModel {
             dayIndex += 1
         }
         lastWalkDayCount = dayIndex
-        tasksThatDidNotFit = remainingSchedulableTasks(shelves: shelves)
+        tasksThatDidNotFit = unplacedTasks(shelves: shelves, stats: ruleStats, hitHorizon: dayIndex >= Self.maxWalkDays)
         try? modelContext.save()
 
         let combined = survivingBlocks + newBlocks
@@ -757,6 +888,95 @@ final class ScheduleReviewViewModel {
         return rules.contains { rule in
             task.isEligible(for: rule)
                 && rule.canEverFit(estimatedMinutes: task.remainingMinutes, isDivisible: task.isDivisible, minimumSegmentMinutes: task.minimumSegmentMinutes)
+        }
+    }
+
+    /// Folds one day's free time into each applicable rule's running
+    /// tally. Free slots are clipped to the rule's *own* window rather
+    /// than counted whole-day.
+    ///
+    /// That clipping is load-bearing for the reason to be right: a rule
+    /// covering 6-8pm on a day with a free morning and a booked evening
+    /// has no usable time at all, but a whole-day tally would record
+    /// hours of it and the derivation would then blame the rule's caps
+    /// (`.ruleBudgetFull`) instead of the genuine `.noFreeTime`.
+    private func accumulateRuleStats(
+        _ stats: inout [UUID: RuleWalkStats],
+        shelves: [Shelf],
+        day: Date,
+        freeSlots: [TimeSlot],
+        calendar: Calendar
+    ) {
+        let weekday = calendar.component(.weekday, from: day)
+        for shelf in shelves {
+            for rule in (shelf.schedulingRules ?? []) where rule.isEnabled && rule.namedSchedule != nil {
+                guard rule.effectiveDaysOfWeek.contains(weekday) else { continue }
+                guard
+                    let windowStart = calendar.date(bySettingHour: rule.effectiveStartHour, minute: rule.effectiveStartMinute, second: 0, of: day),
+                    let windowEnd = calendar.date(bySettingHour: rule.effectiveEndHour, minute: rule.effectiveEndMinute, second: 0, of: day),
+                    windowStart < windowEnd
+                else { continue }
+
+                var entry = stats[rule.id] ?? RuleWalkStats()
+                entry.eligibleDayCount += 1
+                for slot in freeSlots {
+                    let start = max(slot.start, windowStart)
+                    let end = min(slot.end, windowEnd)
+                    guard end > start else { continue }
+                    let minutes = Int(end.timeIntervalSince(start) / 60)
+                    entry.totalFreeMinutes += minutes
+                    entry.maxContiguousSlotMinutes = max(entry.maxContiguousSlotMinutes, minutes)
+                }
+                stats[rule.id] = entry
+            }
+        }
+    }
+
+    /// Threshold for `.fewEligibleDays` — a rule that came up this many
+    /// days or fewer is treated as rare-window rather than merely busy.
+    private static let fewEligibleDaysThreshold = 3
+
+    /// Pairs each still-unplaced task with a single reason, in the fixed
+    /// priority order documented on `UnplacedReason`.
+    private func unplacedTasks(shelves: [Shelf], stats: [UUID: RuleWalkStats], hitHorizon: Bool) -> [UnplacedTask] {
+        remainingSchedulableTasks(shelves: shelves).map { task in
+            // Judged against whichever eligible rule actually came up most
+            // — the one that had the best shot and still didn't place it.
+            let candidateRules = (task.shelf?.schedulingRules ?? []).filter {
+                $0.isEnabled && task.isEffectivelyEligible(for: $0)
+            }
+            let bestRule = candidateRules.max {
+                (stats[$0.id]?.eligibleDayCount ?? 0) < (stats[$1.id]?.eligibleDayCount ?? 0)
+            }
+            let tally = bestRule.flatMap { stats[$0.id] } ?? RuleWalkStats()
+            let requiredMinutes = task.isDivisible && task.minimumSegmentMinutes > 0
+                ? task.minimumSegmentMinutes
+                : task.remainingMinutes
+
+            let reason: UnplacedReason
+            if tally.eligibleDayCount == 0 {
+                reason = .noEligibleDays
+            } else if tally.eligibleDayCount <= Self.fewEligibleDaysThreshold {
+                reason = .fewEligibleDays
+            } else if tally.totalFreeMinutes == 0 {
+                reason = .noFreeTime
+            } else if tally.maxContiguousSlotMinutes < requiredMinutes {
+                reason = .noContiguousSlot
+            } else if hitHorizon {
+                reason = .horizonReached
+            } else {
+                reason = .ruleBudgetFull
+            }
+
+            return UnplacedTask(
+                task: task,
+                reason: reason,
+                rule: bestRule,
+                eligibleDayCount: tally.eligibleDayCount,
+                totalFreeMinutes: tally.totalFreeMinutes,
+                maxContiguousSlotMinutes: tally.maxContiguousSlotMinutes,
+                requiredMinutes: requiredMinutes
+            )
         }
     }
 

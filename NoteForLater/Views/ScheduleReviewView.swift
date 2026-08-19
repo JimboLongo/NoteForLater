@@ -28,6 +28,7 @@ struct ScheduleReviewView: View {
 
     @State private var viewModel: ScheduleReviewViewModel?
     @State private var pickerTarget: ScheduledBlock?
+    @State private var isShowingWontFitDetail = false
     @State private var lockedStore = LockedEventsStore.shared
     /// Live horizontal offset of the date header while dragging — follows
     /// your finger during the pull, then springs back to 0 on release
@@ -177,22 +178,34 @@ struct ScheduleReviewView: View {
     private func wontFitBanner(viewModel: ScheduleReviewViewModel) -> some View {
         let unplaced = viewModel.tasksThatDidNotFit
         if !unplaced.isEmpty {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(unplaced.count == 1 ? "1 task won't fit" : "\(unplaced.count) tasks won't fit")
-                        .font(.caption.weight(.semibold))
-                    Text(unplaced.prefix(3).map(\.title).joined(separator: ", ") + (unplaced.count > 3 ? "…" : ""))
+            Button {
+                isShowingWontFitDetail = true
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(unplaced.count == 1 ? "1 task won't fit" : "\(unplaced.count) tasks won't fit")
+                            .font(.caption.weight(.semibold))
+                        Text(unplaced.prefix(3).map(\.task.title).joined(separator: ", ") + (unplaced.count > 3 ? "…" : ""))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
                 }
-                Spacer(minLength: 0)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background(.bar)
+            .sheet(isPresented: $isShowingWontFitDetail) {
+                WontFitDetailSheet(unplaced: unplaced)
+            }
         }
     }
 
@@ -690,6 +703,43 @@ struct ReplacementPickerSheet: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "h:mm a"
         return "\(formatter.string(from: start))–\(formatter.string(from: end))"
+    }
+}
+
+/// The "won't fit" banner's detail view — each unplaced task with the
+/// reason the walk couldn't place it and what to do about it.
+///
+/// Read-only by design: no navigation into the rule editor from here.
+/// Editing a rule from a diagnostic list would need its own thinking
+/// about what happens to the list afterwards (the reasons are a snapshot
+/// of the last walk, and would be stale the moment a rule changed).
+private struct WontFitDetailSheet: View {
+    let unplaced: [UnplacedTask]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List(unplaced) { entry in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(entry.task.title)
+                        .font(.body.weight(.medium))
+                    Text(entry.explanation)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Label(entry.suggestedAction, systemImage: "lightbulb")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+                .padding(.vertical, 2)
+            }
+            .navigationTitle(unplaced.count == 1 ? "1 Task Won't Fit" : "\(unplaced.count) Tasks Won't Fit")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
     }
 }
 
