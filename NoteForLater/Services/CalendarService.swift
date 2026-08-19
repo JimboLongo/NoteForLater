@@ -1,5 +1,51 @@
 import Foundation
 
+/// Every calendar day the half-open range `[start, end)` touches, as
+/// `startOfDay` instants. Shared so the ranged `fetchFreeSlots` overloads
+/// and their tests all agree on exactly which days a span covers.
+func calendarDays(from start: Date, to end: Date, calendar: Calendar = .current) -> [Date] {
+    var days: [Date] = []
+    var cursor = calendar.startOfDay(for: start)
+    while cursor < end {
+        days.append(cursor)
+        guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
+        cursor = next
+    }
+    return days
+}
+
+/// Subtracts `busy` from one day's working-hours `window`, returning the
+/// gaps left over.
+///
+/// Pulled out as a free function rather than left duplicated inside each
+/// `CalendarServiceProtocol` implementation for two reasons: the real
+/// service, the SwiftUI-preview mock, and the test fake were all carrying
+/// near-identical copies of this subtraction, and — more importantly —
+/// the ranged fetch hands the *same* multi-day busy list to every day in
+/// its span, so each day has to clamp it to its own window. Without that
+/// clamping a meeting running 11pm→1am would leak into the following
+/// day's free time as a phantom busy block starting at midnight. That's
+/// the case worth having testable without touching the network.
+func freeSlots(inWindow window: (start: Date, end: Date), busy: [TimeSlot]) -> [TimeSlot] {
+    var result: [TimeSlot] = []
+    var cursor = window.start
+    for range in busy.sorted(by: { $0.start < $1.start }) {
+        // Entirely outside this day — skip. With a ranged fetch most of
+        // the list is some other day's events.
+        guard range.end > window.start, range.start < window.end else { continue }
+        let clampedStart = max(range.start, window.start)
+        let clampedEnd = min(range.end, window.end)
+        if clampedStart > cursor {
+            result.append(TimeSlot(start: cursor, end: clampedStart))
+        }
+        cursor = max(cursor, clampedEnd)
+    }
+    if cursor < window.end {
+        result.append(TimeSlot(start: cursor, end: window.end))
+    }
+    return result
+}
+
 /// Reads free/busy info from Google Calendar so the scheduler knows which
 /// windows on a given day are actually open.
 protocol CalendarServiceProtocol: AnyObject {
@@ -13,8 +59,25 @@ protocol CalendarServiceProtocol: AnyObject {
     var enabledCalendarIDs: [String] { get set }
 
     /// Returns the open time slots for `date`, after subtracting existing
-    /// calendar events and respecting `workingHours`.
+    /// calendar events and respecting `workingHours`. Kept alongside the
+    /// ranged variant below for genuine single-day callers (e.g.
+    /// `AISchedulingService.generateProposedSchedule`) and as the
+    /// fallback path when a multi-day walk runs past whatever window was
+    /// pre-fetched — see `ScheduleReviewViewModel.freeSlotPrefetchDays`.
     func fetchFreeSlots(for date: Date) async throws -> [TimeSlot]
+
+    /// Same as `fetchFreeSlots(for:)`, but for every calendar day the
+    /// half-open range `[start, end)` touches, in **one** round-trip
+    /// rather than one per day — keyed by each day's `startOfDay` (via
+    /// `Calendar.current`) so a caller walking day by day can look up its
+    /// own cursor directly without re-deriving day boundaries.
+    ///
+    /// Exists because the scheduling walks in `ScheduleReviewViewModel`
+    /// visit up to ~44 days and used to issue a separate network call per
+    /// day, which got considerably more expensive once the Phase 5 dirty
+    /// flush started firing regeneration on essentially every Calendar
+    /// appear following an edit.
+    func fetchFreeSlots(from start: Date, to end: Date) async throws -> [Date: [TimeSlot]]
 
     /// Returns the existing "busy" ranges on `date` (within `workingHours`)
     /// from the enabled calendars, so the Schedule tab can show what's
@@ -82,21 +145,34 @@ final class GoogleCalendarService: CalendarServiceProtocol {
     }
 
     func fetchFreeSlots(for date: Date) async throws -> [TimeSlot] {
-        let (dayStart, dayEnd) = workingHoursRange(for: date)
-        let busy = try await fetchBusyRanges(from: dayStart, to: dayEnd)
+        let window = workingHoursRange(for: date)
+        let busy = try await fetchBusyRanges(from: window.start, to: window.end)
+        return freeSlots(inWindow: window, busy: busy)
+    }
 
-        var freeSlots: [TimeSlot] = []
-        var cursor = dayStart
-        for range in busy.sorted(by: { $0.start < $1.start }) {
-            if range.start > cursor {
-                freeSlots.append(TimeSlot(start: cursor, end: range.start))
-            }
-            cursor = max(cursor, range.end)
+    func fetchFreeSlots(from start: Date, to end: Date) async throws -> [Date: [TimeSlot]] {
+        let calendar = Calendar.current
+        let days = calendarDays(from: start, to: end, calendar: calendar)
+        guard let firstDay = days.first, let lastDay = days.last else { return [:] }
+
+        // Fetched across the union of the first and last day's own
+        // working-hours windows rather than the raw `[start, end)` — a
+        // day's window is derived from its own date (see
+        // `workingHoursRange(for:)`), so it can extend past whatever
+        // bounds the caller happened to pass.
+        let busy = try await fetchBusyRanges(
+            from: workingHoursRange(for: firstDay).start,
+            to: workingHoursRange(for: lastDay).end
+        )
+
+        // One network call above; the per-day split below is local. Each
+        // day clamps the shared busy list to its own window — see
+        // `freeSlots(inWindow:busy:)` for why that clamping matters.
+        var result: [Date: [TimeSlot]] = [:]
+        for day in days {
+            result[day] = freeSlots(inWindow: workingHoursRange(for: day), busy: busy)
         }
-        if cursor < dayEnd {
-            freeSlots.append(TimeSlot(start: cursor, end: dayEnd))
-        }
-        return freeSlots
+        return result
     }
 
     func fetchBusyBlocks(for date: Date) async throws -> [TimeSlot] {
@@ -333,21 +409,19 @@ final class MockCalendarService: CalendarServiceProtocol {
         let dayEnd = calendar.date(bySettingHour: workingHours.end.hour ?? 21,
                                     minute: workingHours.end.minute ?? 0,
                                     second: 0, of: date)!
-
         let busy = try await fetchBusyBlocks(for: date)
+        return freeSlots(inWindow: (dayStart, dayEnd), busy: busy)
+    }
 
-        var freeSlots: [TimeSlot] = []
-        var cursor = dayStart
-        for busyRange in busy {
-            if busyRange.start > cursor {
-                freeSlots.append(TimeSlot(start: cursor, end: busyRange.start))
-            }
-            cursor = max(cursor, busyRange.end)
+    /// Previews only — `mockBusyRanges` is expressed as wall-clock
+    /// components repeated on every day, so there's no real batching to
+    /// do here; this just loops the per-day path to satisfy the protocol.
+    func fetchFreeSlots(from start: Date, to end: Date) async throws -> [Date: [TimeSlot]] {
+        var result: [Date: [TimeSlot]] = [:]
+        for day in calendarDays(from: start, to: end) {
+            result[day] = try await fetchFreeSlots(for: day)
         }
-        if cursor < dayEnd {
-            freeSlots.append(TimeSlot(start: cursor, end: dayEnd))
-        }
-        return freeSlots
+        return result
     }
 
     func fetchBusyBlocks(for date: Date) async throws -> [TimeSlot] {
