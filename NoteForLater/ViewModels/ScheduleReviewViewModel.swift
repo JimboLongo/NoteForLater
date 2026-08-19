@@ -31,6 +31,14 @@ final class ScheduleReviewViewModel {
     /// that halted at day 14 from one that ran to day 30. This records
     /// the thing that test actually cared about, directly.
     private(set) var lastWalkDayCount = 0
+    /// Tasks the most recent walk finished without managing to place —
+    /// still unscheduled, still eligible for an enabled rule, still able
+    /// to fit one in principle, but no day inside the walk's horizon had
+    /// room. Surfaced rather than buried: the alternative (what shipped
+    /// before) was to keep crawling forward until the task finally fit,
+    /// which put blocks ~1046 days out where they're functionally
+    /// invisible.
+    private(set) var tasksThatDidNotFit: [TaskItem] = []
 
     init(
         modelContext: ModelContext,
@@ -169,7 +177,8 @@ final class ScheduleReviewViewModel {
         // handling this loop already had.
         let prefetched = await prefetchFreeSlots(from: cursorDay, days: Self.freeSlotPrefetchDays)
 
-        while dayIndex == 0 || (consecutiveDaysWithoutTaskPlacement < Self.taskStallThresholdDays && hasRemainingSchedulableWork(shelves: shelves)) {
+        while dayIndex < Self.maxWalkDays
+            && (dayIndex == 0 || (consecutiveDaysWithoutTaskPlacement < Self.taskStallThresholdDays && hasRemainingSchedulableWork(shelves: shelves))) {
             let resolvedSlots: [TimeSlot]?
             if let cached = prefetched[calendar.startOfDay(for: cursorDay)] {
                 resolvedSlots = cached
@@ -195,7 +204,21 @@ final class ScheduleReviewViewModel {
                 }
                 allBlocksNow += newBlocks
                 anyInserted = true
-                placedTaskBlockToday = newBlocks.contains { $0.task != nil }
+                // Recurring tasks are excluded deliberately. This counter
+                // measures whether the *backlog* is making progress, and
+                // a recurring task places itself on every occurrence day
+                // whether or not anything is stuck — its `isScheduled` is
+                // never set (see `AISchedulingService
+                // .placeHabitsAndRecurringTasks`), so it's re-placed
+                // forever. Counting it as progress made the counter
+                // measure recurrence frequency instead: a *weekly*
+                // recurrence reset it every 7th day, so it could never
+                // climb to `taskStallThresholdDays` and stall detection
+                // could never fire. The walk then ran until
+                // `hasRemainingSchedulableWork` went false, which for a
+                // task that fits nowhere nearby meant crawling ~1046 days
+                // to the first day it happened to fit.
+                placedTaskBlockToday = newBlocks.contains { $0.task != nil && !($0.task?.isRecurring ?? false) }
                 if calendar.isDate(cursorDay, inSameDayAs: targetDate) {
                     blocks = (blocks + newBlocks).sorted { $0.startTime < $1.startTime }
                 }
@@ -205,6 +228,10 @@ final class ScheduleReviewViewModel {
             dayIndex += 1
         }
         lastWalkDayCount = dayIndex
+        // Empty whenever the walk stopped because the backlog genuinely
+        // ran out; non-empty only when it stopped on the stall counter or
+        // `maxWalkDays` with work still outstanding.
+        tasksThatDidNotFit = remainingSchedulableTasks(shelves: shelves)
 
         if anyInserted {
             try? modelContext.save()
@@ -508,9 +535,10 @@ final class ScheduleReviewViewModel {
         // sets `completedFully = false` and breaks exactly as before.
         let prefetched = await prefetchFreeSlots(from: cursorDay, days: Self.freeSlotPrefetchDays)
 
-        while dayIndex == 0
-            || (dayIndex < Self.habitPopulationDays && keepWalkingForHabits)
-            || (consecutiveDaysWithoutTaskPlacement < Self.taskStallThresholdDays && hasRemainingSchedulableWork(shelves: shelves)) {
+        while dayIndex < Self.maxWalkDays
+            && (dayIndex == 0
+                || (dayIndex < Self.habitPopulationDays && keepWalkingForHabits)
+                || (consecutiveDaysWithoutTaskPlacement < Self.taskStallThresholdDays && hasRemainingSchedulableWork(shelves: shelves))) {
             do {
                 var freeSlots: [TimeSlot]
                 if let cached = prefetched[calendar.startOfDay(for: cursorDay)] {
@@ -558,7 +586,9 @@ final class ScheduleReviewViewModel {
                     modelContext.insert(block)
                     newBlocks.append(block)
                 }
-                if dayBlocks.contains(where: { $0.task != nil }) {
+                // Recurring tasks excluded — see the matching comment in
+                // `autoPlaceEligibleTasks`. Same counter, same defect.
+                if dayBlocks.contains(where: { $0.task != nil && !($0.task?.isRecurring ?? false) }) {
                     consecutiveDaysWithoutTaskPlacement = 0
                 } else {
                     consecutiveDaysWithoutTaskPlacement += 1
@@ -572,6 +602,7 @@ final class ScheduleReviewViewModel {
             dayIndex += 1
         }
         lastWalkDayCount = dayIndex
+        tasksThatDidNotFit = remainingSchedulableTasks(shelves: shelves)
         try? modelContext.save()
 
         let combined = survivingBlocks + newBlocks
@@ -661,6 +692,21 @@ final class ScheduleReviewViewModel {
     /// correct while costing nothing in the common one.
     private static let freeSlotPrefetchDays = habitPopulationDays + taskStallThresholdDays
 
+    /// Hard ceiling on how many days either walk will ever visit.
+    ///
+    /// Defense in depth, not the primary terminator — with the recurring-
+    /// task exclusion in place (see the counter comments in both walks)
+    /// stall detection should stop things long before this binds. It
+    /// exists so that any *future* condition which wrongly resets the
+    /// stall counter degrades into a bounded miss instead of the
+    /// unbounded day-by-day crawl that shipped a task ~1046 days out.
+    ///
+    /// Deliberately equal to `freeSlotPrefetchDays`: past that window the
+    /// walk would fall back to one network call per day, so a walk that
+    /// runs beyond it is both wrong *and* expensive. Capping here keeps
+    /// the two bounds from drifting apart.
+    private static let maxWalkDays = freeSlotPrefetchDays
+
     /// One ranged free/busy call covering `days` days from `startDay`,
     /// keyed by `startOfDay` for direct cursor lookup. Returns `[:]` on
     /// failure rather than throwing — a miss just sends each day down the
@@ -696,13 +742,31 @@ final class ScheduleReviewViewModel {
         shelves.contains { shelf in
             let rules = (shelf.schedulingRules ?? []).filter(\.isEnabled)
             guard !rules.isEmpty else { return false }
-            return (shelf.tasks ?? []).contains { task in
-                guard !task.isScheduled else { return false }
-                return rules.contains { rule in
-                    task.isEligible(for: rule)
-                        && rule.canEverFit(estimatedMinutes: task.remainingMinutes, isDivisible: task.isDivisible, minimumSegmentMinutes: task.minimumSegmentMinutes)
-                }
-            }
+            return (shelf.tasks ?? []).contains { isSchedulableBacklog($0, rules: rules) }
+        }
+    }
+
+    /// The one definition of "this task still wants a slot," shared by
+    /// `hasRemainingSchedulableWork` (which short-circuits, and runs every
+    /// loop iteration) and `remainingSchedulableTasks` (which collects).
+    /// Kept single so the walk's own termination condition and the
+    /// "won't fit" list reported to the user can never disagree about
+    /// which tasks count.
+    private func isSchedulableBacklog(_ task: TaskItem, rules: [SchedulingRule]) -> Bool {
+        guard !task.isScheduled else { return false }
+        return rules.contains { rule in
+            task.isEligible(for: rule)
+                && rule.canEverFit(estimatedMinutes: task.remainingMinutes, isDivisible: task.isDivisible, minimumSegmentMinutes: task.minimumSegmentMinutes)
+        }
+    }
+
+    /// Same predicate as `hasRemainingSchedulableWork`, but returning the
+    /// actual tasks — what a walk reports as "didn't fit" once it stops.
+    private func remainingSchedulableTasks(shelves: [Shelf]) -> [TaskItem] {
+        shelves.flatMap { shelf -> [TaskItem] in
+            let rules = (shelf.schedulingRules ?? []).filter(\.isEnabled)
+            guard !rules.isEmpty else { return [] }
+            return (shelf.tasks ?? []).filter { isSchedulableBacklog($0, rules: rules) }
         }
     }
 

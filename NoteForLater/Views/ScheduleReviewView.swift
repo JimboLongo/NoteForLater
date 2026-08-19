@@ -163,6 +163,36 @@ struct ScheduleReviewView: View {
             .refreshable {
                 await viewModel.loadCalendarEvents()
             }
+            .safeAreaInset(edge: .top) {
+                wontFitBanner(viewModel: viewModel)
+            }
+        }
+    }
+
+    /// Tasks the walk couldn't place anywhere in its horizon. Previously
+    /// these were placed at whatever distant day they eventually fit —
+    /// blocks hundreds of days out that nobody would ever see — so
+    /// naming them here is the whole point of no longer doing that.
+    @ViewBuilder
+    private func wontFitBanner(viewModel: ScheduleReviewViewModel) -> some View {
+        let unplaced = viewModel.tasksThatDidNotFit
+        if !unplaced.isEmpty {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(unplaced.count == 1 ? "1 task won't fit" : "\(unplaced.count) tasks won't fit")
+                        .font(.caption.weight(.semibold))
+                    Text(unplaced.prefix(3).map(\.title).joined(separator: ", ") + (unplaced.count > 3 ? "…" : ""))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.bar)
         }
     }
 

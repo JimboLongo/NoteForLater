@@ -742,13 +742,24 @@ final class SchedulingEngineTests: XCTestCase {
     /// The fallback path that keeps the pre-fetch horizon from silently
     /// becoming a cap. A task backlog that places something every 13 days
     /// never trips the 14-day stall counter, so the walk legitimately runs
-    /// past the 44-day pre-fetched window — those days must come from the
-    /// per-day call rather than being truncated or re-batched.
+    /// past the 44-day pre-fetched window.
     ///
-    /// Without this test, a future change to the ranged call could break
-    /// the fallback and nothing would catch it: every other test's walk
-    /// fits inside the window.
-    func test_autoPlaceEligibleTasks_walkPastPrefetchWindow_fallsBackPerDay() async throws {
+    /// **Rewritten.** This test used to assert the walk ran past day 44
+    /// and fell back to per-day calls. Adding `maxWalkDays` (= the same 44)
+    /// makes that scenario impossible by construction: the walk can no
+    /// longer leave the pre-fetched window, so the fallback branch inside
+    /// these two walks is now unreachable. That's a deliberate consequence
+    /// of the walk-termination fix, not a regression — but it means the
+    /// invariant worth protecting has changed. What this now asserts is
+    /// that the cap and the pre-fetch horizon stay tied together: a walk
+    /// that would once have overshot instead stops exactly at the window
+    /// edge and never needs a single fallback call. If someone later
+    /// raises `maxWalkDays` above `freeSlotPrefetchDays`, this fails.
+    ///
+    /// The fallback code itself stays — `fetchFreeSlots(for:)` has other
+    /// callers (`AISchedulingService.generateProposedSchedule`), and a
+    /// failed pre-fetch still routes every day through it.
+    func test_autoPlaceEligibleTasks_neverWalksPastPrefetchWindow() async throws {
         let shelf = Shelf(name: "Test Shelf")
         context.insert(shelf)
         // Only Mondays, so placement happens once every 7 days — enough
@@ -782,12 +793,143 @@ final class SchedulingEngineTests: XCTestCase {
 
         await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
 
-        XCTAssertGreaterThan(viewModel.lastWalkDayCount, 44, "fixture invalid — the walk has to actually leave the pre-fetch window for this test to mean anything")
-        XCTAssertEqual(calendarService.fetchFreeSlotsRangedCallCount, 1, "the walk must pre-fetch exactly once, not re-batch when it runs past the window")
-        XCTAssertGreaterThan(calendarService.fetchFreeSlotsCallCount, 0, "days past the pre-fetch window must fall back to the per-day call, not be dropped")
-        // The fallback should account for exactly the overshoot — every
-        // day inside the window came from the batch.
-        XCTAssertEqual(calendarService.fetchFreeSlotsCallCount, viewModel.lastWalkDayCount - 44)
+        // This fixture would run ~70 days without a cap (10 tasks, one
+        // placeable per Monday), so hitting exactly 44 is the cap binding,
+        // not the backlog running out.
+        XCTAssertEqual(viewModel.lastWalkDayCount, 44, "the walk must stop at maxWalkDays rather than continuing past the pre-fetched window")
+        XCTAssertEqual(calendarService.fetchFreeSlotsRangedCallCount, 1, "one pre-fetch, never a second batch")
+        XCTAssertEqual(calendarService.fetchFreeSlotsCallCount, 0, "with the cap tied to the pre-fetch horizon, no day should ever need the per-day fallback")
+
+        // The backlog didn't fit in the horizon, so the leftovers must be
+        // reported rather than chased to whatever distant day they'd fit.
+        XCTAssertFalse(viewModel.tasksThatDidNotFit.isEmpty, "tasks left unplaced when the cap binds must be surfaced")
+    }
+
+    // MARK: - Walk termination — recurring tasks must not defeat stall detection
+
+    /// The regression test for the real bug: a weekly recurring task
+    /// re-places itself every 7th day, and because recurring tasks never
+    /// get `isScheduled` set they're placed again on every occurrence,
+    /// forever. When those placements reset the stall counter, the counter
+    /// climbs 1…6, resets, climbs 1…6 — never reaching 14 — so stall
+    /// detection can never fire, and the walk crawls forward day by day
+    /// until an unplaceable task finally fits (~1046 days in the report
+    /// that surfaced this).
+    func test_recurringTaskDoesNotResetStallCounter_walkStaysBounded() async throws {
+        let shelf = Shelf(name: "Test Shelf")
+        context.insert(shelf)
+        let schedule = NamedSchedule(name: "All Day", daysOfWeek: [1, 2, 3, 4, 5, 6, 7], startHour: 0, startMinute: 0, endHour: 23, endMinute: 59)
+        context.insert(schedule)
+        // Cap per-task minutes low so the backlog task below can never fit.
+        let rule = SchedulingRule(shelf: shelf, fillStrategy: .maxTaskCount, maxTaskCount: 5, maxMinutesPerTask: 30)
+        rule.namedSchedule = schedule
+        context.insert(rule)
+        shelf.schedulingRules = [rule]
+
+        let testDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+
+        // Weekly recurring task — the counter-resetting culprit.
+        let recurring = TaskItem(title: "Weekly Recurring", shelf: shelf, estimatedMinutes: 30)
+        recurring.isRecurring = true
+        recurring.recurrenceIntervalCount = 1
+        recurring.recurrenceUnit = .weeks
+        recurring.dueDate = testDay
+        recurring.setEligible(true, for: rule)
+        context.insert(recurring)
+
+        // Backlog task that can never fit this rule (60 > 30-minute cap),
+        // so `hasRemainingSchedulableWork` stays true forever.
+        let neverFits = TaskItem(title: "Never Fits", shelf: shelf, estimatedMinutes: 60)
+        neverFits.setEligible(true, for: rule)
+        context.insert(neverFits)
+        shelf.tasks = [recurring, neverFits]
+
+        let calendarService = FakeCalendarService()
+        calendarService.freeSlotsProvider = { [self.businessHoursSlot(on: $0)] }
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: testDay)
+
+        await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+
+        // 44 == maxWalkDays (private). Before the fix this walk was
+        // effectively unbounded — it only stopped when the never-fitting
+        // task happened to fit, which under these rules is never.
+        XCTAssertLessThanOrEqual(viewModel.lastWalkDayCount, 44, "the walk must stay bounded even with a recurring task placing on it repeatedly")
+        // And it should stop on the stall counter well before the cap,
+        // since recurring placements no longer count as backlog progress.
+        XCTAssertEqual(viewModel.lastWalkDayCount, 14, "recurring placements must not reset the stall counter")
+    }
+
+    /// A task that genuinely can't be placed is reported rather than
+    /// buried at whatever distant day it eventually fits.
+    func test_unplaceableTask_reportedAsDidNotFit_withNoBlock() async throws {
+        let shelf = Shelf(name: "Test Shelf")
+        context.insert(shelf)
+        let schedule = NamedSchedule(name: "All Day", daysOfWeek: [1, 2, 3, 4, 5, 6, 7], startHour: 0, startMinute: 0, endHour: 23, endMinute: 59)
+        context.insert(schedule)
+        // `.fillToFit` imposes no per-task cap, so `canEverFit` is true —
+        // this task is legitimately schedulable in principle. What defeats
+        // it is that no *day* has a big enough opening (below), which is
+        // exactly the "didn't fit in the horizon" case. A task that fails
+        // `canEverFit` outright is a different category entirely: it's
+        // excluded from `hasRemainingSchedulableWork` by design, and is
+        // already surfaced through `atRiskBlocker`'s "exceeds every
+        // eligible schedule's time constraint".
+        let rule = SchedulingRule(shelf: shelf, fillStrategy: .fillToFit)
+        rule.namedSchedule = schedule
+        context.insert(rule)
+        shelf.schedulingRules = [rule]
+
+        let neverFits = TaskItem(title: "Never Fits", shelf: shelf, estimatedMinutes: 60)
+        neverFits.setEligible(true, for: rule)
+        context.insert(neverFits)
+        shelf.tasks = [neverFits]
+
+        let testDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+        let calendarService = FakeCalendarService()
+        // Only 30 minutes free per day — never enough for a 60-minute
+        // non-divisible task, on any day the walk visits.
+        calendarService.freeSlotsProvider = { day in
+            let start = self.calendar.date(byAdding: .hour, value: 9, to: day)!
+            return [TimeSlot(start: start, end: self.calendar.date(byAdding: .minute, value: 30, to: start)!)]
+        }
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: testDay)
+
+        await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+
+        XCTAssertTrue(viewModel.tasksThatDidNotFit.contains { $0.id == neverFits.id }, "an unplaceable task must be surfaced, not silently dropped")
+        XCTAssertFalse(neverFits.isScheduled)
+        XCTAssertTrue((neverFits.scheduledBlocks ?? []).isEmpty, "it must not get a block at some far-future day")
+    }
+
+    /// A recurring task on its own doesn't keep the walk alive past the
+    /// cap — it has no backlog to make progress on.
+    func test_recurringTaskAlone_doesNotExtendWalkPastCap() async throws {
+        let shelf = Shelf(name: "Test Shelf")
+        context.insert(shelf)
+        let schedule = NamedSchedule(name: "All Day", daysOfWeek: [1, 2, 3, 4, 5, 6, 7], startHour: 0, startMinute: 0, endHour: 23, endMinute: 59)
+        context.insert(schedule)
+        let rule = SchedulingRule(shelf: shelf, fillStrategy: .fillToFit)
+        rule.namedSchedule = schedule
+        context.insert(rule)
+        shelf.schedulingRules = [rule]
+
+        let testDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+        let recurring = TaskItem(title: "Daily Recurring", shelf: shelf, estimatedMinutes: 30)
+        recurring.isRecurring = true
+        recurring.recurrenceIntervalCount = 1
+        recurring.recurrenceUnit = .days
+        recurring.dueDate = testDay
+        recurring.setEligible(true, for: rule)
+        context.insert(recurring)
+        shelf.tasks = [recurring]
+
+        let calendarService = FakeCalendarService()
+        calendarService.freeSlotsProvider = { [self.businessHoursSlot(on: $0)] }
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: testDay)
+
+        await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+
+        XCTAssertLessThanOrEqual(viewModel.lastWalkDayCount, 44, "a daily recurring task must not keep the walk running indefinitely")
     }
 
     // MARK: - Follow-On #1 — per-day slicing of a shared multi-day busy list
