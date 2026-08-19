@@ -854,6 +854,96 @@ final class SchedulingEngineTests: XCTestCase {
         return viewModel
     }
 
+    /// The regression test. Reproduces the exact state pulled from the
+    /// device store for "Overage calc": incomplete, eligible for its
+    /// shelf's rule, 120 estimated minutes, zero remaining, no blocks to
+    /// account for the difference. Before the fix it appeared in no list
+    /// at all — `canEverFit(estimatedMinutes: 0)` returns `.needsDuration`,
+    /// which drops it from the scheduler's candidates *and* from
+    /// `tasksThatDidNotFit`, while `isAtRisk` needs `remainingMinutes > 0`
+    /// or a block past the deadline and it has neither.
+    func test_unplacedReason_drainedToZeroRemaining_isSurfaced() async throws {
+        let (shelf, rule, testDay) = makeReasonFixture(daysOfWeek: [1, 2, 3, 4, 5, 6, 7])
+        let drained = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 120, isDivisible: false, minimumSegmentMinutes: 0)
+        drained.remainingMinutes = 0
+
+        let viewModel = await runWalk(shelf: shelf, testDay: testDay) { [self.businessHoursSlot(on: $0)] }
+
+        let entry = try XCTUnwrap(
+            viewModel.tasksThatDidNotFit.first { $0.task.id == drained.id },
+            "a task drained to zero remaining while still incomplete must be surfaced, not silently skipped"
+        )
+        XCTAssertEqual(entry.reason, .needsDuration)
+        XCTAssertTrue(entry.explanation.contains("no time left"), "the drained case needs its own sentence, not the never-configured one")
+    }
+
+    /// The other half of the same enum case: a task nobody ever gave a
+    /// duration to. Same `.needsDuration`, different sentence and action.
+    func test_unplacedReason_neverGivenADuration_usesDifferentSentence() async throws {
+        let (shelf, rule, testDay) = makeReasonFixture(daysOfWeek: [1, 2, 3, 4, 5, 6, 7])
+        let unconfigured = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 0, isDivisible: false, minimumSegmentMinutes: 0)
+
+        let viewModel = await runWalk(shelf: shelf, testDay: testDay) { [self.businessHoursSlot(on: $0)] }
+
+        let entry = try XCTUnwrap(viewModel.tasksThatDidNotFit.first { $0.task.id == unconfigured.id })
+        XCTAssertEqual(entry.reason, .needsDuration)
+        XCTAssertTrue(entry.explanation.contains("No duration set"))
+        XCTAssertNotEqual(entry.suggestedAction, "", "must tell the user what to do")
+    }
+
+    /// `.needsDuration` is measured, not inferred, so it precedes every
+    /// walk-derived reason even when those would also apply.
+    func test_unplacedReason_needsDuration_winsOverDerivedReasons() async throws {
+        // A rule that never applies would otherwise yield .noEligibleDays.
+        let (shelf, rule, testDay) = makeReasonFixture(daysOfWeek: [])
+        let drained = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 120, isDivisible: false, minimumSegmentMinutes: 0)
+        drained.remainingMinutes = 0
+
+        let viewModel = await runWalk(shelf: shelf, testDay: testDay) { [self.businessHoursSlot(on: $0)] }
+
+        let entry = try XCTUnwrap(viewModel.tasksThatDidNotFit.first { $0.task.id == drained.id })
+        XCTAssertEqual(entry.reason, .needsDuration, "the measured configuration fact must win over the derived reason")
+    }
+
+    /// A task holding a block while at zero remaining is surfaced only if
+    /// the block doesn't account for its estimate — and its block is never
+    /// deleted either way.
+    func test_unplacedReason_zeroRemainingWithPartialBlock_surfacedAndBlockKept() async throws {
+        let (shelf, rule, testDay) = makeReasonFixture(daysOfWeek: [1, 2, 3, 4, 5, 6, 7])
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 120, isDivisible: false, minimumSegmentMinutes: 0)
+        task.remainingMinutes = 0
+        // Only 30 of the 120 minutes accounted for — 90 went missing.
+        let blockStart = calendar.date(byAdding: .hour, value: 9, to: testDay)!
+        let block = ScheduledBlock(date: testDay, startTime: blockStart, endTime: calendar.date(byAdding: .minute, value: 30, to: blockStart)!, task: task)
+        context.insert(block)
+        task.scheduledBlocks = [block]
+
+        let viewModel = await runWalk(shelf: shelf, testDay: testDay) { [self.businessHoursSlot(on: $0)] }
+
+        XCTAssertTrue(viewModel.tasksThatDidNotFit.contains { $0.task.id == task.id })
+        XCTAssertEqual((task.scheduledBlocks ?? []).count, 1, "surfacing must never sweep the block — it may be real work the user intends to do")
+    }
+
+    /// The boundary that keeps this from crying wolf: a task fully placed
+    /// by its blocks legitimately has zero remaining and must NOT appear.
+    func test_unplacedReason_fullyPlacedTaskAtZeroRemaining_isNotSurfaced() async throws {
+        let (shelf, rule, testDay) = makeReasonFixture(daysOfWeek: [1, 2, 3, 4, 5, 6, 7])
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 120, isDivisible: false, minimumSegmentMinutes: 0)
+        task.remainingMinutes = 0
+        task.isScheduled = true
+        let blockStart = calendar.date(byAdding: .hour, value: 9, to: testDay)!
+        let block = ScheduledBlock(date: testDay, startTime: blockStart, endTime: calendar.date(byAdding: .minute, value: 120, to: blockStart)!, task: task)
+        context.insert(block)
+        task.scheduledBlocks = [block]
+
+        let viewModel = await runWalk(shelf: shelf, testDay: testDay) { [self.businessHoursSlot(on: $0)] }
+
+        XCTAssertFalse(
+            viewModel.tasksThatDidNotFit.contains { $0.task.id == task.id },
+            "a task whose blocks fully account for its estimate is finished being scheduled, not stranded"
+        )
+    }
+
     /// A rule whose schedule has no days at all never applies, so the walk
     /// never even considers the task.
     func test_unplacedReason_noEligibleDays() async throws {

@@ -23,6 +23,18 @@ import Observation
 /// still placed nothing, so the rule's own caps are what's left. Anything
 /// measurable has to be ruled out before falling back to it.
 enum UnplacedReason {
+    /// The task has no schedulable time left — either it was never given
+    /// a duration, or its `remainingMinutes` drained to zero without
+    /// blocks to account for it. Either way `canEverFit` returns
+    /// `.needsDuration` rather than `.fits`, which drops the task out of
+    /// the scheduler's candidate pool *and* out of every "why didn't this
+    /// get scheduled" list, so nothing surfaces it at all.
+    ///
+    /// First in priority: it's a directly measured configuration fact,
+    /// not something inferred from what the walk did or didn't see, so it
+    /// has to be checked before any derived reason. It's also the only
+    /// case here where the task never even reached the packer.
+    case needsDuration
     /// The rule's window never applied on any day in the horizon.
     case noEligibleDays
     /// The rule applied on only a handful of days — a rare-window rule.
@@ -82,6 +94,18 @@ struct UnplacedTask: Identifiable {
     /// A plain sentence naming the rule and the actual numbers.
     var explanation: String {
         switch reason {
+        case .needsDuration:
+            // Same enum case, two genuinely different situations — and
+            // they need different sentences because they need different
+            // actions from the user. `estimatedMinutes` is what tells
+            // them apart: zero means nobody ever set a duration, non-zero
+            // means one was set and the remaining time has since drained
+            // away without the task being finished.
+            if task.estimatedMinutes <= 0 {
+                return "No duration set, so the scheduler has nothing to place."
+            }
+            let placed = TaskItem.durationLabel(for: max(task.estimatedMinutes - task.remainingMinutes, 0))
+            return "Set to \(TaskItem.durationLabel(for: task.estimatedMinutes)) but has no time left to schedule (\(placed) accounted for), and it isn't marked done."
         case .noEligibleDays:
             return "\(ruleName) never came up in the days checked."
         case .fewEligibleDays:
@@ -100,6 +124,10 @@ struct UnplacedTask: Identifiable {
     /// What the user can actually do about it.
     var suggestedAction: String {
         switch reason {
+        case .needsDuration:
+            return task.estimatedMinutes <= 0
+                ? "Set a duration on this task."
+                : "Mark it done if it's finished, or reset its duration to reschedule the rest."
         case .noEligibleDays, .fewEligibleDays:
             return "Widen this schedule's days or hours."
         case .noFreeTime:
@@ -973,10 +1001,60 @@ final class ScheduleReviewViewModel {
     /// days or fewer is treated as rare-window rather than merely busy.
     private static let fewEligibleDaysThreshold = 3
 
+    /// Tasks the scheduler silently skips because they have no schedulable
+    /// time left, despite not being finished.
+    ///
+    /// Deliberately a *separate* collector from `remainingSchedulableTasks`
+    /// rather than a loosening of it. That function shares its predicate
+    /// with `hasRemainingSchedulableWork`, which is one of the walk's two
+    /// termination conditions — widening it to include zero-remaining
+    /// tasks would make the walk think it still had work to do and never
+    /// stop. These tasks need reporting, not scheduling.
+    ///
+    /// The "drained" test compares against time actually placed rather
+    /// than just checking for the presence of blocks. A task whose blocks
+    /// fully account for its estimate is simply finished being scheduled
+    /// — normal, not stranded. Only when the placed minutes fall short of
+    /// the estimate has time gone missing.
+    private func tasksWithNoSchedulableTime(shelves: [Shelf]) -> [TaskItem] {
+        shelves.flatMap { shelf -> [TaskItem] in
+            let rules = (shelf.schedulingRules ?? []).filter(\.isEnabled)
+            guard !rules.isEmpty else { return [] }
+            return (shelf.tasks ?? []).filter { task in
+                // Recurring tasks are placed by the fixed-time pass and
+                // never drain `remainingMinutes` at all, so this test
+                // doesn't describe them.
+                guard !task.isCompleted, !task.isRecurring else { return false }
+                guard rules.contains(where: { task.isEligible(for: $0) }) else { return false }
+                guard task.remainingMinutes <= 0 else { return false }
+                guard task.estimatedMinutes > 0 else { return true } // never given a duration
+                let placedMinutes = (task.scheduledBlocks ?? [])
+                    .filter { !$0.isCompleted }
+                    .reduce(0) { $0 + Int($1.endTime.timeIntervalSince($1.startTime) / 60) }
+                return placedMinutes < task.estimatedMinutes
+            }
+        }
+    }
+
     /// Pairs each still-unplaced task with a single reason, in the fixed
     /// priority order documented on `UnplacedReason`.
     private func unplacedTasks(shelves: [Shelf], stats: [UUID: RuleWalkStats], hitHorizon: Bool) -> [UnplacedTask] {
-        remainingSchedulableTasks(shelves: shelves).map { task in
+        // Checked first, and collected separately, because these tasks
+        // never reach the packer at all — none of the walk-derived stats
+        // below say anything about them.
+        let needsDuration = tasksWithNoSchedulableTime(shelves: shelves).map { task in
+            UnplacedTask(
+                task: task,
+                reason: .needsDuration,
+                rule: (task.shelf?.schedulingRules ?? []).first { $0.isEnabled && task.isEligible(for: $0) },
+                eligibleDayCount: 0,
+                totalFreeMinutes: 0,
+                maxContiguousSlotMinutes: 0,
+                requiredMinutes: task.estimatedMinutes
+            )
+        }
+
+        return needsDuration + remainingSchedulableTasks(shelves: shelves).map { task in
             // Judged against whichever eligible rule actually came up most
             // — the one that had the best shot and still didn't place it.
             let candidateRules = (task.shelf?.schedulingRules ?? []).filter {
