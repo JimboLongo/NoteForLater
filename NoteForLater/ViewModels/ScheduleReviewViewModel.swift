@@ -181,14 +181,14 @@ final class ScheduleReviewViewModel {
     private let diagInstanceTag = String(UUID().uuidString.prefix(4))
     private static func diagRunID() -> String { String(UUID().uuidString.prefix(6)) }
     private func diagLog(_ runID: String, _ message: String) {
-        print("[DIAG \(diagInstanceTag)/\(runID)] \(Date().formatted(date: .omitted, time: .standard)) \(message)")
+        DiagFileLog.write("[\(diagInstanceTag)/\(runID)] \(message)")
     }
     private func diagLogInsert(_ runID: String, site: String, block: ScheduledBlock) {
         let kind = block.task != nil ? "task" : (block.habit != nil ? "habit" : "empty")
         let title = block.task?.title ?? block.habit?.name ?? "—"
         let formatter = DateFormatter()
         formatter.dateFormat = "MM-dd HH:mm"
-        print("[DIAG \(diagInstanceTag)/\(runID)] INSERT site=\(site) kind=\(kind) \"\(title)\" \(formatter.string(from: block.startTime))–\(formatter.string(from: block.endTime))")
+        DiagFileLog.write("[\(diagInstanceTag)/\(runID)] INSERT site=\(site) kind=\(kind) \"\(title)\" \(formatter.string(from: block.startTime))–\(formatter.string(from: block.endTime))")
     }
     /// Tasks the most recent walk finished without managing to place —
     /// still unscheduled, still eligible for an enabled rule, still able
@@ -1911,6 +1911,16 @@ final class ScheduleReviewViewModel {
     /// reports as a hard "relationship already has a value but it's not
     /// the target" crash rather than silently overwriting it.
     private func removeBlock(_ block: ScheduledBlock, restoringRemainingMinutes: Bool = true) {
+        // TEMPORARY DIAGNOSTIC (docs/double-booking-plan.md step 1) —
+        // without this, one run that inserts, removes, then re-inserts at
+        // the same time looks identical to a genuine double-book in the
+        // log, which is exactly the distinction step 1 has to make.
+        do {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MM-dd HH:mm"
+            let title = block.task?.title ?? block.habit?.name ?? "—"
+            DiagFileLog.write("[\(diagInstanceTag)] REMOVE \"\(title)\" \(formatter.string(from: block.startTime))–\(formatter.string(from: block.endTime))")
+        }
         if restoringRemainingMinutes {
             restoreRemainingMinutes(for: block)
         }

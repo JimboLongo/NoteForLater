@@ -281,8 +281,8 @@ struct ScheduleReviewView: View {
         // `Task { }` blocks reach here (appear, day change, prev/next,
         // go-to-today) with no guard between them.
         let syncID = String(UUID().uuidString.prefix(4))
-        print("[DIAG sync/\(syncID)] ENTER syncSchedule dirty=\(ScheduleDirtyState.shared.isDirty)")
-        defer { print("[DIAG sync/\(syncID)] EXIT  syncSchedule") }
+        DiagFileLog.write("[sync/\(syncID)] ENTER syncSchedule dirty=\(ScheduleDirtyState.shared.isDirty)")
+        defer { DiagFileLog.write("[sync/\(syncID)] EXIT  syncSchedule") }
         guard let vm = viewModel else { return }
         if ScheduleDirtyState.shared.isDirty {
             let completedFully = await vm.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
