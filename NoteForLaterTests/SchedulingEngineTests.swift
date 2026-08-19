@@ -798,15 +798,55 @@ final class SchedulingEngineTests: XCTestCase {
     // MARK: - §8 — the consolidated replacement/insertion candidate filter
 
     // NOTE: every test below is `async` even though `replacementCandidates`
-    // itself is synchronous, and they must stay that way. Constructing a
-    // `ScheduleReviewViewModel` inside a non-async XCTest method crashes
-    // the whole test runner with a malloc "pointer being freed was not
-    // allocated" before a single assertion runs — reproduced with a probe
-    // test whose entire body was one `ScheduleReviewViewModel.init` and
-    // nothing else, so it's nothing to do with this filter or these
-    // fixtures. Every pre-existing viewmodel test in this file happens to
-    // be async for its own reasons (it awaits a real async method), which
-    // is why this never surfaced before.
+    // itself is synchronous, and they must stay that way — as must any
+    // future test that constructs a `ScheduleReviewViewModel` at all.
+    //
+    // The project sets `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, so
+    // that class is implicitly `@MainActor` despite carrying no
+    // annotation, which makes its `deinit` an *isolated* deinit. Address
+    // Sanitizer pins the crash to the dealloc, not the init:
+    //
+    //   free
+    //   swift::TaskLocal::StopLookupScope::~StopLookupScope()
+    //   swift_task_deinitOnExecutorImpl(...)
+    //   ScheduleReviewViewModel.__deallocating_deinit
+    //
+    // An isolated deinit released with no enclosing Swift Task anywhere
+    // up the stack trips a runtime bug in that task-local scope teardown
+    // and frees a pointer that was never malloc'd, taking down the whole
+    // runner before any assertion runs. XCTest's synchronous path
+    // (`-[NSInvocation invoke]` straight into the test method) is exactly
+    // that no-Task context; an `async` test method supplies one.
+    //
+    // This is a bug in the Swift runtime's isolated-deinit teardown, not
+    // a defect in `ScheduleReviewViewModel`. The viewmodel is correct as
+    // written; it just happens to be the first MainActor-isolated class
+    // this suite deallocates outside a task.
+    //
+    // Confirmed by experiment, so nobody has to re-derive it:
+    //   - marking the class `nonisolated` makes the sync case pass —
+    //     that identifies the trigger, and is REJECTED as a fix. It
+    //     would strip MainActor protection from a viewmodel that touches
+    //     `@Observable` state and a `ModelContext`, trading a
+    //     test-only crash for real concurrency unsafety in the app.
+    //     Do not "simplify" the async annotations away by reaching for
+    //     it.
+    //   - `@MainActor` on this test class does NOT help; XCTest still
+    //     invokes sync methods with no Task
+    //   - releasing the viewmodel inside a `Task {}`, a
+    //     `Task.detached {}`, or a plain sync closure called from an
+    //     async test all pass — so the app's task-based release paths,
+    //     including Nightly Review's background `Task {}`, are clear
+    //
+    // KNOWN GAP, unproven either way: whether SwiftUI's `@State`
+    // teardown is itself a no-Task context. If it is, the same bad free
+    // is reachable from the app, not just from tests. Argued unlikely —
+    // the viewmodel has lived in a SwiftUI hierarchy across many
+    // launches without incident, and a genuinely no-Task teardown path
+    // would present as a reproducible crash rather than a rare one —
+    // but nothing here actually settles it. If a malloc "pointer being
+    // freed was not allocated" ever shows up in the app with no obvious
+    // cause, start here rather than rediscovering it.
 
     /// Builds a 60-minute block on `testDay` at 10am, occupied by its own
     /// task, plus the viewmodel that owns the filter under test.
@@ -886,4 +926,5 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertTrue(withInbox.contains { $0.id == inboxTask.id }, "includingInbox: true is what the long-press insert popover needs")
         XCTAssertFalse(withoutInbox.contains { $0.id == inboxTask.id }, "includingInbox: false must exclude unsorted tasks")
     }
+
 }

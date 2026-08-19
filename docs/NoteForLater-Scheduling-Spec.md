@@ -426,6 +426,23 @@ Each phase should build and run.
 
 Things currently settled only in conversation, not in this document. Each needs to land here (or get resolved) before the phase it blocks.
 
+### Isolated-deinit crash: a Swift runtime bug, and one unproven gap
+
+`SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` is set project-wide, so `ScheduleReviewViewModel` is implicitly `@MainActor` despite carrying no annotation, which makes its `deinit` an **isolated deinit**. Deallocating it with no enclosing Swift Task anywhere up the stack trips a runtime bug in task-local scope teardown and frees a pointer that was never `malloc`'d. Address Sanitizer's trace:
+
+```
+free
+swift::TaskLocal::StopLookupScope::~StopLookupScope()
+swift_task_deinitOnExecutorImpl(...)
+ScheduleReviewViewModel.__deallocating_deinit
+```
+
+**This is a Swift runtime bug, not a defect in the viewmodel.** In practice it only bites XCTest's synchronous invocation path (`-[NSInvocation invoke]` straight into the test method), which supplies no Task; an `async` test method does. Hence every test constructing this viewmodel is `async` — the fix, not a workaround.
+
+`nonisolated` on the class makes the sync case pass and is **explicitly rejected**: it would strip MainActor protection from a viewmodel touching `@Observable` state and a `ModelContext`, trading a test-only crash for real concurrency unsafety. `@MainActor` on the test class does not help. Releasing inside `Task {}`, `Task.detached {}`, or a sync closure called from an async test all pass, so the app's task-based release paths — including Nightly Review's background `Task {}` — are clear. Thread Sanitizer reported no data race (its own allocator died on the same bad free).
+
+**Unproven gap:** whether SwiftUI's `@State` teardown is itself a no-Task context. If it is, the same bad free is reachable from the app rather than only from tests. Argued unlikely — the viewmodel has lived in a SwiftUI hierarchy across many launches without incident, and a genuinely no-Task teardown path would present as a reproducible launch crash rather than a rare one — but no test here settles it. Recorded so that a future malloc "pointer being freed was not allocated" in the app is recognized immediately instead of re-diagnosed from scratch. See the long note above the §8 tests in `SchedulingEngineTests.swift`.
+
 ### Task-walk horizon: 30 → 365 → stall detection
 
 History: the walk was originally capped at a deliberate 30-day horizon; `1bd15d3` raised it to a flat `taskSafetyCapDays = 365`; `e18ef4e` (Phase 5) replaced that flat cap with stall detection (`taskStallThresholdDays = 14` consecutive days placing zero task blocks). This is a real behavior change worth naming explicitly: a task that's eligible and fits, but whose only opening is more than 14 consecutive empty days out, now never reaches that opening — the walk gives up first. At-risk detection (§5.3) doesn't catch this either, since `isAtRisk` is slack/deadline-driven and has nothing to say about a task with no due date sitting past the stall threshold. Not blocking any phase today, but worth flagging if a "task silently never gets scheduled" report ever comes in.
