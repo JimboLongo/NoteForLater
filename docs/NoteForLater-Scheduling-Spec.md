@@ -617,6 +617,69 @@ So any such feature has to define what it does with each of those — most likel
 
 `c162acb` changed `slack`/`isAtRisk`/`atRiskBlocker` to measure against `endOfDueDate(calendar:)` (midnight ending `dueDate`'s calendar day) rather than the raw `dueDate` instant, and made `isAtRisk` return `false` outright when `dueDatePicked == false`. §5 doesn't describe either of these; both are load-bearing (the raw-instant version had a due-today-at-9am-reads-as-past-due-at-9:01 bug) and should be written into §5 before anyone edits that code without the conversation history.
 
+### Duplicate `HabitLog`s for one day — confirmed in live data, unfixed
+
+**Measured, not hypothesized.** A one-shot audit over the live store found
+**9 of 11 habits affected, 15 duplicated days, 25 excess logs**:
+
+```
+Brush Teeth       logs=23  [08-17×2  08-18×4]
+Exercise          logs=53  [08-15×3  08-17×4  08-18×2]
+Clean Before Bed  logs=13  [08-16×2  08-17×3  08-19×2]
+Morning Stretches logs=10  [08-18×2  08-20×3]
+… 5 more, 1 duplicated day each
+```
+
+Nothing prevents this. `HabitLog` has a plain `UUID id` and a plain `date`
+— **no uniqueness constraint anywhere in the model**. The one-log-per-day
+invariant that several call sites quietly assume is upheld only by
+convention, across **six separate non-atomic check-then-create sites**:
+
+| Site | How it decides |
+|---|---|
+| `ScheduleReviewViewModel.swift:1739` | `habit.log(on:)`, else create |
+| `DayTimelineGridView.swift:723` | `habit.log(on:)`, else create |
+| `NightlyReviewView.swift:485` | `habit.log(on:)`, else create |
+| `DailyDigestCheckInView.swift:124` | `habit.log(on:)`, else create |
+| `HabitsView.swift:297` | a **passed-in** `todayLog`, else create |
+| `HabitDetailView.swift:349` | a **`logsByDay` dictionary** — not `log(on:)` at all |
+
+Every one is read-then-write with no transaction around the pair, so two
+writes interleaving before the first insert becomes visible both see nil
+and both create. The last two rows are worse than the others: they don't
+even use `log(on:)` to decide, so they can disagree with it about whether
+a log already exists.
+
+**Why this is a correctness bug and not an untidiness.** `log(on:)`
+returns exactly one of the duplicates, so `setOccurrence` writes to that
+one — and any completion recorded against a *sibling* row is invisible to
+every later read. The rolling-30/streak calculations count logs, so a
+duplicated day can be counted more than once. The symptom is wrong
+numbers that never announce themselves, the same shape as the
+`remainingMinutes` drain in §1.1a: a leak nothing stopped because every
+call site had independently grown the same unguarded pattern, and four
+(here, six) of them were wrong in the same way.
+
+This is also why `Habit.log(on:)` uses `.last(where:)` rather than
+`.first(where:)` — with duplicates present the two are **not** equivalent,
+and `.last` at least reads the most recently appended row for the day
+instead of a stale earlier one. Damage control, not a fix. (The scan
+direction itself is a separate, empirical matter — see that method's own
+doc comment: `logs` is an *unordered* to-many relationship, so nothing
+guarantees where the day's log sits; it merely lands 0–3 from the end in
+practice today.)
+
+**Likely fix, not attempted here:** collapse all six sites into one funnel
+on the model — `Habit.logOrCreate(on:context:)` — so the guard exists once
+rather than six times, and a future seventh caller inherits it instead of
+re-deriving it. That still doesn't make check-then-create atomic; a real
+uniqueness constraint (or a deliberate de-dup on read) is the stronger
+version. Existing duplicates need a repair migration too, in the shape of
+`TaskItem.repairedRemainingMinutes()` (§1.1b): merge each day's rows
+rather than dropping extras, since completions may be split across them.
+
+Out of scope for the habit-tap performance work that found it.
+
 ### Dead code referenced by §6.1
 
 `InboxViewModel.route(_ task:to shelf:)` is never called anywhere in the current codebase, and there is no "Inbox bulk submit" feature — §6.1's trigger list should not (and per the Phase 5 rewrite, does not) cite either as a real dirty-flag trigger site. Actual task-to-shelf routing goes entirely through `TaskReviewCard.advance()`'s `onMove` path. Noted here so a future read of `route(_:to:)` doesn't get treated as a call site worth instrumenting.

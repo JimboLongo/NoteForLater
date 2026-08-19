@@ -146,9 +146,27 @@ final class Habit {
         }
     }
 
+    /// ⚠️ `logs` is an **unordered** to-many relationship —
+    /// `@Relationship` promises nothing about read-back order, so this
+    /// scans from the end as an *empirical bet*, not because any ordering
+    /// is guaranteed. Measured on device across 9 habits (up to 53 logs
+    /// each): today's log landed 0–3 positions from the end every time,
+    /// including index 50–52 of 53. Forward iteration walked the whole
+    /// history to find the same entry. If that clustering ever stops
+    /// holding, this quietly degrades to a full scan — it stays correct
+    /// either way, it just stops being fast.
+    ///
+    /// ⚠️ `.first` vs `.last` is **not** a no-op in the presence of
+    /// duplicates, and duplicates are real: same-day `HabitLog`s exist in
+    /// live data today (see the Open Decisions entry in
+    /// `docs/NoteForLater-Scheduling-Spec.md`). Nothing enforces
+    /// one-per-day. `.last` is chosen deliberately — the most recently
+    /// appended log for a day is the one most recently written to, so a
+    /// duplicated day reads its newest state rather than a stale earlier
+    /// row. That is damage control, not a fix.
     func log(on date: Date, calendar: Calendar = .current) -> HabitLog? {
         let day = calendar.startOfDay(for: date)
-        return (logs ?? []).first(where: { calendar.isDate($0.date, inSameDayAs: day) })
+        return (logs ?? []).last(where: { calendar.isDate($0.date, inSameDayAs: day) })
     }
 
     func occurrenceStatus(_ index: Int, on date: Date, calendar: Calendar = .current) -> OccurrenceStatus {
