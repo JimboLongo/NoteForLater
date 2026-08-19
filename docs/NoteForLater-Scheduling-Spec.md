@@ -42,6 +42,24 @@ var remainingMinutes: Int = 0
 
 **Migration:** `remainingMinutes = estimatedMinutes` for all existing tasks.
 
+#### 1.1a Every block deletion must restore, and deferral is not completion
+
+`pack()` decrements `remainingMinutes` when it places a block, so **any** deletion of an incomplete block that skips the restore destroys that time permanently. Three paths did restore; four did not (`trimOverflowingRuleBlocks` ×2, `deleteBlock`, `manualReplace`). The trim pair runs at the top of every `autoPlaceEligibleTasks` — on essentially every Calendar appear — so the leak was high-frequency, and four real tasks were found drained to `remainingMinutes = 0` while still incomplete.
+
+The audit that found this also **disproved** the obvious hypothesis, which is worth recording so nobody re-checks it: `restoreRemainingMinutes` reads `block.task`, and all three clear paths nil that inverse before deleting — but every one of them calls the restore *strictly first*, so the `guard let task = block.task` never no-ops. The ordering was correct everywhere; the calls were simply absent in four places.
+
+**All deletions now route through one `removeBlock(_:restoringRemainingMinutes:)` that restores by default.** Four call sites had independently grown the same delete-without-restore shape and nothing stopped a fifth. Completed blocks are safe to pass — the restore already no-ops on them, since their time was genuinely spent.
+
+**`deleteBlock` (the user's swipe) restores, deliberately.** A swipe means "not here, not now": the app has a separate gesture — completing the block — that means the work is done, and `deleteBlock` already increments `pushedCount`, which is semantically a *deferral*. Not restoring turned a routine swipe into a silent-drain trap. An explicit discard-the-work action would be a separate deliberate feature, never a side effect of a swipe.
+
+#### 1.1b The `min(estimatedMinutes, …)` clamp, and duration edits
+
+`restoreRemainingMinutes` clamps with `min(estimatedMinutes, remainingMinutes + block.durationMinutes)`, which is correct against over-restore but silently caps a legitimate restore if `estimatedMinutes` was edited **downward** after the block was placed.
+
+That interaction was audited and is **not** currently a drain source, but the reason is worth stating because it is fragile: several paths *reset* `remainingMinutes` whenever `estimatedMinutes` changes — `NightlyReviewView`'s `onChange(of: task.estimatedMinutes)` sets `remainingMinutes = newValue`, and both shelf-move paths reset it via `resolvedDuration`. Those resets inflate rather than drain, so they mask the clamp rather than compound it. If any of them is ever removed or narrowed, the clamp becomes a live leak.
+
+**Repair of already-damaged data** lives in `TaskItem.repairedRemainingMinutes()` (one-shot launch migration, its own flag, deliberately separate from the §1.1 backfill above which blanket-sets every task). Three cases: blocks already covering the estimate → leave alone; no blocks → full estimate; partial blocks → estimate minus placed. The first is the one that matters — a fully-scheduled task legitimately has `remainingMinutes == 0`, and resetting it would re-offer work already on the calendar.
+
 ### 1.2 `TaskItem.isNightlyReviewed` (new) — ✅ done, Phase 6
 
 ```swift
@@ -197,6 +215,24 @@ Caption when suppressed: **"Exceeds time constraint — will re-enable if this c
 
 Check whether `isEstimatedDuration` has other writers before removing the field itself — `ScheduleReviewViewModel.insertBlock` uses a 30-minute fallback for manual timeline inserts, which is a separate path and should be left alone.
 
+### 3.4 `fitStatus` is asked two different questions — keep the split, but know it
+
+`SchedulingRule.fitStatus` is called with `estimatedMinutes` at some sites and `remainingMinutes` at others. **This is deliberate and should stay**, but it is not obvious from the call sites, and one pair of them genuinely disagrees.
+
+| Call site | Passes | Question it is really asking |
+|---|---|---|
+| `ScheduleReviewViewModel.isSchedulableBacklog` | `remainingMinutes` | can what's *left* still be placed? |
+| `TaskItem.fitStatus(for:)` | `estimatedMinutes` | is this task well-*configured*? |
+| `TaskItem.isEffectivelyEligible` | `estimatedMinutes` | is this task well-configured? |
+| `TaskItem.atRiskBlocker` | `estimatedMinutes` (via `fitStatus(for:)`) | configuration |
+| `NightlyReviewView` task-card toggles | `estimatedMinutes` (via `fitStatus(for:)`) | configuration |
+
+The two questions are genuinely different and unifying them would break one caller or the other. What makes the split hazardous is the guard at the top of `fitStatus`: `guard estimatedMinutes > 0 else { return .needsDuration }`. A task with `estimatedMinutes = 120` and `remainingMinutes = 0` therefore reads `.fits` at the configuration sites and `.needsDuration` at the scheduler site — the same task, opposite verdicts.
+
+**Unresolved: `AISchedulingService.swift:175`.** The packer filters its candidates with `isEffectivelyEligible`, which reads `estimatedMinutes`, while `hasRemainingSchedulableWork` reads `remainingMinutes`. For a drained task these disagree, so it is *admitted* to `pack()` and then discarded inside it — `baseMinutes = remainingMinutes = 0` hits `guard minutesNeeded > 0 else { continue }` and the task is skipped silently, every day, with no error and no placement. That is the least visible possible outcome, and it is why the `remainingMinutes` drain (§1.1a) went unnoticed for so long rather than surfacing as a failure.
+
+Not changed, because the drain that produced zero-remaining tasks is now fixed at source and §5.4 surfaces any that still occur. Recorded because the disagreement is still there, and it is the mechanism by which any *future* zero-remaining bug will again fail silently.
+
 ---
 
 ## 4. Packing fixes
@@ -217,13 +253,30 @@ if let slot = slots.first(where: { $0.durationMinutes >= minutesNeeded }) {
 ```
 Result: with 20 minutes of budget left, a task configured as indivisible below 60 minutes receives a 20-minute block. The floor only holds on the multi-slot fallback path.
 
-**Required:**
-- When truncating a divisible task (`maxDuration` budget or `maxTaskCount` per-task cap), floor the result to a whole multiple of `minimumSegmentMinutes`. If that is `0`, skip the task.
-- `place()` must reject any single-slot placement below `minimumSegment` when `isDivisible`.
+**Required — ✅ done, `ac86a0d`, and the floor is needed in *two* places:**
 
-### 4.2 Keep the existing round-up
+- **In `pack()`, before `place()` is called.** Floor `minutesNeeded` to a whole multiple of `minimumSegmentMinutes`. This is the one that actually mattered: the reported bug (a 4-hour task with 2-hour segments against a 3.5-hour budget) never reached `place()`'s splitting loop at all. `minutesNeeded` was set to the raw 210-minute budget, and `place()`'s **whole-task fast path** — `slots.first(where: { $0.durationMinutes >= minutesNeeded })` — put all 210 minutes in one block. A fix confined to the loop would not have touched it.
+- **In `place()`'s loop.** Each per-slot take is floored too, so a 3.5-hour slot yields one whole 2-hour segment rather than absorbing 3.5 hours.
 
-`place()` rounds a final divisible segment **up** to `minimumSegmentMinutes` rather than leaving a sliver. Retain. `pack()` already tracks `actualMinutes` rather than `minutesNeeded` for bookkeeping — keep that, and apply it to `remainingMinutes`.
+Either alone is insufficient. Without the second, a slot absorbs a non-multiple; without the first, the fast path bypasses the check entirely.
+
+**Why the orphan is fatal rather than untidy:** the leftover 30 minutes can never be placed, because every slot is gated on holding at least a full `minimumSegment`. The task then sits unschedulable forever *while still counting as remaining work* — which is precisely the condition that drove the unbounded walk in §6.4.
+
+### 4.2 The round-up is removed — ✅ `ac86a0d`, reversing this section
+
+**This section previously said to retain `place()`'s round-up of a final divisible segment to `minimumSegmentMinutes`. That is no longer correct and the round-up is gone.**
+
+With §4.1's flooring in place, `remaining` stays a whole multiple of the segment size throughout, so it can never drop below one mid-placement — the branch became unreachable. It was also actively harmful: it could *over-place* a task. Taking 210 minutes from a 3.5-hour slot left 30 remaining, which the next slot then rounded back **up** to a full 120 — placing 330 minutes of a 240-minute task.
+
+`pack()` still tracks `actualMinutes` rather than `minutesNeeded` for bookkeeping, and still applies it to `remainingMinutes`. Keep that.
+
+### 4.3 Segment options must divide the duration — ✅ `ac86a0d`
+
+The packer's floor is only half the invariant; the UI has to stop offering segment sizes that guarantee a remainder. `TaskItem.validSegmentOptions(for:)` filters the candidate list to values that **evenly divide** `estimatedMinutes` and are strictly smaller than it (45 → `[15]`; 60 → `[15, 30]`; 240 → `[15, 30, 60, 120]`). Strictly smaller because a segment the size of the whole task is what "not divisible" already means.
+
+Durations with no divisor at all (25, 50, 100) yield an empty list. Those **disable** the divisible toggle with a stated reason rather than presenting an empty picker — a control that silently refuses to turn on reads as broken.
+
+`TaskItem.validateDivisibility()` is the single enforcement point, called wherever `estimatedMinutes` or `isDivisible` is written — including both shelf-move paths, where `resolvedDuration` rewrites the duration without the user touching the divisibility controls at all. It snaps **down** to the largest valid divisor, so a task never silently ends up chunked more coarsely than chosen, and clears divisibility outright when no divisor exists.
 
 ---
 
@@ -270,6 +323,26 @@ Two surfaces:
 - **New Nightly Review step** — see §7.1.
 
 Threshold is `slack < 0` only. No buffer.
+
+### 5.4 Why a task wasn't placed — `UnplacedReason`
+
+Distinct from At-Risk, and the boundary matters: At-Risk is deadline-driven and its `.exceedsConstraint` cases are tasks that can *never* fit any rule. Everything in `UnplacedReason` already returns `.fits` — it could be placed in principle, but no day in the horizon had room. A task failing `canEverFit` belongs to At-Risk and must never appear here.
+
+Reasons are derived from per-rule tallies accumulated during the walk (eligible days, free minutes, longest contiguous slot, whether the horizon was hit) rather than by threading per-day reporting out of `pack()` — that would mean changing the packer's return signature, which was the invasive option and was not taken.
+
+Checked in a **fixed priority order**, most-specific and directly-measured first:
+
+1. `.needsDuration` — no schedulable time at all. First because it is a measured configuration fact, and because these tasks never reach the packer.
+2. `.noEligibleDays` — the rule's window never applied.
+3. `.fewEligibleDays` — applied on ≤3 days.
+4. `.noFreeTime` — eligible days existed, all fully booked.
+5. `.noContiguousSlot` — free time existed but no stretch long enough for one whole segment.
+6. `.horizonReached` — the walk stopped at `maxWalkDays` with viable days still ahead.
+7. `.ruleBudgetFull` — the fallback, inferred by elimination.
+
+**Free-slot tallies are clipped to each rule's own window, not counted whole-day.** This is load-bearing rather than a refinement: a rule covering 6–8pm on a day with a free morning and a booked evening has no usable time at all, but a whole-day tally records hours of it and the derivation then blames the rule's caps instead of reporting the real `.noFreeTime`.
+
+**`.ruleBudgetFull` appears to be unreachable, and is kept anyway.** A rule's budget resets each day, so for it to be the *standing* explanation something must consume that budget on every day of the walk. Only `pack()` spends it, and `pack()` excludes recurring tasks (`AISchedulingService.swift:168`) — so the consumption must come from ordinary tasks placing repeatedly, which resets the stall counter, which runs the walk to `maxWalkDays`, which makes `.horizonReached` true and claims the case first. Two fixtures were attempted and both resolved to a different reason, so it ships without a test rather than with one asserting something other than what it claims. It stays because the derivation needs a total fallback and "no reason at all" would be worse. **Seeing it in the UI is itself the finding** — it would mean budget accounting or walk termination has changed.
 
 ---
 
@@ -321,6 +394,14 @@ This section's whole premise predates a change made earlier the same session thi
 **Current, replacing the flat cap:** the task side of the walk now stops via **stall detection** (`taskStallThresholdDays = 14`, `ScheduleReviewViewModel`) instead of a raw day count — `dayIndex < N` became `consecutiveDaysWithoutTaskPlacement < 14`, reset to 0 any day that places at least one task block, incremented otherwise. This terminates correctly regardless of how far out the walk could theoretically go, for a structural reason rather than a chosen number: the candidate task pool for a single call is finite and only ever shrinks (a placement either fully schedules a task, permanently removing it via `isScheduled`, or drains `remainingMinutes` toward zero, a bounded quantity) — so the walk can only have finitely many "progress" days total, and the stall counter bounds how many *consecutive* non-progress days can separate any two of them. Both together guarantee termination without needing an outer day cap at all. 14 was chosen, not defaulted to: a rule restricted to a single weekday can legitimately go up to 6 days between chances to place anything, and doubling that leaves margin for a rule that's *also* narrow some other way (a tight eligible-hours window, a task-count cap already claimed by other shelves that day) without waiting anywhere near as long as 365 ever did.
 
 Habits are untouched by any of this — `habitPopulationDays` stays a flat 30-day cap, unconditionally, since "zero habit blocks placed on some day" was never itself a signal of anything going wrong the way an empty day is for a finite task backlog.
+
+**Correction, `99996ab`: the stall counter must exclude recurring tasks, and the arithmetic is why.** The termination argument above holds *only* if "a day that placed a task block" genuinely means the backlog made progress. It didn't. Recurring tasks are **tasks**, not habits — the fixed-time pass builds them with `task != nil`, so they satisfied the counter's reset condition — and `AISchedulingService` deliberately never sets their `isScheduled`, so they are re-placed on **every** occurrence day, forever, whether or not anything is stuck.
+
+The counter therefore measured recurrence frequency rather than backlog progress, and the arithmetic is unforgiving: a **weekly** recurring task resets it every 7th day, so it climbs 1…6, resets, climbs 1…6 — and **never reaches 14**. Any recurrence more frequent than `taskStallThresholdDays` disables stall detection entirely; daily is not required. With stall detection permanently disabled the only surviving terminator was `hasRemainingSchedulableWork`, which stays true while any unplaceable task exists — a normal state per §2.2/§3.3 — so the walk crawled forward one day at a time until such a task happened to fit. Observed in the field at **day 1046**. That block was never "scheduled far out" by intent; day 1046 was simply the first day it fit.
+
+Both counters now exclude recurring tasks (`$0.task != nil && !($0.task?.isRecurring ?? false)`). A `maxWalkDays` ceiling (= `freeSlotPrefetchDays`, 44) was added alongside as defense in depth, so any *future* condition that wrongly resets the counter degrades into a bounded miss rather than an unbounded crawl.
+
+**Consequence worth knowing:** capping at exactly `freeSlotPrefetchDays` makes the per-day `fetchFreeSlots` fallback unreachable from these two walks. The fallback stays — `fetchFreeSlots(for:)` has other callers, and a failed pre-fetch still routes every day through it — but the test that used to prove the overshoot now asserts that the cap and the pre-fetch horizon stay tied together instead.
 
 ---
 
@@ -491,9 +572,11 @@ ScheduleReviewViewModel.__deallocating_deinit
 
 **Unproven gap:** whether SwiftUI's `@State` teardown is itself a no-Task context. If it is, the same bad free is reachable from the app rather than only from tests. Argued unlikely — the viewmodel has lived in a SwiftUI hierarchy across many launches without incident, and a genuinely no-Task teardown path would present as a reproducible launch crash rather than a rare one — but no test here settles it. Recorded so that a future malloc "pointer being freed was not allocated" in the app is recognized immediately instead of re-diagnosed from scratch. See the long note above the §8 tests in `SchedulingEngineTests.swift`.
 
-### Task-walk horizon: 30 → 365 → stall detection
+### Task-walk horizon: 30 → 365 → stall detection → stall detection + cap
 
-History: the walk was originally capped at a deliberate 30-day horizon; `1bd15d3` raised it to a flat `taskSafetyCapDays = 365`; `e18ef4e` (Phase 5) replaced that flat cap with stall detection (`taskStallThresholdDays = 14` consecutive days placing zero task blocks). This is a real behavior change worth naming explicitly: a task that's eligible and fits, but whose only opening is more than 14 consecutive empty days out, now never reaches that opening — the walk gives up first. At-risk detection (§5.3) doesn't catch this either, since `isAtRisk` is slack/deadline-driven and has nothing to say about a task with no due date sitting past the stall threshold. Not blocking any phase today, but worth flagging if a "task silently never gets scheduled" report ever comes in.
+History: originally a deliberate 30-day horizon; `1bd15d3` raised it to a flat `taskSafetyCapDays = 365`; `e18ef4e` (Phase 5) replaced that with stall detection (`taskStallThresholdDays = 14`); `99996ab` excluded recurring tasks from the counter and added a `maxWalkDays = 44` ceiling — see §6.4 for the arithmetic that made the exclusion necessary.
+
+The behavior change still stands and is now doubly bounded: a task whose only opening is more than 14 consecutive empty days out, **or** more than 44 days out at all, never reaches it. At-risk detection doesn't catch this — `isAtRisk` is slack/deadline-driven and says nothing about a no-due-date task sitting past the threshold — but §5.4's `.horizonReached` now does report it, which is the gap this entry originally flagged. Worth revisiting only if a "task silently never gets scheduled" report survives that surface.
 
 ### `dueDate` end-of-day semantics — in code, not in this doc
 
