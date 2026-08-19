@@ -246,6 +246,31 @@ struct DayTimelineGridView: View {
     private var middayOccurrences: [OpenHabitOccurrence] { openHabitOccurrences(mode: .midday) }
     private var pmOccurrences: [OpenHabitOccurrence] { openHabitOccurrences(mode: .pm) }
 
+    /// The same three lists as `amOccurrences`/`middayOccurrences`/
+    /// `pmOccurrences` above, computed together exactly once — those three
+    /// stay as-is for `scrollToRoughlyNow`'s occasional (`.onAppear`-only)
+    /// use of `isSplitAtNoon`, but `body` used to call through them (and
+    /// `isSplitAtNoon`, which calls `middayOccurrences` again internally)
+    /// four separate times per body pass, redoing the same per-habit scan
+    /// each time.
+    private struct OpenHabitOccurrenceLists {
+        let am: [OpenHabitOccurrence]
+        let midday: [OpenHabitOccurrence]
+        let pm: [OpenHabitOccurrence]
+        /// Same rule as the standalone `isSplitAtNoon`: the day only
+        /// splits when there's a Midday occurrence to show between the
+        /// halves.
+        var isSplitAtNoon: Bool { !midday.isEmpty }
+    }
+
+    private func computeOpenHabitOccurrenceLists() -> OpenHabitOccurrenceLists {
+        OpenHabitOccurrenceLists(
+            am: openHabitOccurrences(mode: .am),
+            midday: openHabitOccurrences(mode: .midday),
+            pm: openHabitOccurrences(mode: .pm)
+        )
+    }
+
     /// The calendar only actually splits in two when there's a Midday
     /// occurrence to show between the halves — a day with no Midday
     /// habits renders as the single continuous grid it always has.
@@ -311,17 +336,29 @@ struct DayTimelineGridView: View {
     /// *start* earlier rather than ever moving `middaySplitBoundaryQuarter`.
     /// In quarter-hour units, like every `*Range` a `DayTimelineSegment`
     /// is given.
-    private var morningRange: (start: Int, end: Int) {
-        let startQuarter = visibleHourRange.start * 4
-        let end = middaySplitBoundaryQuarter
-        return (start: min(startQuarter, end - 1), end: end)
-    }
+    private var morningRange: (start: Int, end: Int) { morningRange(hourRange: visibleHourRange) }
 
     /// Same idea as `morningRange`, extending the *end* later instead —
     /// e.g. every item today is before noon but a Midday habit still
     /// needs its own section and grid below the morning one.
-    private var afternoonRange: (start: Int, end: Int) {
-        let endQuarter = visibleHourRange.end * 4
+    private var afternoonRange: (start: Int, end: Int) { afternoonRange(hourRange: visibleHourRange) }
+
+    /// `morningRange`/`afternoonRange` above, factored to take an
+    /// already-computed `visibleHourRange` — `body` computes it once per
+    /// pass and threads it through here, instead of each of these (plus
+    /// the single-segment branch) recomputing it. `visibleHourRange`
+    /// walks every row, every eligible-hours window, and every
+    /// `SchedulingRule` across every shelf, so it was running six times
+    /// per pass. The property forms above stay for `scrollToRoughlyNow`,
+    /// which runs `.onAppear` only and can afford its own call.
+    private func morningRange(hourRange: (start: Int, end: Int)) -> (start: Int, end: Int) {
+        let startQuarter = hourRange.start * 4
+        let end = middaySplitBoundaryQuarter
+        return (start: min(startQuarter, end - 1), end: end)
+    }
+
+    private func afternoonRange(hourRange: (start: Int, end: Int)) -> (start: Int, end: Int) {
+        let endQuarter = hourRange.end * 4
         let start = middaySplitBoundaryQuarter
         return (start: start, end: max(endQuarter, start + 1))
     }
@@ -342,7 +379,12 @@ struct DayTimelineGridView: View {
         rows.filter { minutesSinceMidnight($0.startTime) >= middaySplitMinutes }
     }
 
+    @ViewBuilder
     var body: some View {
+        let occurrenceLists = computeOpenHabitOccurrenceLists()
+        let hourRange = visibleHourRange
+        let morningQuarterRange = morningRange(hourRange: hourRange)
+        let afternoonQuarterRange = afternoonRange(hourRange: hourRange)
         ScrollView {
             VStack(spacing: 0) {
                 twoMinuteTasksSection
@@ -351,17 +393,17 @@ struct DayTimelineGridView: View {
                     } action: { newValue in
                         twoMinuteSectionHeight = newValue
                     }
-                habitOccurrenceSection(title: "Morning Habits", occurrences: amOccurrences)
+                habitOccurrenceSection(title: "Morning Habits", occurrences: occurrenceLists.am)
                     .onGeometryChange(for: CGFloat.self) { proxy in
                         proxy.size.height
                     } action: { newValue in
                         amSectionHeight = newValue
                     }
 
-                if isSplitAtNoon {
+                if occurrenceLists.isSplitAtNoon {
                     DayTimelineSegment(
                         rows: morningRows,
-                        quarterRange: morningRange,
+                        quarterRange: morningQuarterRange,
                         eligibleHoursWindows: eligibleHoursWindows,
                         targetDate: targetDate,
                         lockedStore: lockedStore,
@@ -382,7 +424,7 @@ struct DayTimelineGridView: View {
                         hasCollapsedGap: $morningHasCollapsedGap
                     )
 
-                    habitOccurrenceSection(title: "Midday Habits", occurrences: middayOccurrences)
+                    habitOccurrenceSection(title: "Midday Habits", occurrences: occurrenceLists.midday)
                         // Extra breathing room specifically here — sitting
                         // directly between the two grid segments, this one
                         // reads as squeezed against both without it, unlike
@@ -397,7 +439,7 @@ struct DayTimelineGridView: View {
 
                     DayTimelineSegment(
                         rows: afternoonRows,
-                        quarterRange: afternoonRange,
+                        quarterRange: afternoonQuarterRange,
                         eligibleHoursWindows: eligibleHoursWindows,
                         targetDate: targetDate,
                         lockedStore: lockedStore,
@@ -408,7 +450,7 @@ struct DayTimelineGridView: View {
                         onSaveEvent: onSaveEvent,
                         onDeleteBlock: onDeleteBlock,
                         onPickReplacement: onPickReplacement,
-                        precedingContentHeight: twoMinuteSectionHeight + amSectionHeight + dayHeight(for: morningRange) + middaySectionHeight,
+                        precedingContentHeight: twoMinuteSectionHeight + amSectionHeight + dayHeight(for: morningQuarterRange) + middaySectionHeight,
                         scrollPosition: $scrollPosition,
                         viewportHeight: viewportHeight,
                         scrollOffsetY: scrollOffsetY,
@@ -420,7 +462,7 @@ struct DayTimelineGridView: View {
                 } else {
                     DayTimelineSegment(
                         rows: rows,
-                        quarterRange: (start: visibleHourRange.start * 4, end: visibleHourRange.end * 4),
+                        quarterRange: (start: hourRange.start * 4, end: hourRange.end * 4),
                         eligibleHoursWindows: eligibleHoursWindows,
                         targetDate: targetDate,
                         lockedStore: lockedStore,
@@ -442,7 +484,7 @@ struct DayTimelineGridView: View {
                     )
                 }
 
-                habitOccurrenceSection(title: "Evening Habits", occurrences: pmOccurrences)
+                habitOccurrenceSection(title: "Evening Habits", occurrences: occurrenceLists.pm)
                     .padding(.top, 14)
             }
         }
