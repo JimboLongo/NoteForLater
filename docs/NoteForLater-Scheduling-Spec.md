@@ -401,7 +401,11 @@ The counter therefore measured recurrence frequency rather than backlog progress
 
 Both counters now exclude recurring tasks (`$0.task != nil && !($0.task?.isRecurring ?? false)`). A `maxWalkDays` ceiling (= `freeSlotPrefetchDays`, 44) was added alongside as defense in depth, so any *future* condition that wrongly resets the counter degrades into a bounded miss rather than an unbounded crawl.
 
-**Consequence worth knowing:** capping at exactly `freeSlotPrefetchDays` makes the per-day `fetchFreeSlots` fallback unreachable from these two walks. The fallback stays — `fetchFreeSlots(for:)` has other callers, and a failed pre-fetch still routes every day through it — but the test that used to prove the overshoot now asserts that the cap and the pre-fetch horizon stay tied together instead.
+**Where 44 comes from, since `maxWalkDays` now depends on it.** `freeSlotPrefetchDays = habitPopulationDays + taskStallThresholdDays` = 30 + 14, derived rather than hardcoded. It exists because both walks pre-fetch free/busy for the whole horizon in **one** ranged `fetchFreeSlots(from:to:)` call instead of one call per day — `GoogleCalendarService.fetchBusyRanges(from:to:)` was already range-based, so only the per-day slicing was missing. That mattered once Phase 5's dirty flush started firing `regenerateFromNow` on ordinary edits: up to 44 sequential network round-trips per Calendar appear.
+
+A fixed horizon is required because the walk's length **isn't knowable in advance** — stall detection only updates after a day's packing result comes back, which depends on that day's free slots. So the sum of the two termination bounds is used as the pre-fetch span, and any day beyond it falls back to the per-day call rather than re-batching or truncating.
+
+**Consequence worth knowing:** capping `maxWalkDays` at exactly `freeSlotPrefetchDays` makes that per-day fallback unreachable from these two walks. The fallback stays — `fetchFreeSlots(for:)` has other callers, and a failed pre-fetch still routes every day through it — but the test that used to prove the overshoot now asserts that the cap and the pre-fetch horizon stay tied together instead. **If `maxWalkDays` is ever raised above `freeSlotPrefetchDays`, the walk silently starts making one network call per extra day.**
 
 ---
 
@@ -577,6 +581,37 @@ ScheduleReviewViewModel.__deallocating_deinit
 History: originally a deliberate 30-day horizon; `1bd15d3` raised it to a flat `taskSafetyCapDays = 365`; `e18ef4e` (Phase 5) replaced that with stall detection (`taskStallThresholdDays = 14`); `99996ab` excluded recurring tasks from the counter and added a `maxWalkDays = 44` ceiling — see §6.4 for the arithmetic that made the exclusion necessary.
 
 The behavior change still stands and is now doubly bounded: a task whose only opening is more than 14 consecutive empty days out, **or** more than 44 days out at all, never reaches it. At-risk detection doesn't catch this — `isAtRisk` is slack/deadline-driven and says nothing about a no-due-date task sitting past the threshold — but §5.4's `.horizonReached` now does report it, which is the gap this entry originally flagged. Worth revisiting only if a "task silently never gets scheduled" report survives that surface.
+
+### Walk serialization is per-instance; cross-instance is unaddressed
+
+`ScheduleReviewViewModel.walkChain` serializes walks on **one** view model instance, which is what fixed the confirmed double-booking (`34c6309`). `NightlyReviewView` builds its own separate view model (`tomorrowViewModel`) that this chain cannot see, so two walks on different instances can still run concurrently.
+
+Left that way deliberately: all 51 runs and all 10 overlapping pairs in the captured reproduction were on a single instance, so cross-instance contention is **unproven rather than shown harmless**. Serializing across instances needs shared state — an actor or a singleton — which is a heavier change than the current evidence justifies.
+
+The overlap invariant in `insertSchedulerBlock` is the backstop, and it doesn't care which instance places the block. Its `REJECTED` line (kept as permanent logging in `DiagFileLog`) is the signal: it should never fire, and if one appears, the cross-instance path is the first thing to suspect. Revisit if that happens.
+
+### "Open Slot" block observed next to NSPB — unresolved
+
+A block labeled **Open Slot** was seen rendered beside NSPB with the same duration. Not yet diagnosed, and the distinction determines whether this is a data bug or a rendering one.
+
+**What's established:** the string comes from exactly one place — `ScheduledBlock.displayTitle` (`ScheduledBlock.swift:66`), which falls back to `"Open slot"` when **both** `task` and `habit` are nil. It is not a gap or collapse label synthesized by `DayTimelineGridView`; there is no such label in that file. So whatever rendered it was a `ScheduledBlock` instance with no task and no habit attached.
+
+**What's not established:** whether such a block was ever persisted. A pull of the live store immediately afterwards found **zero** blocks with both relationships nil, so if one existed it was transient or has since been swept.
+
+**Leading hypothesis, untested:** `removeBlock` sets `block.task = nil` and `block.habit = nil` *before* `modelContext.delete(block)` — an ordering that is itself deliberate and load-bearing (it avoids a SwiftData "relationship already has a value but it's not the target" crash, see §1.1a). If SwiftUI renders from `viewModel.blocks` in the window between the nil-ing and the delete propagating, a doomed block would display as "Open slot" for exactly that interval. That would make this a rendering artifact of a correct data operation, not an orphan. `insertSchedulerBlock`'s rejection path also nils both relationships, but never inserts the block, so it shouldn't be reachable from there.
+
+**To resolve:** catch it live and check whether the row persists across a tab switch or app relaunch. Persisting means a real orphan; vanishing points at the render-window hypothesis.
+
+### "Delete and shift everything up" can't apply universally
+
+A requested behavior — deleting a block and sliding everything after it earlier — cannot be applied to a whole day as a blanket operation, because several block types are **deliberately pinned** and moving them would break their own invariants:
+
+- **Habit blocks** are placed at their occurrence's own time mode (AM/Midday/PM/Specific). Shifting one silently changes what the habit means.
+- **Recurring-task blocks** are placed at their anchor time (`recurringOccurrenceTime`) by the fixed-time pass, not by rule packing. That anchor is the point of them.
+- **Locked blocks** are pinned by explicit user choice, which every other path already honors (`regenerateFromNow`, the trims). A shift that ignored locks would contradict the one guarantee locking makes.
+- **Approved blocks** have real Google Calendar events behind them; moving one without re-pushing puts the app and the calendar out of sync.
+
+So any such feature has to define what it does with each of those — most likely shift only unlocked, unapproved, rule-packed task blocks and treat the rest as fixed obstacles to slide *around* rather than through. Not designed yet; recorded so the constraint is known before it is.
 
 ### `dueDate` end-of-day semantics — in code, not in this doc
 
