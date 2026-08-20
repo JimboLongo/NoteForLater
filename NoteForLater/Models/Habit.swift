@@ -239,23 +239,28 @@ final class Habit {
         log(on: date, context: context, calendar: calendar)?.occurrenceStatus(index) ?? .none
     }
 
-    /// ⚠️ **Hazard — cannot see pending inserts.** Traverses the `logs`
-    /// inverse relationship, which does not reflect an inserted-but-unsaved
-    /// `HabitLog` until a save lands. Use `log(on:context:)` for anything
-    /// feeding a write decision; see that method for what goes wrong.
-    /// Retained only for callers with no `ModelContext` in reach, and those
-    /// should be treated as suspect rather than as legitimate exceptions.
-    func log(on date: Date, calendar: Calendar = .current) -> HabitLog? {
+    /// ⚠️ **Escape hatch — cannot see pending inserts.** Named to make the
+    /// hazard unmissable at every call site, because a neutrally-named
+    /// reader sitting beside a correct one is a footgun: of the five
+    /// callers this had before the funnel landed, three fed write
+    /// decisions and two were actively corrupting data. The safe caller
+    /// was the exception, not the rule.
+    ///
+    /// Traverses the `logs` inverse relationship, which does not reflect an
+    /// inserted-but-unsaved `HabitLog` until a save lands. **Never use this
+    /// for anything feeding a write decision** — use `log(on:context:)`;
+    /// see that method for what goes wrong. The only remaining caller is
+    /// `DailyDigestNotificationService`, which builds notification text
+    /// from a background plan with no `ModelContext` in reach, and which
+    /// runs at a scheduled fire time long after any save — a read that is
+    /// stale by seconds cannot affect it.
+    func logIgnoringPendingInserts(on date: Date, calendar: Calendar = .current) -> HabitLog? {
         let day = calendar.startOfDay(for: date)
         // TEMP: reverted to `.first` for the (a)-vs-(b) disambiguation run
         // — does a tap go invisible again when the read lands on an empty
         // first row? Restore `.last` (committed state, see df7d494) once
         // that question is answered.
         return (logs ?? []).first(where: { calendar.isDate($0.date, inSameDayAs: day) })
-    }
-
-    func occurrenceStatus(_ index: Int, on date: Date, calendar: Calendar = .current) -> OccurrenceStatus {
-        log(on: date, calendar: calendar)?.occurrenceStatus(index) ?? .none
     }
 
     /// The next target time still ahead of this habit, used to order the
@@ -277,7 +282,11 @@ final class Habit {
         var cursor = calendar.startOfDay(for: referenceDate)
         for _ in 0..<7 {
             if isApplicable(on: cursor, calendar: calendar) {
-                let dayLog = log(on: cursor, calendar: calendar)
+                // Escape hatch is correct here: this only orders the Today
+                // list, feeds no write decision, and is debounced 3s by
+                // `HabitStatsRefreshCoordinator` regardless — a read stale
+                // by one unsaved insert cannot affect anything.
+                let dayLog = logIgnoringPendingInserts(on: cursor, calendar: calendar)
                 for index in 0..<max(timesPerDay, 1) {
                     let status = dayLog?.occurrenceStatus(index) ?? .none
                     guard status == .none else { continue }

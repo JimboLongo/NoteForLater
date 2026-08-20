@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 
 /// Turns "here's my shelves' SchedulingRules + here's my open calendar
 /// time" into a proposed set of ScheduledBlocks for a given day. There's
@@ -56,15 +57,22 @@ protocol AISchedulingServiceProtocol: AnyObject {
         freeSlots: [TimeSlot],
         eligibleHoursWindows: [EligibleHoursWindow],
         date: Date,
-        existingBlocks: [ScheduledBlock]
+        existingBlocks: [ScheduledBlock],
+        context: ModelContext
     ) async throws -> [ScheduledBlock]
 
     /// The two categories that jump the whole queue — habits and the
     /// Recurring Tasks shelf's own tasks (see `Shelf.isRecurringTasks`) —
     /// split out of `generateProposedSchedule` so a caller can top these
     /// up on their own, without a full (rule-packing, network-fetching)
-    /// pass. Synchronous and side-effect-free — no calendar or model
-    /// access here, that's on the caller. `generateProposedSchedule`
+    /// pass. Synchronous and side-effect-free as far as *writes* go — no
+    /// calendar access and nothing persisted here, that's on the caller.
+    /// `context` is read-only, and required rather than optional: the
+    /// already-resolved check must see pending inserts (see
+    /// `Habit.log(on:context:)`), or a completed-but-unsaved occurrence
+    /// reads `.none` and gets a redundant block placed for it — which
+    /// `markUnresolvedHabitOccurrencesAsMissed` then turns into a `.missed`
+    /// write against the log. `generateProposedSchedule`
     /// itself opens with this same pass — this is only kept as its own
     /// entry point in case something ever needs just the habit/recurring
     /// half without the rest.
@@ -73,7 +81,8 @@ protocol AISchedulingServiceProtocol: AnyObject {
         habits: [Habit],
         freeSlots: [TimeSlot],
         eligibleHoursWindows: [EligibleHoursWindow],
-        date: Date
+        date: Date,
+        context: ModelContext
     ) -> (blocks: [ScheduledBlock], remainingFree: [TimeSlot])
 }
 
@@ -107,7 +116,8 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
         freeSlots: [TimeSlot],
         eligibleHoursWindows: [EligibleHoursWindow],
         date: Date,
-        existingBlocks: [ScheduledBlock]
+        existingBlocks: [ScheduledBlock],
+        context: ModelContext
     ) async throws -> [ScheduledBlock] {
         let calendar = Calendar.current
         let weekday = calendar.component(.weekday, from: date)
@@ -130,7 +140,8 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             habits: habits,
             freeSlots: freeSlots,
             eligibleHoursWindows: eligibleHoursWindows,
-            date: date
+            date: date,
+            context: context
         )
         var blocks = initialBlocks
         var remainingFree = freeAfterHabits
@@ -232,7 +243,8 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
         habits: [Habit],
         freeSlots: [TimeSlot],
         eligibleHoursWindows: [EligibleHoursWindow],
-        date: Date
+        date: Date,
+        context: ModelContext
     ) -> (blocks: [ScheduledBlock], remainingFree: [TimeSlot]) {
         let calendar = Calendar.current
         let weekday = calendar.component(.weekday, from: date)
@@ -321,7 +333,15 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
                 // out not-yet-approved future blocks): resolved is
                 // resolved, regardless of whether a block still exists for
                 // it right now.
-                guard habit.occurrenceStatus(occurrenceIndex, on: date, calendar: calendar) == .none else { continue }
+                // Context-taking read: this is not display-only. A blind
+                // read reports `.none` for a completed-but-unsaved
+                // occurrence, so a redundant block gets placed with
+                // `isCompleted == false` — and
+                // `markUnresolvedHabitOccurrencesAsMissed` decides purely
+                // from that flag, so the block then drives the log to
+                // `.missed`, destroying the completion. Verified reachable,
+                // not assumed.
+                guard habit.occurrenceStatus(occurrenceIndex, on: date, context: context, calendar: calendar) == .none else { continue }
                 // An AM/Midday/PM occurrence (see `HabitOccurrenceTimeMode`)
                 // never gets a calendar block at all — it surfaces instead
                 // as an untimed list item (see

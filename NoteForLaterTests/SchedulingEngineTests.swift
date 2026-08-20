@@ -101,7 +101,8 @@ final class SchedulingEngineTests: XCTestCase {
             freeSlots: [businessHoursSlot(on: testDay)],
             eligibleHoursWindows: [],
             date: testDay,
-            existingBlocks: []
+            existingBlocks: [],
+            context: context
         )
 
         XCTAssertTrue(blocks.isEmpty)
@@ -122,7 +123,8 @@ final class SchedulingEngineTests: XCTestCase {
             freeSlots: [businessHoursSlot(on: testDay)],
             eligibleHoursWindows: [],
             date: testDay,
-            existingBlocks: []
+            existingBlocks: [],
+            context: context
         )
 
         XCTAssertEqual(blocks.count, 1)
@@ -359,7 +361,8 @@ final class SchedulingEngineTests: XCTestCase {
             freeSlots: [businessHoursSlot(on: testDay)],
             eligibleHoursWindows: [],
             date: testDay,
-            existingBlocks: []
+            existingBlocks: [],
+            context: context
         )
 
         XCTAssertTrue(blocks.isEmpty)
@@ -396,7 +399,8 @@ final class SchedulingEngineTests: XCTestCase {
 
         let blocks = try await service.generateProposedSchedule(
             shelves: [shelf], habits: [], freeSlots: [businessHoursSlot(on: testDay)],
-            eligibleHoursWindows: [], date: testDay, existingBlocks: []
+            eligibleHoursWindows: [], date: testDay, existingBlocks: [],
+            context: context
         )
 
         XCTAssertEqual(blocks.count, 1)
@@ -421,7 +425,8 @@ final class SchedulingEngineTests: XCTestCase {
 
         let blocks = try await service.generateProposedSchedule(
             shelves: [shelf], habits: [], freeSlots: [businessHoursSlot(on: testDay)],
-            eligibleHoursWindows: [], date: testDay, existingBlocks: []
+            eligibleHoursWindows: [], date: testDay, existingBlocks: [],
+            context: context
         )
 
         XCTAssertEqual(blocks.count, 1)
@@ -448,7 +453,8 @@ final class SchedulingEngineTests: XCTestCase {
 
         let blocks = try await service.generateProposedSchedule(
             shelves: [shelf], habits: [], freeSlots: [businessHoursSlot(on: testDay)],
-            eligibleHoursWindows: [], date: testDay, existingBlocks: []
+            eligibleHoursWindows: [], date: testDay, existingBlocks: [],
+            context: context
         )
 
         XCTAssertEqual(blocks.count, 1)
@@ -488,7 +494,8 @@ final class SchedulingEngineTests: XCTestCase {
 
         let blocks = try await service.generateProposedSchedule(
             shelves: [shelf], habits: [], freeSlots: [businessHoursSlot(on: testDay)],
-            eligibleHoursWindows: [], date: testDay, existingBlocks: []
+            eligibleHoursWindows: [], date: testDay, existingBlocks: [],
+            context: context
         )
 
         XCTAssertEqual(blocks.count, 1)
@@ -517,7 +524,8 @@ final class SchedulingEngineTests: XCTestCase {
 
         let blocks = try await service.generateProposedSchedule(
             shelves: [shelf], habits: [], freeSlots: [businessHoursSlot(on: testDay)],
-            eligibleHoursWindows: [], date: testDay, existingBlocks: []
+            eligibleHoursWindows: [], date: testDay, existingBlocks: [],
+            context: context
         )
 
         XCTAssertEqual(blocks.count, 1)
@@ -1444,7 +1452,8 @@ final class SchedulingEngineTests: XCTestCase {
             freeSlots: [businessHoursSlot(on: testDay)],
             eligibleHoursWindows: [],
             date: testDay,
-            existingBlocks: []
+            existingBlocks: [],
+            context: context
         )
 
         XCTAssertEqual(blocks.count, 1)
@@ -1475,7 +1484,8 @@ final class SchedulingEngineTests: XCTestCase {
             ],
             eligibleHoursWindows: [],
             date: testDay,
-            existingBlocks: []
+            existingBlocks: [],
+            context: context
         )
 
         XCTAssertEqual(blocks.map(\.durationMinutes), [120, 120], "every segment must be a whole multiple, and the total must not exceed the task")
@@ -1499,7 +1509,8 @@ final class SchedulingEngineTests: XCTestCase {
             ],
             eligibleHoursWindows: [],
             date: testDay,
-            existingBlocks: []
+            existingBlocks: [],
+            context: context
         )
 
         XCTAssertEqual(blocks.count, 2)
@@ -1520,7 +1531,8 @@ final class SchedulingEngineTests: XCTestCase {
             freeSlots: [businessHoursSlot(on: testDay)],
             eligibleHoursWindows: [],
             date: testDay,
-            existingBlocks: []
+            existingBlocks: [],
+            context: context
         )
 
         XCTAssertEqual(blocks.count, 1)

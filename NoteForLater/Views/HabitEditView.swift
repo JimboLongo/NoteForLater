@@ -310,7 +310,8 @@ struct HabitEditView: View {
             habits: [habit],
             freeSlots: [],
             eligibleHoursWindows: [],
-            date: today
+            date: today,
+            context: modelContext
         )
         for block in newBlocks {
             modelContext.insert(block)

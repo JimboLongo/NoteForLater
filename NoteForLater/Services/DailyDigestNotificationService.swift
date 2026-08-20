@@ -197,7 +197,7 @@ final class DailyDigestNotificationService {
     private func openItems(for day: Date, habits: [Habit], blocks: [ScheduledBlock], calendar: Calendar) -> [DigestPlan.DigestItem] {
         var items: [DigestPlan.DigestItem] = []
         for habit in habits.sorted(by: { $0.sortOrder < $1.sortOrder }) where habit.isApplicable(on: day, calendar: calendar) {
-            let log = habit.log(on: day, calendar: calendar)
+            let log = habit.logIgnoringPendingInserts(on: day, calendar: calendar)
             for occurrenceIndex in 0..<max(habit.timesPerDay, 1) {
                 let status = log?.occurrenceStatus(occurrenceIndex) ?? .none
                 guard status == .none else { continue }

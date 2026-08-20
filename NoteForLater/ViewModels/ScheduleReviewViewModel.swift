@@ -269,7 +269,8 @@ final class ScheduleReviewViewModel {
                 freeSlots: freeSlots,
                 eligibleHoursWindows: eligibleHoursWindows,
                 date: targetDate,
-                existingBlocks: blocks
+                existingBlocks: blocks,
+                context: modelContext
             )
             // The scheduler itself decides per-task whether to mark it fully
             // scheduled or just trim its remaining time (divisible tasks
@@ -397,7 +398,8 @@ final class ScheduleReviewViewModel {
                 freeSlots: freeSlots,
                 eligibleHoursWindows: eligibleHoursWindows,
                 date: cursorDay,
-                existingBlocks: dayBlocks
+                existingBlocks: dayBlocks,
+                context: modelContext
             ), !newBlocks.isEmpty {
                 // Only blocks the overlap invariant actually accepted
                 // count from here on — a rejected one was never inserted,
@@ -781,7 +783,8 @@ final class ScheduleReviewViewModel {
                     freeSlots: freeSlots,
                     eligibleHoursWindows: eligibleHoursWindows,
                     date: cursorDay,
-                    existingBlocks: survivingBlocks.filter { calendar.isDate($0.date, inSameDayAs: cursorDay) }
+                    existingBlocks: survivingBlocks.filter { calendar.isDate($0.date, inSameDayAs: cursorDay) },
+                    context: modelContext
                 )
                 for block in dayBlocks where insertSchedulerBlock(block, site: "regenerateFromNow") {
                     newBlocks.append(block)
