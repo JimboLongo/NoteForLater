@@ -38,6 +38,30 @@ import SwiftData
 /// the scroll-position/viewport state each segment needs a slice of,
 /// since only one physical ScrollView exists no matter how many segments
 /// are showing.
+/// Live scroll geometry, held in a plain reference type **deliberately not
+/// `@Observable`** and read only from gesture callbacks.
+///
+/// These two values change on every scroll frame. Held as `@State` on
+/// `DayTimelineGridView` they invalidated the whole grid at display refresh
+/// rate — every habit section and both segments re-evaluated 60–120 times a
+/// second for the entire duration of a scroll, momentum included.
+///
+/// None of that work was ever used. `scrollOffsetY` is read exactly once,
+/// by `DayTimelineSegment.startAutoScroll`, which captures it into a local
+/// and then deliberately never re-reads it (see the comment there);
+/// `viewportHeight` likewise, plus `updateEmptySlot`. Both are consumed at
+/// the *start* of a drag, not continuously. So the writes drove renders
+/// that nothing consumed.
+///
+/// A plain class in `@State` keeps the same instance across body
+/// evaluations while making mutations invisible to SwiftUI — which is the
+/// entire point. **Do not make this `@Observable`**; that reinstates the
+/// bug exactly.
+final class ScrollGeometryBox {
+    var offsetY: CGFloat = 0
+    var viewportHeight: CGFloat = 0
+}
+
 struct DayTimelineGridView: View {
     let rows: [DayTimelineRow]
     let eligibleHoursWindows: [EligibleHoursWindow]
@@ -89,15 +113,11 @@ struct DayTimelineGridView: View {
     /// time up toward the top. Shared across every segment since there's
     /// only one physical ScrollView.
     @State private var scrollPosition = ScrollPosition()
-    /// The ScrollView's own viewport height, used to clamp how far a
-    /// segment's `updateEmptySlot` can scroll the pressed time toward the
-    /// top.
-    @State private var viewportHeight: CGFloat = 0
-    /// The ScrollView's current scroll offset — read continuously so a
-    /// segment's own auto-scroll-while-dragging loop (see
-    /// `DayTimelineSegment.startAutoScroll`) always knows where the
-    /// visible viewport actually sits right now, not just how tall it is.
-    @State private var scrollOffsetY: CGFloat = 0
+    /// The ScrollView's viewport height and live offset — see
+    /// `ScrollGeometryBox` for why these are behind an unobserved reference
+    /// rather than `@State` values.
+    @State private var scrollGeometry = ScrollGeometryBox()
+
     /// Measured heights of the variable-height sections stacked around
     /// the grid segment(s) — each segment needs to know how much content
     /// sits above its own ZStack to translate a grid-local touch/scroll
@@ -388,6 +408,8 @@ struct DayTimelineGridView: View {
 
     @ViewBuilder
     var body: some View {
+        // TEMP — measures the scroll-render fix. Strip with the rest.
+        let _ = DiagFileLog.write("GridBody eval")
         let occurrenceLists = computeOpenHabitOccurrenceLists()
         let hourRange = visibleHourRange
         let morningQuarterRange = morningRange(hourRange: hourRange)
@@ -423,8 +445,7 @@ struct DayTimelineGridView: View {
                         onPickReplacement: onPickReplacement,
                         precedingContentHeight: twoMinuteSectionHeight + amSectionHeight,
                         scrollPosition: $scrollPosition,
-                        viewportHeight: viewportHeight,
-                        scrollOffsetY: scrollOffsetY,
+                        scrollGeometry: scrollGeometry,
                         isInteracting: $isMorningInteracting,
                         isCollapsingEmptyPeriods: isCollapsingEmptyPeriods,
                         collapseResetToken: collapseResetToken,
@@ -459,8 +480,7 @@ struct DayTimelineGridView: View {
                         onPickReplacement: onPickReplacement,
                         precedingContentHeight: twoMinuteSectionHeight + amSectionHeight + dayHeight(for: morningQuarterRange) + middaySectionHeight,
                         scrollPosition: $scrollPosition,
-                        viewportHeight: viewportHeight,
-                        scrollOffsetY: scrollOffsetY,
+                        scrollGeometry: scrollGeometry,
                         isInteracting: $isAfternoonInteracting,
                         isCollapsingEmptyPeriods: isCollapsingEmptyPeriods,
                         collapseResetToken: collapseResetToken,
@@ -482,8 +502,7 @@ struct DayTimelineGridView: View {
                         onPickReplacement: onPickReplacement,
                         precedingContentHeight: twoMinuteSectionHeight + amSectionHeight,
                         scrollPosition: $scrollPosition,
-                        viewportHeight: viewportHeight,
-                        scrollOffsetY: scrollOffsetY,
+                        scrollGeometry: scrollGeometry,
                         isInteracting: $isSingleInteracting,
                         isCollapsingEmptyPeriods: isCollapsingEmptyPeriods,
                         collapseResetToken: collapseResetToken,
@@ -508,15 +527,28 @@ struct DayTimelineGridView: View {
             onCollapsedGapChange(newValue)
         }
         .scrollPosition($scrollPosition)
+        // TEMP elimination logging — which @State write actually drives the
+        // per-frame body invalidation during a scroll. `scrollPosition`
+        // itself is not Equatable-observable here, so it is identified by
+        // elimination: if none of the height lines fire at frame rate, it
+        // is the scroll position binding.
+        .onChange(of: twoMinuteSectionHeight) { _, _ in DiagFileLog.write("CHG twoMinuteSectionHeight") }
+        .onChange(of: amSectionHeight) { _, _ in DiagFileLog.write("CHG amSectionHeight") }
+        .onChange(of: middaySectionHeight) { _, _ in DiagFileLog.write("CHG middaySectionHeight") }
+        .onChange(of: isMorningInteracting) { _, _ in DiagFileLog.write("CHG isMorningInteracting") }
+        .onChange(of: isSingleInteracting) { _, _ in DiagFileLog.write("CHG isSingleInteracting") }
+        .onChange(of: habitOccurrenceRefreshTick) { _, _ in DiagFileLog.write("CHG habitOccurrenceRefreshTick") }
+        // Writing into `scrollGeometry` does not invalidate this view —
+        // see `ScrollGeometryBox`. These fire every scroll frame.
         .onScrollGeometryChange(for: CGFloat.self) { geometry in
             geometry.containerSize.height
         } action: { _, newValue in
-            viewportHeight = newValue
+            scrollGeometry.viewportHeight = newValue
         }
         .onScrollGeometryChange(for: CGFloat.self) { geometry in
             geometry.contentOffset.y
         } action: { _, newValue in
-            scrollOffsetY = newValue
+            scrollGeometry.offsetY = newValue
         }
         .onAppear {
             scrollToRoughlyNow()
@@ -749,10 +781,9 @@ private struct DayTimelineSegment: View {
     /// `twoMinuteSectionHeight` originally existed for.
     let precedingContentHeight: CGFloat
     @Binding var scrollPosition: ScrollPosition
-    let viewportHeight: CGFloat
+    let scrollGeometry: ScrollGeometryBox
     /// The shared ScrollView's current scroll offset — see
     /// `startAutoScroll`.
-    let scrollOffsetY: CGFloat
     /// Set true while this segment has its own drag or empty-slot hold in
     /// progress — the parent disables the single shared ScrollView based
     /// on this (see `DayTimelineGridView.body`).
@@ -1248,6 +1279,7 @@ private struct DayTimelineSegment: View {
         // but `scrollPosition.scrollTo` works in the shared ScrollView's
         // own content space, which starts `precedingContentHeight` earlier
         // — see that property's doc comment.
+        let viewportHeight = scrollGeometry.viewportHeight
         let maxOffset = max(0, precedingContentHeight + dayHeight - viewportHeight)
         let target = min(max(0, precedingContentHeight + y - viewportHeight / 4), maxOffset)
         if animated {
@@ -1622,16 +1654,16 @@ private struct DayTimelineSegment: View {
         // ever re-creates the `Task` on a later re-render the way a
         // gesture's own synchronous callbacks get rebound each time.
         // `currentOffset` tracks our own progress locally rather than
-        // re-reading `scrollOffsetY` for the same reason — this loop is
+        // re-reading `scrollGeometry.offsetY` for the same reason — this loop is
         // the only thing moving the scroll position during a drag (the
         // ScrollView itself is `.scrollDisabled`), so it's the only
         // source of truth that actually needs to stay live.
         let edgeZone: CGFloat = 70
         let maxSpeed: CGFloat = 14
         let preceding = precedingContentHeight
-        let viewport = viewportHeight
-        let maxOffset = max(0, precedingContentHeight + dayHeight - viewportHeight)
-        var currentOffset = scrollOffsetY
+        let viewport = scrollGeometry.viewportHeight
+        let maxOffset = max(0, precedingContentHeight + dayHeight - scrollGeometry.viewportHeight)
+        var currentOffset = scrollGeometry.offsetY
         autoScrollTask = Task { @MainActor in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 16_000_000)

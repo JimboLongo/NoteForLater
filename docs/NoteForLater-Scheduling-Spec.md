@@ -535,6 +535,20 @@ Not urgent — no user-facing impact, tests currently pass. But the cost is paid
 
 Pure maintenance, no dependency on the others, do it whenever. `DayTimelineGridView.swift` is 2,309 lines and `NightlyReviewView.swift` is 2,179. Both have accreted several independent responsibilities — `NightlyReviewView.swift` alone holds the six-step flow, `TaskReviewCard` (the shared commit point behind every Save/Move/Skip in the app, §6.1), and the At-Risk step added in Phase 6.
 
+**Three independent investigations converged here, none of them looking for
+it.** That is the argument for this split — stronger than the line count:
+
+| Investigation | What it found | Measured |
+|---|---|---|
+| Habit-tap render cost | One toggle re-runs the entire grid body | 2 passes/tap, 10–70ms → ~10ms after memoizing |
+| Parent `@Query` re-run | Mutating a `HabitLog` invalidates `@Query allHabits`, re-running `ScheduleReviewView` and rebuilding `timelineRows` | fired on 18/18 test taps |
+| Drag auto-scroll | `scrollTo` every 16ms invalidates the whole grid at 60Hz | 243 body evals in ~10s |
+
+Each was chased separately, and each ended at the same place:
+**`DayTimelineGridView` is too large a unit of invalidation.** Making the
+body cheaper (commit `2318fb0`) helped all three and fixed none of them —
+the scope never changed, only the cost per pass.
+
 **Scope note — narrowing habit-toggle invalidation belongs here, and it is two changes, not one.** A habit toggle currently re-renders the *entire* `DayTimelineGridView` body. Memoizing the occurrence lists and `visibleHourRange` (commit `2318fb0`) made each pass 3–5× cheaper but did **not** reduce the scope: it is still 2 full passes per tap. Actually narrowing it needs both halves below, and neither is a mechanical refactor — which is why it was deferred here rather than bolted onto the performance work that found it.
 
 - **Half A — extract the habit sections into their own view.** Not free isolation: each section feeds `amSectionHeight` / `middaySectionHeight` back up via `onGeometryChange`, and those values are load-bearing for `DayTimelineSegment.precedingContentHeight` (translating a grid-local touch into the shared ScrollView's content space). So the extracted view must keep reporting geometry upward, and the parent still re-renders when a section's *height* changes — just not when only its contents do. Real, but partial.
@@ -623,6 +637,42 @@ So any such feature has to define what it does with each of those — most likel
 ### `dueDate` end-of-day semantics — in code, not in this doc
 
 `c162acb` changed `slack`/`isAtRisk`/`atRiskBlocker` to measure against `endOfDueDate(calendar:)` (midnight ending `dueDate`'s calendar day) rather than the raw `dueDate` instant, and made `isAtRisk` return `false` outright when `dueDatePicked == false`. §5 doesn't describe either of these; both are load-bearing (the raw-instant version had a due-today-at-9am-reads-as-past-due-at-9:01 bug) and should be written into §5 before anyone edits that code without the conversation history.
+
+### ⚠️ Read this first: the habit entries below started as a performance report
+
+Everything in this group came from one symptom: **"rapid-tapping habit rows
+on the Calendar feels slow — most taps don't register."** A screen recording
+showed one completion landing in 8.5 seconds.
+
+It resolved into **four distinct bugs, three of them silent data corruption
+in a different subsystem than the reported symptom**, plus a genuine
+performance problem that was real but was *not* the cause:
+
+| # | Bug | Kind |
+|---|---|---|
+| 1 | Pending `HabitLog` inserts invisible through `habit.logs` → same-day duplicates | data corruption |
+| 2 | Reads feeding write decisions used the same blind lookup → wrong toggle direction, un-toggling impossible on a fresh day | data corruption |
+| 3 | The nightly sweep decided from `block.isCompleted` and never read the log → completions overwritten with `.missed`, unrecoverably | data corruption |
+| 4 | `openHabitOccurrences` and `visibleHourRange` recomputed 4× and 6× per body pass | performance |
+
+**Only #4 is a performance bug, and fixing it did not fix the reported
+symptom.** The taps were not being dropped — they were landing in
+`HabitLog` rows that nothing read back, so the checkmark never appeared.
+The user experienced data corruption and reported it as lag, which is
+exactly what it looks like from outside.
+
+**Someone reading only the performance entry would miss all three
+corruption bugs; someone reading only the corruption entries would not know
+why anyone was looking.** That is the reason this note exists. The measured
+3–5× render improvement is real and worth keeping, but it is the least
+important thing that came out of this investigation.
+
+Two further things were *also* real but *also* not the cause, and are
+recorded so they are not re-litigated: an apparent "idle re-render loop"
+(actually scroll- and drag-driven, and predating the fixes), and
+`AISchedulingService`/`setDay` block-flag paths that were genuinely broken
+but inert for this data set because no habit had a Specific-Time
+occurrence.
 
 ### Pending `HabitLog` inserts are invisible through `habit.logs` — root cause of same-day duplicates
 
@@ -764,6 +814,99 @@ this routine.
 (`targetTime < cutoff`), against standin times AM=7am, Midday=noon, PM=9pm.
 A review run in the morning sees only AM occurrences, so a small
 `untimedOccurrences` may reflect the hour rather than the data.
+
+### Scroll re-render: measured, acceptable, documented
+
+**Not "the fix worked" — there is no scroll-only pre-fix baseline, and that
+caveat is the load-bearing part.**
+
+An apparent "idle re-render loop" (~24 body evaluations per second) was
+reported early, then corrected twice. What the measurements actually show:
+
+| Interaction | Body evaluations |
+|---|---|
+| Ordinary scrolling, ~10s vigorous | **15** |
+| Scrolling **+ drag auto-scroll**, ~10s | **243**, steady 17ms cadence |
+
+The 60Hz cost is **`DayTimelineSegment.startAutoScroll`**, which calls
+`scrollPosition.scrollTo(y:)` every 16ms in a loop while a drag is held
+near a screen edge. That is a `@State` write per frame **by design** —
+programmatic scrolling *is* the mechanism, so it cannot be removed without
+removing the feature.
+
+Elimination logging confirmed nothing else fires at frame rate: section
+heights changed twice each at startup and never again.
+
+**Accepted as-is.** The cost is bounded, user-initiated, lasts only while a
+finger is held near an edge mid-drag, and each pass is now 3–5× cheaper.
+The structural answer is §10 #5, not shaving individual writers.
+
+`ScrollGeometryBox` was kept regardless — `scrollOffsetY`/`viewportHeight`
+genuinely were written every frame and genuinely are read only at drag
+start, so removing those two writes is correct on its own terms even though
+it produced no measurable improvement. **It was applied on inference, not
+measurement, and did not do what was claimed for it.**
+
+### Part C: the write funnel verified on all three screens
+
+| Screen | Rapid taps | `CREATE` lines |
+|---|---|---|
+| `DayTimelineGridView.toggleHabitOccurrence` | 12 | 2 (one per habit-day) |
+| `HabitsView.toggleOccurrence` | 6 + 6 | 1 + 1 |
+| `HabitDetailView.setDay` | 4 | 1 |
+
+Each on a habit-day with **no existing log**, so the lookup genuinely had to
+miss. Pre-funnel, those taps would have produced one log each.
+
+**Both non-Calendar creation paths are rare in normal use**, which is why
+this took several attempts to test at all:
+
+- **`HabitsView`** writes against today only (`_todayLogs` is a
+  `#Predicate` on `.now`; there is no date navigation). Creation is
+  reachable only for a habit **untouched today** or **freshly created**.
+- **`HabitDetailView`** gates on
+  `isApplicable && !isFuture && !isBeforeStart`, so creation needs an
+  **applicable past day with no log**. A real 12-habit store had **none in
+  the previous 60 days** — every applicable past day already had one.
+
+Both were ultimately exercised with a purpose-made, backdated habit.
+
+### Named rule: tests whose failure mode is silence
+
+**Every test must state in advance what a vacuous result looks like, and
+how it is distinguished from a pass.** A test that cannot fail is not
+evidence, and in this investigation four separate ones couldn't:
+
+| # | Test | Why it was vacuous | Caught |
+|---|---|---|---|
+| 1 | Flag/log drift census | Returned `0`; had scanned **zero** habit blocks, because no habit had a Specific-Time occurrence | before acting |
+| 2 | "No `CREATE` from `NightlyReviewView`" | No Nightly Review had ever run under instrumentation, so the line could never have appeared | **after** being used as evidence |
+| 3 | First sweep-guard test | Every habit was already complete, so the loop iterated zero times and the miss count didn't move | before banking it |
+| 4 | Detail-calendar creation test on 2026-08-30 | A **future** date is structurally untappable (`canTap = isApplicable && !isFuture && !isBeforeStart`), so four taps did nothing | **after** the run |
+
+The common shape: **a passing result and a not-run result produce identical
+output.** In #1 and #3 that output was a number that didn't change; in #2 an
+absent log line; in #4 no state change at all.
+
+⚠️ **#2 and #4 were caught only after the fact, and both were designed
+that way by the person running the investigation** — the failure is not
+bad luck, it is a habit of writing success conditions as *absence*.
+
+**The template that works** (from `markUnresolvedHabitOccurrencesAsMissed`):
+
+- Emit an **unconditional entry line with the population size** —
+  `SWEEP ENTER … untimedOccurrences=M`. `M=0` makes vacuity visible *in the
+  output itself*, rather than requiring someone to notice it.
+- Require **positive evidence**, stated up front: *"zero `PROTECTED` lines
+  is a failed test regardless of what else the log says."* A guard that
+  declines to act must be observed declining, not inferred from nothing
+  having happened.
+- Report **rows examined alongside rows matched**. Every count in this
+  document has a denominator (see the absence-of-evidence rule below).
+
+Applied properly, the eventual sweep test produced two `MARK` lines, one
+`PROTECTED` line, and a miss census that rose by exactly two — a result
+that *could* have come out wrong, and therefore means something.
 
 ### Investigation rule: absence of evidence requires the test to have run
 

@@ -64,25 +64,33 @@ struct NoteForLaterApp: App {
     /// the instrumentation.
     private static func purgeSyntheticTestHabitLogs(container: ModelContainer) {
         let calendar = Calendar.current
-        var components = DateComponents()
-        components.year = 2026
-        components.month = 8
-        components.day = 27
-        guard let start = calendar.date(from: components).map({ calendar.startOfDay(for: $0) }),
-              let end = calendar.date(byAdding: .day, value: 1, to: start) else { return }
         let context = ModelContext(container)
-        let descriptor = FetchDescriptor<HabitLog>(predicate: #Predicate { $0.date >= start && $0.date < end })
-        guard let doomed = try? context.fetch(descriptor), !doomed.isEmpty else {
-            DiagFileLog.write("PURGE 2026-08-27: nothing to delete")
-            return
+        // Every date tapped into existence purely to exercise a code path.
+        // 08-27: the Experiment 3 creation bursts. 08-30: the Part C
+        // detail-calendar creation test. Each is scoped to exactly one day
+        // so no organic data is reachable, and the whole thing is
+        // idempotent — it reports "nothing to delete" once clean.
+        for day in [(2026, 8, 27), (2026, 8, 30)] {
+            var components = DateComponents()
+            components.year = day.0
+            components.month = day.1
+            components.day = day.2
+            guard let start = calendar.date(from: components).map({ calendar.startOfDay(for: $0) }),
+                  let end = calendar.date(byAdding: .day, value: 1, to: start) else { continue }
+            let label = ISO8601DateFormatter().string(from: start).prefix(10)
+            let descriptor = FetchDescriptor<HabitLog>(predicate: #Predicate { $0.date >= start && $0.date < end })
+            guard let doomed = try? context.fetch(descriptor), !doomed.isEmpty else {
+                DiagFileLog.write("PURGE \(label): nothing to delete")
+                continue
+            }
+            let summary = Dictionary(grouping: doomed) { $0.habit?.name ?? "<orphan>" }
+                .sorted { $0.key < $1.key }
+                .map { "\($0.key)×\($0.value.count)" }
+                .joined(separator: " ")
+            for log in doomed { context.delete(log) }
+            try? context.save()
+            DiagFileLog.write("PURGE \(label): deleted \(doomed.count) logs [\(summary)]")
         }
-        let summary = Dictionary(grouping: doomed) { $0.habit?.name ?? "<orphan>" }
-            .sorted { $0.key < $1.key }
-            .map { "\($0.key)×\($0.value.count)" }
-            .joined(separator: " ")
-        for log in doomed { context.delete(log) }
-        try? context.save()
-        DiagFileLog.write("PURGE 2026-08-27: deleted \(doomed.count) logs [\(summary)]")
     }
 
     /// One-time launch repair for `HabitLog` damage predating the
@@ -332,6 +340,40 @@ struct NoteForLaterApp: App {
         }
         DiagFileLog.write("INVARIANT TOTAL violatingHabits=\(violatingHabits) violatingLogs=\(violatingLogs)")
         previewHabitLogRepair(habits: habits, calendar: calendar)
+
+        // TEMP Part C readiness check. Both halves of that test go vacuous
+        // if a log already exists for the target habit+day — it becomes the
+        // `found` path instead of the creation path. Reports the exact
+        // preconditions rather than assuming them.
+        let todayStart = calendar.startOfDay(for: .now)
+        var partCComponents = DateComponents()
+        partCComponents.year = 2026
+        partCComponents.month = 8
+        partCComponents.day = 30
+        let targetDay = calendar.date(from: partCComponents).map { calendar.startOfDay(for: $0) }
+        for habit in habits.sorted(by: { $0.sortOrder < $1.sortOrder }) {
+            let todayLogs = Habit.sameDayLogs(habitID: habit.id, day: todayStart, context: context, calendar: calendar)
+            let futureLogs = targetDay.map { Habit.sameDayLogs(habitID: habit.id, day: $0, context: context, calendar: calendar) } ?? []
+            let todayState = todayLogs.isEmpty
+                ? "NO LOG (creation path reachable)"
+                : "log exists status=\((0..<max(habit.timesPerDay, 1)).map { "\(todayLogs[0].occurrenceStatus($0))" }.joined(separator: ","))"
+            // A tappable target for the HabitDetailView half: that screen
+            // gates on `isApplicable && !isFuture && !isBeforeStart`, so a
+            // future date is inert — the first attempt at this test tapped
+            // 2026-08-30 and nothing happened at all. Find the most recent
+            // PAST applicable day with no log, which is what actually
+            // exercises the creation path there.
+            var tappableTarget = "none found in last 60d"
+            for back in 1...60 {
+                guard let candidate = calendar.date(byAdding: .day, value: -back, to: todayStart) else { continue }
+                guard candidate >= calendar.startOfDay(for: habit.startDate) else { break }
+                guard habit.isApplicable(on: candidate, calendar: calendar) else { continue }
+                guard Habit.sameDayLogs(habitID: habit.id, day: candidate, context: context, calendar: calendar).isEmpty else { continue }
+                tappableTarget = String(ISO8601DateFormatter().string(from: candidate).prefix(10))
+                break
+            }
+            DiagFileLog.write("  PARTC habit=\(habit.name) today=\(todayState) 2026-08-30=\(futureLogs.isEmpty ? "clean" : "\(futureLogs.count) LOG(S) PRESENT") tappablePastDayWithNoLog=\(tappableTarget)")
+        }
 
         // Ceiling census for sweep damage. `markUnresolvedHabitOccurrences
         // AsMissed` overwrites in place, so an overwritten completion is
