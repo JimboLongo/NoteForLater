@@ -487,6 +487,25 @@ struct NightlyReviewView: View {
     /// call site in `advance()` for why this only happens here rather
     /// than in the shared block-clearing helpers.
     private func markUnresolvedHabitOccurrencesAsMissed() {
+        // PERMANENT, deliberately — kept when the rest of the
+        // duplicate-investigation instrumentation is stripped, for the same
+        // reason `DiagFileLog`'s overlap-rejection line is kept.
+        //
+        // This routine overwrites real user data once a night and leaves no
+        // other trace. Without these two counts, "the sweep protected every
+        // completion" and "the sweep never ran at all" produce **identical**
+        // output — an unchanged miss count — and the first attempt to verify
+        // the guard was unfalsifiable for exactly that reason. Every claim
+        // ever made about this function before this line existed rested on
+        // absence of evidence from a test that had never run.
+        //
+        // `untimedOccurrences=0` means the run was vacuous and any pass
+        // drawn from it is worthless. That is the whole value of the line.
+        let sweepBlocks = reviewableBlocks.filter { $0.habit != nil }
+        let sweepOccurrences = openHabitOccurrencesForReview
+        DiagFileLog.write("SWEEP ENTER reviewDate=\(ISO8601DateFormatter().string(from: reviewDate).prefix(10)) cutoff=\(ISO8601DateFormatter().string(from: reviewCutoff).prefix(19)) habitBlocks=\(sweepBlocks.count) untimedOccurrences=\(sweepOccurrences.count)")
+        // TEMP — per-occurrence decisions. Strip with the rest.
+        defer { DiagFileLog.write("SWEEP EXIT") }
         for block in reviewableBlocks {
             guard let habit = block.habit else { continue }
             // The LOG is authoritative; `block.isCompleted` is a mirror
@@ -509,11 +528,25 @@ struct NightlyReviewView: View {
             // sees a pending unsaved completion. Reading it any other way
             // would reintroduce the same blindness one layer up.
             let log = habitLog(for: habit, on: block.date)
-            guard log.occurrenceStatus(block.habitOccurrenceIndex) == .none else { continue }
+            let status = log.occurrenceStatus(block.habitOccurrenceIndex)
+            let dayLabel = ISO8601DateFormatter().string(from: block.date).prefix(10)
+            guard status == .none else {
+                DiagFileLog.write("  SWEEP SKIP block habit=\(habit.name) \(dayLabel) occ=\(block.habitOccurrenceIndex) log=\(status) flag=\(block.isCompleted) -> PROTECTED")
+                continue
+            }
+            DiagFileLog.write("  SWEEP MARK block habit=\(habit.name) \(dayLabel) occ=\(block.habitOccurrenceIndex) log=none flag=\(block.isCompleted) -> missed")
             log.setOccurrence(block.habitOccurrenceIndex, to: .missed)
         }
-        for occurrence in openHabitOccurrencesForReview where !occurrence.isCompleted {
-            habitLog(for: occurrence.habit, on: occurrence.targetTime).setOccurrence(occurrence.index, to: .missed)
+        for occurrence in sweepOccurrences {
+            let log = habitLog(for: occurrence.habit, on: occurrence.targetTime)
+            let status = log.occurrenceStatus(occurrence.index)
+            let dayLabel = ISO8601DateFormatter().string(from: occurrence.targetTime).prefix(10)
+            guard !occurrence.isCompleted, status == .none else {
+                DiagFileLog.write("  SWEEP SKIP untimed habit=\(occurrence.habit.name) \(dayLabel) occ=\(occurrence.index) log=\(status) isCompleted=\(occurrence.isCompleted) -> PROTECTED")
+                continue
+            }
+            DiagFileLog.write("  SWEEP MARK untimed habit=\(occurrence.habit.name) \(dayLabel) occ=\(occurrence.index) log=none -> missed")
+            log.setOccurrence(occurrence.index, to: .missed)
         }
         HabitStatsRefreshCoordinator.shared.habitLogsChanged()
     }

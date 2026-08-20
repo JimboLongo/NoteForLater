@@ -732,6 +732,39 @@ relationship-based reader beside a correct alternative is the same footgun
 shape as the six construction sites, and nothing stops a sixth caller
 picking the wrong one.
 
+### `SWEEP ENTER` is permanent instrumentation — do not strip it
+
+`markUnresolvedHabitOccurrencesAsMissed` overwrites real user data once a
+night and otherwise leaves no trace. The one line it now always emits —
+
+```
+SWEEP ENTER reviewDate=… cutoff=… habitBlocks=N untimedOccurrences=M
+```
+
+— is kept permanently, on the same reasoning as `DiagFileLog`'s
+overlap-rejection line: a routine that can silently destroy history should
+say that it ran.
+
+**Why the counts and not just the entry.** Before this existed, "the sweep
+protected every completion" and "the sweep never ran" produced *identical*
+output: an unchanged miss count. The first attempt to verify the guard was
+therefore unfalsifiable, and passed vacuously — every occurrence happened
+to be complete, so the loop iterated zero times and the number that was
+supposed to prove correctness simply didn't move. `untimedOccurrences=0`
+now makes a vacuous run visibly vacuous.
+
+The per-occurrence `SWEEP MARK` / `SWEEP SKIP … PROTECTED` lines are
+temporary and strip with the rest of the investigation instrumentation.
+They are what demonstrated the guard actively declining to overwrite a
+just-written completion, and are worth re-adding for any future change to
+this routine.
+
+**Also worth knowing when reading a sweep log:**
+`openHabitOccurrencesForReview` only considers occurrences already *due*
+(`targetTime < cutoff`), against standin times AM=7am, Midday=noon, PM=9pm.
+A review run in the morning sees only AM occurrences, so a small
+`untimedOccurrences` may reflect the hour rather than the data.
+
 ### Investigation rule: absence of evidence requires the test to have run
 
 **No absence-of-evidence claim counts unless the test that would have
