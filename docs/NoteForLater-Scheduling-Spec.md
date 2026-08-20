@@ -732,6 +732,45 @@ relationship-based reader beside a correct alternative is the same footgun
 shape as the six construction sites, and nothing stops a sixth caller
 picking the wrong one.
 
+### Investigation rule: absence of evidence requires the test to have run
+
+**No absence-of-evidence claim counts unless the test that would have
+produced the evidence actually ran.** This was violated twice in one
+investigation, both times producing a confident and wrong conclusion:
+
+- A flag/log drift census returned `0` and looked like a clean bill. It had
+  scanned habit blocks; there were none, because no habit had a
+  Specific-Time occurrence. **Zero numerator, zero denominator.**
+- "The nightly path never created those rows — no `CREATE` was ever logged
+  from `NightlyReviewView`" was used to rule out a mechanism. No Nightly
+  Review had ever been run under instrumentation, so that log line could
+  never have appeared regardless.
+
+Both were technically true statements that implied the opposite of the
+truth. The generalization: **every audit number in this document has a
+denominator.** A count of zero is meaningless without the population it was
+drawn from, and any instrumented "we never saw X" is worthless unless the
+code path that emits X was actually exercised. Report rows examined
+alongside rows matched, and state explicitly when a negative result rests
+on a test that was never run.
+
+### The store moves between measuring and applying
+
+Two paths mutate habit-log data without any explicit user intent to edit
+it: `HabitDetailView.deduplicateLogs` fires on **every** habit detail
+screen appearance, and `HabitDetailView.setDay` rewrites a whole day's log
+whenever a day cell is tapped.
+
+During this investigation the store moved twice between measurement and
+action — a 12-day duplicate set became 2 days, and four habits' missed
+days resolved — both benign, both invisible until re-measured.
+
+**Therefore: any repair must re-derive its input immediately before
+writing, in the same pass, and never act on a previously computed table.**
+The repair migration runs from `init`, before any view exists, so nothing
+can open a detail screen between its derive and its write. A preview
+produced minutes earlier is already untrustworthy.
+
 ### The nightly sweep overwrote completions — and what is unrecoverable
 
 `markUnresolvedHabitOccurrencesAsMissed()` runs on every Nightly Review and

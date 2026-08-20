@@ -49,19 +49,11 @@ struct NoteForLaterApp: App {
         DiagFileLog.markLaunch()
         Self.purgeSyntheticTestHabitLogs(container: sharedModelContainer)
         Self.auditDuplicateHabitLogs(container: sharedModelContainer)
+        Self.repairDuplicateHabitLogsIfNeeded(container: sharedModelContainer)
         Self.backfillRemainingMinutesIfNeeded(container: sharedModelContainer)
         Self.repairDrainedRemainingMinutesIfNeeded(container: sharedModelContainer)
     }
 
-    /// One-time launch migration: `TaskItem.remainingMinutes` is new — a
-    /// task that existed before this shipped gets the field's own default
-    /// (`0`) on schema migration, not a value derived from its existing
-    /// `estimatedMinutes`. Left alone, every pre-existing task would read
-    /// as fully consumed ("0 of Y scheduled") the moment this update
-    /// lands, even one that was never touched by the scheduler at all.
-    /// Backfills every task to `remainingMinutes = estimatedMinutes`
-    /// exactly once; a task created after this migration already gets
-    /// that from `TaskItem.init` itself.
     /// TEMP cleanup — deletes the `HabitLog`s created on 2026-08-27 by the
     /// Experiment 3 burst. That day is synthetic: it was tapped into
     /// existence purely to exercise the creation path on a date with no
@@ -91,6 +83,163 @@ struct NoteForLaterApp: App {
         for log in doomed { context.delete(log) }
         try? context.save()
         DiagFileLog.write("PURGE 2026-08-27: deleted \(doomed.count) logs [\(summary)]")
+    }
+
+    /// One-time launch repair for `HabitLog` damage predating the
+    /// fetch-based write funnel (`Habit.logOrCreate`). Two distinct
+    /// repairs, both via `HabitLogMerge` so this and
+    /// `HabitDetailView.deduplicateLogs` can never diverge:
+    ///
+    /// 1. **Collapse same-day duplicates** into one row under rule 1
+    ///    (`complete > excused > missed > none`, mutually exclusive).
+    ///    Where a sibling row kept a completion the nightly sweep had
+    ///    overwritten with `.missed`, this restores it.
+    /// 2. **Normalise single logs whose arrays overlap** — an index in two
+    ///    arrays at once, left behind by the old union-based dedup. No
+    ///    visible change (`occurrenceStatus` reports the first match either
+    ///    way), but streak and rolling-30 math read those arrays directly
+    ///    and double-count until it is fixed.
+    ///
+    /// **Derives its input fresh, immediately before writing.** Never from
+    /// any earlier count: `deduplicateLogs` mutates this data whenever a
+    /// habit's detail screen opens, and `HabitDetailView.setDay` rewrites a
+    /// whole day whenever a day cell is tapped. During this investigation
+    /// the store moved twice between measuring and applying — a 12-day
+    /// duplicate set became 2 days, and four habits' misses resolved — both
+    /// times benignly, both times invisibly. Re-deriving is the only thing
+    /// that makes that safe.
+    ///
+    /// Runs from `init`, before any view exists, so nothing can open a
+    /// detail screen and move the store between the derive and the write.
+    ///
+    /// Once `deduplicateLogs` stops unioning (it has), no new overlaps can
+    /// appear, so repair 2 is genuinely one-shot. Repair 1 likewise, now
+    /// that the write funnel prevents new duplicates.
+    private static func repairDuplicateHabitLogsIfNeeded(container: ModelContainer) {
+        let flagKey = "didRepairDuplicateHabitLogs.v1"
+        guard !UserDefaults.standard.bool(forKey: flagKey) else { return }
+
+        let context = ModelContext(container)
+        guard let habits = try? context.fetch(FetchDescriptor<Habit>()) else { return }
+        let calendar = Calendar.current
+        var collapsedDays = 0
+        var deletedLogs = 0
+        var normalisedLogs = 0
+
+        for habit in habits {
+            let byDay = Dictionary(grouping: habit.logs ?? []) { calendar.startOfDay(for: $0.date) }
+            for (day, logs) in byDay {
+                let dayLabel = ISO8601DateFormatter().string(from: day).prefix(10)
+                let hadOverlap = logs.contains { log in
+                    let c = Set(log.completedOccurrences)
+                    let m = Set(log.missedOccurrences)
+                    let e = Set(log.excusedOccurrences)
+                    return !c.intersection(m).union(c.intersection(e)).union(m.intersection(e)).isEmpty
+                }
+                // `collapse` rewrites the survivor's three arrays as
+                // mutually exclusive even when there is only one row, which
+                // is exactly what repair 2 needs — so both repairs are the
+                // same call.
+                guard logs.count > 1 || hadOverlap else { continue }
+                HabitLogMerge.collapse(logs, context: context)
+                if logs.count > 1 {
+                    collapsedDays += 1
+                    deletedLogs += logs.count - 1
+                }
+                if hadOverlap { normalisedLogs += 1 }
+                DiagFileLog.write("REPAIR \(habit.name) \(dayLabel) rows=\(logs.count) overlap=\(hadOverlap)")
+            }
+        }
+
+        do {
+            try context.save()
+            UserDefaults.standard.set(true, forKey: flagKey)
+            DiagFileLog.write("REPAIR DONE collapsedDays=\(collapsedDays) deletedLogs=\(deletedLogs) normalisedLogs=\(normalisedLogs)")
+        } catch {
+            // Flag stays unset so this retries next launch rather than
+            // leaving duplicates and overlapping arrays in place.
+            DiagFileLog.write("REPAIR FAILED \(error) — will retry next launch")
+        }
+    }
+
+    /// TEMP dry run for the repair migration — computes exactly what
+    /// `HabitLogMerge` would write, and writes nothing.
+    ///
+    /// Derived fresh at run time from the live store, never from earlier
+    /// counts: `HabitDetailView.deduplicateLogs` mutates this data whenever
+    /// a habit's detail screen opens, so any figure computed in a previous
+    /// session is already stale. The real migration must re-derive the same
+    /// way immediately before applying.
+    ///
+    /// Every changed occurrence is labelled:
+    ///
+    /// - **RESTORE** — currently reads `.missed`, merges to `.complete`.
+    ///   A sibling row kept a completion that the nightly sweep had
+    ///   overwritten. These are recoveries of real user actions.
+    /// - **FLIP** — any other change. Reviewed individually.
+    ///
+    /// The label is computed from present state only (current displayed
+    /// value vs merged value) and does not depend on knowing which row is
+    /// older — which is unknowable, since `lastModified` is `.distantPast`
+    /// on every pre-existing row.
+    private static func previewHabitLogRepair(habits: [Habit], calendar: Calendar) {
+        var restoreCount = 0
+        var flipCount = 0
+        var daysTouched = 0
+        var logsDeleted = 0
+        var onDiskOnlyCount = 0
+
+        for habit in habits.sorted(by: { $0.sortOrder < $1.sortOrder }) {
+            let byDay = Dictionary(grouping: habit.logs ?? []) { calendar.startOfDay(for: $0.date) }
+            for (day, logs) in byDay.sorted(by: { $0.key < $1.key }) {
+                // What a read returns today: the same row `log(on:context:)`
+                // would pick, so the "before" column matches what the user
+                // actually sees right now.
+                guard let current = logs.max(by: { $0.lastModified < $1.lastModified }) else { continue }
+                let indices = Set(logs.flatMap { $0.completedOccurrences + $0.missedOccurrences + $0.excusedOccurrences })
+                guard !indices.isEmpty else { continue }
+
+                var lines: [String] = []
+                for index in indices.sorted() {
+                    let before = current.occurrenceStatus(index)
+                    let after = HabitLogMerge.resolvedStatus(for: index, across: logs)
+                    guard before != after else { continue }
+                    let isRestore = (before == .missed && after == .complete)
+                    if isRestore { restoreCount += 1 } else { flipCount += 1 }
+                    lines.append("occ\(index) \(before)->\(after) \(isRestore ? "RESTORE" : "FLIP")")
+                }
+                // On-disk-only rewrites: a log already corrupted by the
+                // old union holds an index in two arrays at once.
+                // `occurrenceStatus` reports only the first match, so the
+                // displayed value is unchanged by normalising it — but the
+                // row IS rewritten, and any code reading
+                // `missedOccurrences`/`excusedOccurrences` directly (streak,
+                // rolling-30) stops double-counting. Reported here so the
+                // preview is self-contained rather than needing a caveat
+                // alongside it.
+                for log in logs {
+                    let c = Set(log.completedOccurrences)
+                    let m = Set(log.missedOccurrences)
+                    let e = Set(log.excusedOccurrences)
+                    let overlap = c.intersection(m).union(c.intersection(e)).union(m.intersection(e))
+                    guard !overlap.isEmpty else { continue }
+                    for index in overlap.sorted() {
+                        let kept = HabitLogMerge.resolvedStatus(for: index, across: logs)
+                        lines.append("occ\(index) arrays overlap \(overlap.sorted()) -> keeps \(kept) only, ON-DISK-ONLY (no visible change)")
+                        onDiskOnlyCount += 1
+                    }
+                }
+
+                let extras = logs.count - 1
+                guard !lines.isEmpty || extras > 0 else { continue }
+                daysTouched += 1
+                logsDeleted += extras
+                let dayLabel = ISO8601DateFormatter().string(from: day).prefix(10)
+                let changeText = lines.isEmpty ? "no occurrence change" : lines.joined(separator: ", ")
+                DiagFileLog.write("  PREVIEW \(habit.name) \(dayLabel) rows=\(logs.count) deletes=\(extras) :: \(changeText)")
+            }
+        }
+        DiagFileLog.write("PREVIEW TOTAL daysTouched=\(daysTouched) logsDeleted=\(logsDeleted) restorations=\(restoreCount) flips=\(flipCount) onDiskOnly=\(onDiskOnlyCount)")
     }
 
     /// TEMP audit — habit-tap investigation. Counts habits carrying more
@@ -182,6 +331,7 @@ struct NoteForLaterApp: App {
             if habitHasViolation { violatingHabits += 1 }
         }
         DiagFileLog.write("INVARIANT TOTAL violatingHabits=\(violatingHabits) violatingLogs=\(violatingLogs)")
+        previewHabitLogRepair(habits: habits, calendar: calendar)
 
         // Ceiling census for sweep damage. `markUnresolvedHabitOccurrences
         // AsMissed` overwrites in place, so an overwritten completion is
@@ -246,6 +396,15 @@ struct NoteForLaterApp: App {
         DiagFileLog.write("DRIFT TOTAL flagAheadWillFlipToMissed=\(flagAhead) logAheadWasBeingOverwritten=\(logAhead)")
     }
 
+    /// One-time launch migration: `TaskItem.remainingMinutes` is new — a
+    /// task that existed before this shipped gets the field's own default
+    /// (`0`) on schema migration, not a value derived from its existing
+    /// `estimatedMinutes`. Left alone, every pre-existing task would read
+    /// as fully consumed ("0 of Y scheduled") the moment this update
+    /// lands, even one that was never touched by the scheduler at all.
+    /// Backfills every task to `remainingMinutes = estimatedMinutes`
+    /// exactly once; a task created after this migration already gets
+    /// that from `TaskItem.init` itself.
     private static func backfillRemainingMinutesIfNeeded(container: ModelContainer) {
         let flagKey = "didBackfillRemainingMinutes.v1"
         guard !UserDefaults.standard.bool(forKey: flagKey) else { return }
