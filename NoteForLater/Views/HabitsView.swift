@@ -293,11 +293,12 @@ struct HabitsTodayView: View {
     /// calendar side, just triggered from this circle instead.
     private func toggleOccurrence(habit: Habit, index: Int, todayLog: HabitLog?) {
         let today = calendar.startOfDay(for: .now)
-        let log = todayLog ?? {
-            let newLog = HabitLog(habit: habit, date: today)
-            modelContext.insert(newLog)
-            return newLog
-        }()
+        // `todayLog` is deliberately ignored for the create decision. It
+        // came from this view's own list rendering, which is a third
+        // opinion about whether a log exists — and a caller believing
+        // "nil" when one is actually pending is exactly how duplicates
+        // were created. `logOrCreate` is the single source of truth.
+        let log = habit.logOrCreate(on: today, context: modelContext, calendar: calendar)
         let isNowComplete = log.occurrenceStatus(index) != .complete
         log.setOccurrence(index, to: isNowComplete ? .complete : .none)
 

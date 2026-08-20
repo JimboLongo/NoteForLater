@@ -231,7 +231,14 @@ struct DayTimelineGridView: View {
         let calendar = Calendar.current
         var result: [OpenHabitOccurrence] = []
         for habit in allHabits.sorted(by: { $0.sortOrder < $1.sortOrder }) where habit.isApplicable(on: targetDate, calendar: calendar) {
-            let log = habit.log(on: targetDate, calendar: calendar)
+            // Context-taking read, deliberately: this list drives each
+            // row's `isCompleted`, which `toggleHabitOccurrence` uses to
+            // decide which *direction* to write. A relationship read here
+            // can't see a pending same-day insert, so it reports `.none`
+            // and every tap re-writes `.complete`, making an occurrence
+            // impossible to un-toggle on a day with no saved log. See
+            // `Habit.log(on:context:)`.
+            let log = habit.log(on: targetDate, context: modelContext, calendar: calendar)
             for index in 0..<max(habit.timesPerDay, 1) {
                 guard habit.timeMode(for: index) == mode else { continue }
                 let status = log?.occurrenceStatus(index) ?? .none
@@ -684,11 +691,7 @@ struct DayTimelineGridView: View {
     private func toggleHabitOccurrence(habit: Habit, index: Int, isCompleted: Bool) {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: targetDate)
-        let log = habit.log(on: today, calendar: calendar) ?? {
-            let newLog = HabitLog(habit: habit, date: today)
-            modelContext.insert(newLog)
-            return newLog
-        }()
+        let log = habit.logOrCreate(on: today, context: modelContext, calendar: calendar)
         log.setOccurrence(index, to: isCompleted ? .none : .complete)
         habitOccurrenceRefreshTick += 1
         HabitStatsRefreshCoordinator.shared.habitLogsChanged()

@@ -115,24 +115,30 @@ struct HabitDetailView: View {
         .tint(.blue)
     }
 
-    /// If the same date ever ended up with more than one HabitLog (the tap
-    /// handler used to look one up independently of what the calendar was
-    /// displaying, so a stray duplicate could silently absorb edits while
-    /// the visible one never changed), merge the duplicates' occurrence
-    /// data into a single log and delete the rest. Cheap, and safe to run
+    /// If the same date ever ended up with more than one HabitLog, merge
+    /// them into a single log and delete the rest. Cheap, and safe to run
     /// every time this screen opens.
+    ///
+    /// **This is now a safety net, not the fix.** It was written when the
+    /// cause was thought to be "the tap handler looks one up independently
+    /// of what the calendar displays". The real cause is upstream and
+    /// affects every write path: a freshly-inserted `HabitLog` is invisible
+    /// through the `habit.logs` inverse relationship until a save lands, so
+    /// any lookup that traverses that relationship misses its own pending
+    /// insert and creates another. `Habit.logOrCreate` fixes that at the
+    /// source by fetching instead of traversing. A read-site patch could
+    /// never have been sufficient — it only ever fired when *this one
+    /// screen* opened for *one* habit, which is why 9 of 11 habits still
+    /// carried duplicates when this was measured.
+    ///
+    /// Merging is delegated to `HabitLogMerge.collapse` so this and the
+    /// repair migration can never disagree. It previously unioned the three
+    /// occurrence arrays itself, which left an index in two arrays at once
+    /// — see `HabitLogMerge` for why that was wrong and what replaced it.
     private func deduplicateLogs() {
-        var keptByDay: [Date: HabitLog] = [:]
-        for log in habitLogs {
-            let day = calendar.startOfDay(for: log.date)
-            if let kept = keptByDay[day] {
-                kept.completedOccurrences = Array(Set(kept.completedOccurrences + log.completedOccurrences))
-                kept.missedOccurrences = Array(Set(kept.missedOccurrences + log.missedOccurrences))
-                kept.excusedOccurrences = Array(Set(kept.excusedOccurrences + log.excusedOccurrences))
-                modelContext.delete(log)
-            } else {
-                keptByDay[day] = log
-            }
+        let byDay = Dictionary(grouping: habitLogs) { calendar.startOfDay(for: $0.date) }
+        for (_, logs) in byDay where logs.count > 1 {
+            HabitLogMerge.collapse(logs, context: modelContext)
         }
     }
 
@@ -343,13 +349,15 @@ struct HabitDetailView: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             let day = calendar.startOfDay(for: date)
-            if let existing = logsByDay[day] {
-                existing.setAll(to: status, timesPerDay: habit.timesPerDay)
-            } else {
-                let newLog = HabitLog(habit: habit, date: day)
-                newLog.setAll(to: status, timesPerDay: habit.timesPerDay)
-                modelContext.insert(newLog)
-            }
+            // Rerouted rather than call-swapped: this used `logsByDay` to
+            // decide whether to create, which is a *different question*
+            // than "does a log exist" — it asks what this screen last
+            // rendered. That's how it could create a second log for a day
+            // that already had one. It now goes through the same funnel as
+            // every other write path; `logsByDay` remains only for
+            // *display* (see `dayCell`).
+            let log = habit.logOrCreate(on: day, context: modelContext, calendar: calendar)
+            log.setAll(to: status, timesPerDay: habit.timesPerDay)
         }
         refreshCoordinator.habitLogsChanged()
     }

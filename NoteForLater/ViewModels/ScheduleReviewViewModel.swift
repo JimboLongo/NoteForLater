@@ -1732,13 +1732,7 @@ final class ScheduleReviewViewModel {
     }
 
     private func habitLog(for habit: Habit, on date: Date) -> HabitLog {
-        let calendar = Calendar.current
-        if let existing = habit.log(on: date, calendar: calendar) {
-            return existing
-        }
-        let newLog = HabitLog(habit: habit, date: calendar.startOfDay(for: date))
-        modelContext.insert(newLog)
-        return newLog
+        habit.logOrCreate(on: date, context: modelContext)
     }
 
     // MARK: - Regenerate prompt: review vs. assume not completed
@@ -1801,7 +1795,15 @@ final class ScheduleReviewViewModel {
     /// `ScheduleReviewView`'s `pastReviewCompletedHabitOccurrenceIDs`) —
     /// this function only decides whether to include a given id, never
     /// which ones a caller cares about remembering.
-    static func openHabitOccurrencesForReview(habits: [Habit], upTo cutoff: Date = .now, alsoInclude: Set<String> = []) -> [HabitReviewOccurrence] {
+    /// `context` is required rather than optional because this list feeds a
+    /// **write**: `markUnresolvedHabitOccurrencesAsMissed` iterates it and
+    /// writes `.missed` to everything it reports as unresolved. Reading
+    /// through the `habit.logs` relationship here meant a habit completed
+    /// today but not yet saved read as `.none`, qualified as unresolved,
+    /// and had its completion overwritten with a miss — no rapid tapping
+    /// required, just completing a habit and opening Nightly Review before
+    /// a save landed. See `Habit.log(on:context:)`.
+    static func openHabitOccurrencesForReview(habits: [Habit], context: ModelContext, upTo cutoff: Date = .now, alsoInclude: Set<String> = []) -> [HabitReviewOccurrence] {
         let calendar = Calendar.current
         let cutoffDay = calendar.startOfDay(for: cutoff)
         var result: [HabitReviewOccurrence] = []
@@ -1820,7 +1822,7 @@ final class ScheduleReviewViewModel {
                         let targetTime = calendar.date(byAdding: .minute, value: targetMinutes(for: mode), to: cursor) ?? cursor
                         guard targetTime < cutoff else { continue }
                         let id = "\(habit.id)-\(index)-\(Int(cursor.timeIntervalSince1970))"
-                        let status = habit.occurrenceStatus(index, on: cursor, calendar: calendar)
+                        let status = habit.occurrenceStatus(index, on: cursor, context: context, calendar: calendar)
                         guard status == .none || alsoInclude.contains(id) else { continue }
                         result.append(HabitReviewOccurrence(id: id, habit: habit, index: index, isCompleted: status == .complete, targetTime: targetTime, modeLabel: mode.label))
                     }
@@ -1832,8 +1834,8 @@ final class ScheduleReviewViewModel {
         return result
     }
 
-    static func hasOpenHabitOccurrences(habits: [Habit], upTo cutoff: Date = .now) -> Bool {
-        !openHabitOccurrencesForReview(habits: habits, upTo: cutoff).isEmpty
+    static func hasOpenHabitOccurrences(habits: [Habit], context: ModelContext, upTo cutoff: Date = .now) -> Bool {
+        !openHabitOccurrencesForReview(habits: habits, context: context, upTo: cutoff).isEmpty
     }
 
     /// Toggles an untimed (AM/Midday/PM) habit occurrence's completion —
@@ -1858,7 +1860,7 @@ final class ScheduleReviewViewModel {
             guard let habit = block.habit, !block.isCompleted, block.startTime < cutoff else { continue }
             habitLog(for: habit, on: block.date).setOccurrence(block.habitOccurrenceIndex, to: .missed)
         }
-        for occurrence in Self.openHabitOccurrencesForReview(habits: habits, upTo: cutoff) {
+        for occurrence in Self.openHabitOccurrencesForReview(habits: habits, context: modelContext, upTo: cutoff) {
             habitLog(for: occurrence.habit, on: occurrence.targetTime).setOccurrence(occurrence.index, to: .missed)
         }
         try? modelContext.save()

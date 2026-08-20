@@ -146,27 +146,102 @@ final class Habit {
         }
     }
 
-    /// ⚠️ `logs` is an **unordered** to-many relationship —
-    /// `@Relationship` promises nothing about read-back order, so this
-    /// scans from the end as an *empirical bet*, not because any ordering
-    /// is guaranteed. Measured on device across 9 habits (up to 53 logs
-    /// each): today's log landed 0–3 positions from the end every time,
-    /// including index 50–52 of 53. Forward iteration walked the whole
-    /// history to find the same entry. If that clustering ever stops
-    /// holding, this quietly degrades to a full scan — it stays correct
-    /// either way, it just stops being fast.
+    /// The single entry point for "get this habit's log for this day,
+    /// creating it if absent" — every write path routes through here.
     ///
-    /// ⚠️ `.first` vs `.last` is **not** a no-op in the presence of
-    /// duplicates, and duplicates are real: same-day `HabitLog`s exist in
-    /// live data today (see the Open Decisions entry in
-    /// `docs/NoteForLater-Scheduling-Spec.md`). Nothing enforces
-    /// one-per-day. `.last` is chosen deliberately — the most recently
-    /// appended log for a day is the one most recently written to, so a
-    /// duplicated day reads its newest state rather than a stale earlier
-    /// row. That is damage control, not a fix.
+    /// **Why this cannot use `log(on:)`.** A `HabitLog` that has been
+    /// `insert`ed but not yet saved is *not* reflected in the `logs`
+    /// inverse relationship. Measured on device: across bursts of 4, 6 and
+    /// 18 taps, `habit.logs` reported **zero** same-day logs before every
+    /// single create while a day-scoped fetch reported the true climbing
+    /// count (0,1,2,3…). So a relationship-based lookup misses its own
+    /// pending insert and creates another log, every tap, until something
+    /// saves. That is what produced same-day duplicates across 9 of 11
+    /// habits. The relationship is correct again the moment a save lands —
+    /// this is a visibility gap, not data loss.
+    ///
+    /// Fetching sees pending inserts, so the fetch below is the fix. No
+    /// save-before-lookup is needed (and was deliberately avoided: it
+    /// would put a synchronous save on the tap path).
+    func logOrCreate(on date: Date, context: ModelContext, calendar: Calendar = .current) -> HabitLog {
+        let day = calendar.startOfDay(for: date)
+        let sameDay = Self.sameDayLogs(habitID: id, day: day, context: context, calendar: calendar)
+        // If duplicates already exist, prefer the most recently written —
+        // `lastModified` exists precisely so this is deterministic instead
+        // of depending on unordered relationship position.
+        if let existing = sameDay.max(by: { $0.lastModified < $1.lastModified }) {
+            return existing
+        }
+        let newLog = HabitLog(habit: self, date: day)
+        context.insert(newLog)
+        return newLog
+    }
+
+    /// Every `HabitLog` this habit has for `day`, found by **fetch** rather
+    /// than by traversing `logs` — see `logOrCreate` for why that
+    /// distinction is load-bearing.
+    ///
+    /// `#Predicate` cannot express `Calendar.isDate(_:inSameDayAs:)`, so
+    /// the day is bounded as a half-open range `[startOfDay, nextDay)`.
+    /// The bounds are captured as plain `let`s first because the predicate
+    /// macro can only capture simple values, and the habit is matched in
+    /// memory afterwards rather than inside the predicate, since
+    /// traversing an optional relationship inside `#Predicate` is exactly
+    /// the fragile construct this method exists to avoid.
+    static func sameDayLogs(habitID: UUID, day: Date, context: ModelContext, calendar: Calendar = .current) -> [HabitLog] {
+        let start = calendar.startOfDay(for: day)
+        guard let end = calendar.date(byAdding: .day, value: 1, to: start) else { return [] }
+        let descriptor = FetchDescriptor<HabitLog>(predicate: #Predicate { $0.date >= start && $0.date < end })
+        let fetched = (try? context.fetch(descriptor)) ?? []
+        return fetched.filter { $0.habit?.id == habitID }
+    }
+
+    /// The **safe** read: sees pending, unsaved inserts because it fetches
+    /// rather than traversing `logs`.
+    ///
+    /// ⚠️ Any read that feeds a *write decision* must use this, not
+    /// `log(on:)`. This is not a display concern.
+    /// `DayTimelineGridView.toggleHabitOccurrence` derives its toggle
+    /// **direction** from the occurrence's current status — so a read that
+    /// can't see today's pending log reports `.none`, and every tap writes
+    /// `.complete` again. Measured: six taps on one occurrence left it
+    /// complete when three on/off cycles should have left it not-complete,
+    /// and on a day with no saved log it was impossible to un-toggle at
+    /// all. A wrong read here corrupts data; it does not merely look stale.
+    func log(on date: Date, context: ModelContext, calendar: Calendar = .current) -> HabitLog? {
+        let day = calendar.startOfDay(for: date)
+        return Self.sameDayLogs(habitID: id, day: day, context: context, calendar: calendar)
+            .max(by: { $0.lastModified < $1.lastModified })
+    }
+
+    /// Same, for one occurrence's status.
+    func occurrenceStatus(_ index: Int, on date: Date, context: ModelContext, calendar: Calendar = .current) -> OccurrenceStatus {
+        log(on: date, context: context, calendar: calendar)?.occurrenceStatus(index) ?? .none
+    }
+
+    /// ⚠️ **Hazard — cannot see pending inserts.** Traverses the `logs`
+    /// inverse relationship, which does not reflect an inserted-but-unsaved
+    /// `HabitLog` until a save lands. Use `log(on:context:)` for anything
+    /// feeding a write decision; see that method for what goes wrong.
+    /// Retained only for callers with no `ModelContext` in reach, and those
+    /// should be treated as suspect rather than as legitimate exceptions.
+    ///
+    /// Scans from the end as an *empirical bet*, not an ordering guarantee:
+    /// `logs` is unordered and `@Relationship` promises nothing about
+    /// read-back order. Measured across 9 habits (up to 53 logs each),
+    /// today's log landed 0–3 positions from the end every time, including
+    /// index 50–52 of 53, where forward iteration walked the whole history.
+    /// It degrades to a full scan if that stops holding, and stays correct
+    /// either way. `.first` vs `.last` is also **not** a no-op while
+    /// same-day duplicates exist — `.last` at least reads the most recently
+    /// appended row.
     func log(on date: Date, calendar: Calendar = .current) -> HabitLog? {
         let day = calendar.startOfDay(for: date)
-        return (logs ?? []).last(where: { calendar.isDate($0.date, inSameDayAs: day) })
+        // TEMP: reverted to `.first` for the (a)-vs-(b) disambiguation run
+        // — does a tap go invisible again when the read lands on an empty
+        // first row? Restore `.last` (committed state, see df7d494) once
+        // that question is answered.
+        return (logs ?? []).first(where: { calendar.isDate($0.date, inSameDayAs: day) })
     }
 
     func occurrenceStatus(_ index: Int, on date: Date, calendar: Calendar = .current) -> OccurrenceStatus {
@@ -416,11 +491,23 @@ final class HabitLog {
     var completedOccurrences: [Int] = []
     var missedOccurrences: [Int] = []
     var excusedOccurrences: [Int] = []
+    /// When this log's occurrence state was last written. Added because
+    /// reconciling duplicate same-day logs was impossible without it —
+    /// there was no way to answer "which of these two writes was newer",
+    /// and `logs` is unordered so position says nothing either.
+    ///
+    /// Defaults to `.distantPast` rather than `.now` so rows that predate
+    /// this field are *honestly* marked as unknown-age instead of all
+    /// claiming to have been written at migration time. The repair
+    /// migration therefore cannot use it — it runs on data written before
+    /// this existed — but every reconciliation after that can.
+    var lastModified: Date = Date.distantPast
 
     init(habit: Habit, date: Date) {
         self.id = UUID()
         self.habit = habit
         self.date = Calendar.current.startOfDay(for: date)
+        self.lastModified = Date()
     }
 
     func occurrenceStatus(_ index: Int) -> OccurrenceStatus {
@@ -444,6 +531,7 @@ final class HabitLog {
         case .missed: missedOccurrences.append(index)
         case .excused: excusedOccurrences.append(index)
         }
+        lastModified = Date()
     }
 
     /// Bulk day-level actions (from the calendar's Yes/No/Excused picker,
@@ -475,5 +563,79 @@ final class HabitLog {
         completedOccurrences = status == .complete ? full : []
         missedOccurrences = status == .missed ? full : []
         excusedOccurrences = status == .excused ? full : []
+        lastModified = Date()
+    }
+}
+
+/// The one merge rule for reconciling `HabitLog`s that share a day, used by
+/// both the repair migration and `HabitDetailView`'s live dedup so the two
+/// can never disagree.
+///
+/// **Rule: `complete > excused > missed > none`, per occurrence index.**
+/// A completion is essentially always a deliberate tap, so losing one is
+/// the worse error. `.missed` ranks lowest of the three because
+/// `markUnresolvedHabitOccurrencesAsMissed()` writes it *automatically* at
+/// Nightly Review, making it the weakest evidence of intent.
+///
+/// **This deliberately changes shipped behavior.** `deduplicateLogs`
+/// previously unioned all three arrays, which resolved as
+/// `complete > missed > excused` via `occurrenceStatus`'s check order —
+/// and, worse, left an index in two arrays at once, violating this type's
+/// own "at most one of the three" contract. That reads correctly through
+/// `occurrenceStatus` while silently double-counting in any code touching
+/// `missedOccurrences` directly (streak and rolling-30 math). The
+/// divergence from the old ordering is intentional, not a regression.
+enum HabitLogMerge {
+    /// Raw-array reads rather than `occurrenceStatus`, deliberately: a log
+    /// already corrupted by the old union can hold an index in two arrays,
+    /// and `occurrenceStatus` would report only the first match, hiding
+    /// the other status from the merge.
+    static func resolvedStatus(for index: Int, across logs: [HabitLog]) -> OccurrenceStatus {
+        var hasComplete = false
+        var hasExcused = false
+        var hasMissed = false
+        for log in logs {
+            if log.completedOccurrences.contains(index) { hasComplete = true }
+            if log.excusedOccurrences.contains(index) { hasExcused = true }
+            if log.missedOccurrences.contains(index) { hasMissed = true }
+        }
+        if hasComplete { return .complete }
+        if hasExcused { return .excused }
+        if hasMissed { return .missed }
+        return .none
+    }
+
+    /// Collapses same-day `logs` into one, deleting the rest, and rewrites
+    /// the survivor's three arrays as strictly mutually exclusive.
+    ///
+    /// Safe — and useful — on a single log: it normalises an existing
+    /// invariant violation without deleting anything, which is why the
+    /// migration can run this over every log rather than only duplicated
+    /// days.
+    @discardableResult
+    static func collapse(_ logs: [HabitLog], context: ModelContext) -> HabitLog? {
+        guard let keeper = logs.max(by: { $0.lastModified < $1.lastModified }) ?? logs.first else { return nil }
+        // Every index mentioned anywhere, not `0..<timesPerDay` — a habit
+        // whose `timesPerDay` was reduced can still carry higher indices,
+        // and silently dropping them would discard real completions.
+        let indices = Set(logs.flatMap { $0.completedOccurrences + $0.missedOccurrences + $0.excusedOccurrences })
+        var completed: [Int] = []
+        var missed: [Int] = []
+        var excused: [Int] = []
+        for index in indices.sorted() {
+            switch resolvedStatus(for: index, across: logs) {
+            case .complete: completed.append(index)
+            case .excused: excused.append(index)
+            case .missed: missed.append(index)
+            case .none: break
+            }
+        }
+        keeper.completedOccurrences = completed
+        keeper.missedOccurrences = missed
+        keeper.excusedOccurrences = excused
+        for log in logs where log !== keeper {
+            context.delete(log)
+        }
+        return keeper
     }
 }

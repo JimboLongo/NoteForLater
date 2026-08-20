@@ -535,6 +535,13 @@ Not urgent — no user-facing impact, tests currently pass. But the cost is paid
 
 Pure maintenance, no dependency on the others, do it whenever. `DayTimelineGridView.swift` is 2,309 lines and `NightlyReviewView.swift` is 2,179. Both have accreted several independent responsibilities — `NightlyReviewView.swift` alone holds the six-step flow, `TaskReviewCard` (the shared commit point behind every Save/Move/Skip in the app, §6.1), and the At-Risk step added in Phase 6.
 
+**Scope note — narrowing habit-toggle invalidation belongs here, and it is two changes, not one.** A habit toggle currently re-renders the *entire* `DayTimelineGridView` body. Memoizing the occurrence lists and `visibleHourRange` (commit `2318fb0`) made each pass 3–5× cheaper but did **not** reduce the scope: it is still 2 full passes per tap. Actually narrowing it needs both halves below, and neither is a mechanical refactor — which is why it was deferred here rather than bolted onto the performance work that found it.
+
+- **Half A — extract the habit sections into their own view.** Not free isolation: each section feeds `amSectionHeight` / `middaySectionHeight` back up via `onGeometryChange`, and those values are load-bearing for `DayTimelineSegment.precedingContentHeight` (translating a grid-local touch into the shared ScrollView's content space). So the extracted view must keep reporting geometry upward, and the parent still re-renders when a section's *height* changes — just not when only its contents do. Real, but partial.
+- **Half B — stop the parent observing habits at all.** `ScheduleReviewView` holds `@Query(sort: \Habit.sortOrder) allHabits`. Mutating any `HabitLog` invalidates it, re-runs the parent body and rebuilds `timelineRows` — confirmed on 18/18 test taps — regardless of anything done in Half A. Removing that means the habit sections source their own habit data instead of receiving it from the parent: a change to the data-flow contract between the two views, not a refactor.
+
+Half A is exactly the extraction this split is for, so doing it standalone would mean opening this file twice. Half B deserves its own deliberate decision.
+
 ---
 
 ## 11. Suggested phasing
@@ -617,68 +624,184 @@ So any such feature has to define what it does with each of those — most likel
 
 `c162acb` changed `slack`/`isAtRisk`/`atRiskBlocker` to measure against `endOfDueDate(calendar:)` (midnight ending `dueDate`'s calendar day) rather than the raw `dueDate` instant, and made `isAtRisk` return `false` outright when `dueDatePicked == false`. §5 doesn't describe either of these; both are load-bearing (the raw-instant version had a due-today-at-9am-reads-as-past-due-at-9:01 bug) and should be written into §5 before anyone edits that code without the conversation history.
 
-### Duplicate `HabitLog`s for one day — confirmed in live data, unfixed
+### Pending `HabitLog` inserts are invisible through `habit.logs` — root cause of same-day duplicates
 
-**Measured, not hypothesized.** A one-shot audit over the live store found
-**9 of 11 habits affected, 15 duplicated days, 25 excess logs**:
+**The bug, in one line:** a `HabitLog` that has been `insert`ed but not yet
+saved is **not reflected in the `habit.logs` inverse relationship**, so any
+lookup that traverses that relationship misses its own pending insert and
+creates another log for the same day.
+
+**Measured, not inferred.** Instrumenting every tap with three independent
+counts — `rel` (via the relationship), `fetch` (via a day-scoped
+`FetchDescriptor`), `pend` (the context's pending inserts):
 
 ```
-Brush Teeth       logs=23  [08-17×2  08-18×4]
-Exercise          logs=53  [08-15×3  08-17×4  08-18×2]
-Clean Before Bed  logs=13  [08-16×2  08-17×3  08-19×2]
-Morning Stretches logs=10  [08-18×2  08-20×3]
-… 5 more, 1 duplicated day each
+tap 1   before[rel=0 fetch=0 pend=0]   CREATED
+tap 2   before[rel=0 fetch=1 pend=1]   CREATED
+tap 3   before[rel=0 fetch=2 pend=2]   CREATED
+…
+tap 18  before[rel=0 fetch=17 pend=17] CREATED
 ```
 
-Nothing prevents this. `HabitLog` has a plain `UUID id` and a plain `date`
-— **no uniqueness constraint anywhere in the model**. The one-log-per-day
-invariant that several call sites quietly assume is upheld only by
-convention, across **six separate non-atomic check-then-create sites**:
+`rel` is pinned at 0 while `fetch` and `pend` track the truth. **21 taps
+produced 21 logs, a 100% hit rate** — not a rare race. Once a save lands
+the relationship is correct again (`rel=4 fetch=4 pend=0`, and subsequent
+rapid taps all resolve `found`). **Nothing is ever lost** — the extra rows
+persist and are fetchable, which is why a merge-based repair can recover
+everything.
 
-| Site | How it decides |
-|---|---|
-| `ScheduleReviewViewModel.swift:1739` | `habit.log(on:)`, else create |
-| `DayTimelineGridView.swift:723` | `habit.log(on:)`, else create |
-| `NightlyReviewView.swift:485` | `habit.log(on:)`, else create |
-| `DailyDigestCheckInView.swift:124` | `habit.log(on:)`, else create |
-| `HabitsView.swift:297` | a **passed-in** `todayLog`, else create |
-| `HabitDetailView.swift:349` | a **`logsByDay` dictionary** — not `log(on:)` at all |
+**It is not a race, and not a re-fault.** Both hypotheses were tested and
+killed:
 
-Every one is read-then-write with no transaction around the pair, so two
-writes interleaving before the first insert becomes visible both see nil
-and both create. The last two rows are worse than the others: they don't
-even use `log(on:)` to decide, so they can disagree with it about whether
-a log already exists.
+- *Not interleaving.* Every write path is synchronous and main-actor, so
+  tap 2's lookup runs strictly after tap 1's `insert` returns. Locking,
+  actor isolation or transactions would fix nothing.
+- *Not `@Query` re-faulting.* `ObjectIdentifier(habit)` is **constant**
+  across every tap in a burst, including across the save boundary. The
+  `Habit` instance is never swapped; its relationship array simply omits
+  unsaved children.
 
-**Why this is a correctness bug and not an untidiness.** `log(on:)`
-returns exactly one of the duplicates, so `setOccurrence` writes to that
-one — and any completion recorded against a *sibling* row is invisible to
-every later read. The rolling-30/streak calculations count logs, so a
-duplicated day can be counted more than once. The symptom is wrong
-numbers that never announce themselves, the same shape as the
-`remainingMinutes` drain in §1.1a: a leak nothing stopped because every
-call site had independently grown the same unguarded pattern, and four
-(here, six) of them were wrong in the same way.
+**Autosave is not the fix and was never disabled.** There is no
+`autosaveEnabled` setting anywhere; it is on by default and does fire —
+during a ~5.4s idle gap, though not during a ~3s one. It is simply
+outrun by tapping. The failure is that the *next read* beats the save.
 
-This is also why `Habit.log(on:)` uses `.last(where:)` rather than
-`.first(where:)` — with duplicates present the two are **not** equivalent,
-and `.last` at least reads the most recently appended row for the day
-instead of a stale earlier one. Damage control, not a fix. (The scan
-direction itself is a separate, empirical matter — see that method's own
-doc comment: `logs` is an *unordered* to-many relationship, so nothing
-guarantees where the day's log sits; it merely lands 0–3 from the end in
-practice today.)
+#### The fix: fetch, don't traverse
 
-**Likely fix, not attempted here:** collapse all six sites into one funnel
-on the model — `Habit.logOrCreate(on:context:)` — so the guard exists once
-rather than six times, and a future seventh caller inherits it instead of
-re-deriving it. That still doesn't make check-then-create atomic; a real
-uniqueness constraint (or a deliberate de-dup on read) is the stronger
-version. Existing duplicates need a repair migration too, in the shape of
-`TaskItem.repairedRemainingMinutes()` (§1.1b): merge each day's rows
-rather than dropping extras, since completions may be split across them.
+`Habit.logOrCreate(on:context:)` is the single creation funnel; all six
+former construction sites route through it, and exactly one
+`HabitLog(habit:date:)` call remains — inside the funnel. It looks up via
+`Habit.sameDayLogs`, which fetches.
 
-Out of scope for the habit-tap performance work that found it.
+**Why not the alternatives:** save-before-lookup would put a synchronous
+save on the tap path (the exact path this work was making faster);
+`insertedModelsArray` and a funnel-owned cache both add state for
+something the fetch already answers correctly.
+
+**Predicate shape matters.** `Calendar.isDate(_:inSameDayAs:)` cannot be
+expressed in a `#Predicate`, so the day is a half-open range
+`[startOfDay, nextDay)` with the bounds captured as plain `let`s *before*
+the macro; the habit is matched **in memory afterwards**, because
+traversing an optional relationship inside a predicate is the fragile
+construct this method exists to avoid. A predicate that silently matched
+nothing would reintroduce the bug while looking fixed.
+
+Verified: 12 taps → **2 creates** (exactly one per habit per day), versus
+21 → 21 before.
+
+#### Reads feeding writes are the same bug, and worse
+
+Fixing creation was **not sufficient**. `toggleHabitOccurrence` derives its
+toggle *direction* from the occurrence's current status. A relationship
+read reported `.none` for a pending log, so every tap wrote `.complete`
+again — six taps left an occurrence complete when three on/off cycles
+should have left it not-complete, and on a day with no saved log it was
+**impossible to un-toggle at all**. A blind read here produces a wrong
+*write*, not a stale pixel.
+
+`Habit.log(on:context:)` / `occurrenceStatus(_:on:context:)` are the safe
+variants. An audit of every caller of the relationship-based versions
+classified three as feeding write decisions, of which two were live bugs:
+
+| Caller | Class | Status |
+|---|---|---|
+| `DayTimelineGridView.openHabitOccurrences` | write decision | fixed |
+| `ScheduleReviewViewModel.openHabitOccurrencesForReview` | write decision | fixed |
+| `DailyDigestCheckInView` open-occurrence list | write decision | fixed |
+| `AISchedulingService:324` placement filter | display/placement | left, see below |
+| `DailyDigestNotificationService:200` | display | left, low risk |
+
+**`markUnresolvedHabitOccurrencesAsMissed` was a second silent-corruption
+path.** It iterates `openHabitOccurrencesForReview`, which filtered on
+`status == .none`, and writes `.missed` to everything it reports. A habit
+completed today but not yet saved read as unresolved and had its
+completion **overwritten with a miss** — no rapid tapping needed, just
+completing a habit and opening Nightly Review before a save landed. This
+also explains the pure-missed duplicate rows (`c[] m[0,1,2]`) seen in the
+audit: the nightly path never *created* those rows (no `CREATE` was ever
+logged from it), it wrote `.missed` into an existing duplicate whose
+completion it could not see.
+
+⚠️ **`Habit.log(on:)` (no context) is a hazard.** It is retained only for
+callers with no `ModelContext` in reach, and those should be treated as
+suspect rather than as legitimate exceptions. Of five callers found, three
+fed write decisions and two of those were actively corrupting data — the
+safe one was the exception. Strongly consider deleting it outright once
+`DailyDigestNotificationService` can obtain a context: leaving a
+relationship-based reader beside a correct alternative is the same footgun
+shape as the six construction sites, and nothing stops a sixth caller
+picking the wrong one.
+
+### The prior fix: why a read-site patch could not hold
+
+`HabitDetailView.deduplicateLogs()` already existed, and its doc comment
+described this bug accurately — *"the tap handler used to look one up
+independently of what the calendar was displaying, so a stray duplicate
+could silently absorb edits while the visible one never changed."*
+Someone hit it, understood it, and patched the **read site**.
+
+It could never have been sufficient, and the scope is why: it fires only
+when **one habit's detail screen opens**, for **that habit only**. That is
+why 9 of 11 habits still carried duplicates when this was measured, and
+why the two that didn't were ones whose detail screen had been opened.
+The write path is the actual fix; `deduplicateLogs` is now a safety net
+that delegates its merge to `HabitLogMerge`.
+
+**It also silently mutated data during the investigation.** Opening one
+detail screen removed 3 duplicate days / 4 excess logs mid-session, which
+is why audit totals moved between runs. **Rule: any audit number is
+invalid unless it states whether dedup could have fired in the window, and
+the repair migration must re-derive its input immediately before applying
+rather than trusting anything computed earlier.**
+
+### `HabitLog` merge rule — deliberately diverges from shipped behavior
+
+`HabitLogMerge` implements **`complete > excused > missed > none`**, per
+occurrence index, mutually exclusive. A completion is essentially always a
+deliberate tap, so losing one is the worse error; `.missed` ranks lowest
+because `markUnresolvedHabitOccurrencesAsMissed()` writes it
+*automatically*, making it the weakest evidence of intent.
+
+**Shipped behavior was `complete > missed > excused`** — `deduplicateLogs`
+unioned all three arrays, and `occurrenceStatus` resolved by check order.
+The change is intentional, not a regression.
+
+The union was also wrong in a second way: it left an index in **two arrays
+at once**, violating `HabitLog`'s own "at most one of the three" contract.
+`occurrenceStatus` masks that by checking completed first, so it reads
+correctly while any code touching `missedOccurrences`/`excusedOccurrences`
+directly (streak, rolling-30) double-counts — silent wrong numbers of
+exactly the shape §1.1a warns about. **Four such logs exist in live data**
+(all `Exercise`, July, `complete ∩ excused`). Since only the union could
+create an overlap, **no new violations can appear once `deduplicateLogs`
+stops unioning**, so the repair is genuinely one-shot.
+
+`HabitLogMerge.resolvedStatus` reads the **raw arrays** rather than
+`occurrenceStatus`, deliberately: on an already-corrupted row
+`occurrenceStatus` reports only the first match and would hide the second
+status from the merge.
+
+⚠️ **Excused is reachable by accident.** `HabitDetailView.cycleDay` is a
+bare tap-to-advance through none → complete → missed → excused → none,
+with no debounce or confirmation — its own doc comment concedes accidental
+taps. So an excuse is a deliberate *destination* only if the user stopped
+there on purpose; it is equally the resting place of one tap too many.
+Excused marks are weaker evidence of intent than their position in the
+cycle suggests. The four `complete ∩ excused` logs were judged overshoot
+artifacts and resolve to `.complete`, which rule 1 already produces — no
+special case needed.
+
+### `HabitLog.lastModified`
+
+Added because reconciling duplicates was impossible without it: there was
+no way to answer "which of these two writes was newer", and `logs` is
+unordered so position says nothing. Defaults to `.distantPast` rather than
+`.now` so rows predating the field are honestly marked unknown-age instead
+of all claiming migration time. **The repair migration therefore cannot
+use it** — it operates on data written before this existed — but every
+reconciliation after that can, and `logOrCreate` already uses it to pick
+deterministically when duplicates are present.
+
 
 ### Dead code referenced by §6.1
 

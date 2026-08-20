@@ -324,7 +324,7 @@ struct NightlyReviewView: View {
     private var hasAnythingToReviewBeforeToday: Bool {
         let startOfToday = Calendar.current.startOfDay(for: .now)
         let hasBlocks = allBlocks.contains { !$0.isCompleted && $0.startTime < startOfToday }
-        let hasHabits = ScheduleReviewViewModel.hasOpenHabitOccurrences(habits: allHabits, upTo: startOfToday)
+        let hasHabits = ScheduleReviewViewModel.hasOpenHabitOccurrences(habits: allHabits, context: modelContext, upTo: startOfToday)
         return hasBlocks || hasHabits
     }
 
@@ -459,6 +459,7 @@ struct NightlyReviewView: View {
     private var openHabitOccurrencesForReview: [HabitReviewOccurrence] {
         ScheduleReviewViewModel.openHabitOccurrencesForReview(
             habits: allHabits,
+            context: modelContext,
             upTo: reviewCutoff,
             alsoInclude: pastReviewCompletedHabitOccurrenceIDs
         )
@@ -477,14 +478,7 @@ struct NightlyReviewView: View {
     /// Finds (or creates) the `HabitLog` for `habit` on `day` — shared by
     /// `toggleHabitReviewOccurrence` and `markUnresolvedHabitOccurrencesAsMissed`.
     private func habitLog(for habit: Habit, on day: Date) -> HabitLog {
-        let calendar = Calendar.current
-        let normalizedDay = calendar.startOfDay(for: day)
-        if let existing = habit.log(on: normalizedDay, calendar: calendar) {
-            return existing
-        }
-        let newLog = HabitLog(habit: habit, date: normalizedDay)
-        modelContext.insert(newLog)
-        return newLog
+        habit.logOrCreate(on: day, context: modelContext, calendar: Calendar.current)
     }
 
     /// Marks every still-open (`.none`) habit occurrence the Today review

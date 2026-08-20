@@ -27,7 +27,12 @@ struct DailyDigestCheckInView: View {
         var result: [OpenHabitOccurrence] = []
         for habit in applicableHabits {
             for index in 0..<max(habit.timesPerDay, 1) {
-                guard habit.occurrenceStatus(index, on: today, calendar: calendar) == .none else { continue }
+                // Context-taking read: this list is filtered on `.none` and
+                // its rows then write `.complete`, so it feeds a write
+                // decision. A relationship read can't see a pending
+                // same-day log and would offer an already-completed
+                // occurrence as still open. See `Habit.log(on:context:)`.
+                guard habit.occurrenceStatus(index, on: today, context: modelContext, calendar: calendar) == .none else { continue }
                 result.append(OpenHabitOccurrence(id: "\(habit.id).\(index)", habit: habit, index: index))
             }
         }
@@ -120,11 +125,7 @@ struct DailyDigestCheckInView: View {
     /// `ScheduledBlock.isCompleted`, if that occurrence made it onto
     /// today's calendar, in sync.
     private func toggleHabitOccurrence(habit: Habit, index: Int) {
-        let log = habit.log(on: today, calendar: calendar) ?? {
-            let newLog = HabitLog(habit: habit, date: today)
-            modelContext.insert(newLog)
-            return newLog
-        }()
+        let log = habit.logOrCreate(on: today, context: modelContext, calendar: calendar)
         log.setOccurrence(index, to: .complete)
         if let block = (habit.scheduledBlocks ?? []).first(where: {
             $0.habitOccurrenceIndex == index && calendar.isDate($0.date, inSameDayAs: today)
