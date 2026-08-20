@@ -1732,7 +1732,7 @@ final class ScheduleReviewViewModel {
     }
 
     private func habitLog(for habit: Habit, on date: Date) -> HabitLog {
-        habit.logOrCreate(on: date, context: modelContext)
+        habit.logOrCreate(on: date, context: modelContext, site: "ScheduleReviewViewModel.habitLog")
     }
 
     // MARK: - Regenerate prompt: review vs. assume not completed

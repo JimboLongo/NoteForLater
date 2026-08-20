@@ -691,8 +691,22 @@ struct DayTimelineGridView: View {
     private func toggleHabitOccurrence(habit: Habit, index: Int, isCompleted: Bool) {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: targetDate)
-        let log = habit.logOrCreate(on: today, context: modelContext, calendar: calendar)
+        // TEMP instrumentation — testing whether rapid taps create
+        // duplicate same-day HabitLogs because a just-inserted log isn't
+        // visible to the next lookup through the `habit.logs` inverse.
+        let beforeCount = (habit.logs ?? []).filter { calendar.isDate($0.date, inSameDayAs: today) }.count
+        let probeBefore = HabitLogDiag.probe(tag: "before", habit: habit, day: today, context: modelContext, calendar: calendar)
+        // Object identity of the `Habit` itself — if this changes between
+        // taps, the @Query invalidation is handing down re-faulted
+        // instances, which is the re-fault model's core prediction.
+        let habitObj = String(UInt(bitPattern: ObjectIdentifier(habit).hashValue) & 0xFFFFFF, radix: 16, uppercase: true)
+        let existingCount = Habit.sameDayLogs(habitID: habit.id, day: today, context: modelContext, calendar: calendar).count
+        let log = habit.logOrCreate(on: today, context: modelContext, calendar: calendar, site: "DayTimelineGridView.toggleHabitOccurrence")
+        let existing: HabitLog? = existingCount > 0 ? log : nil
         log.setOccurrence(index, to: isCompleted ? .none : .complete)
+        let afterCount = (habit.logs ?? []).filter { calendar.isDate($0.date, inSameDayAs: today) }.count
+        let probeAfter = HabitLogDiag.probe(tag: "after", habit: habit, day: today, context: modelContext, calendar: calendar)
+        DiagFileLog.write("TOGGLE habit=\(habit.name) idx=\(index) \(existing == nil ? "CREATED" : "found") obj=\(habitObj) sameDayBefore=\(beforeCount) after=\(afterCount) logID=\(log.id.uuidString.prefix(8)) completed=\(log.completedOccurrences.sorted()) \(probeBefore) \(probeAfter)")
         habitOccurrenceRefreshTick += 1
         HabitStatsRefreshCoordinator.shared.habitLogsChanged()
     }

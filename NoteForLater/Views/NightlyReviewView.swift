@@ -478,7 +478,7 @@ struct NightlyReviewView: View {
     /// Finds (or creates) the `HabitLog` for `habit` on `day` — shared by
     /// `toggleHabitReviewOccurrence` and `markUnresolvedHabitOccurrencesAsMissed`.
     private func habitLog(for habit: Habit, on day: Date) -> HabitLog {
-        habit.logOrCreate(on: day, context: modelContext, calendar: Calendar.current)
+        habit.logOrCreate(on: day, context: modelContext, calendar: Calendar.current, site: "NightlyReviewView.habitLog")
     }
 
     /// Marks every still-open (`.none`) habit occurrence the Today review

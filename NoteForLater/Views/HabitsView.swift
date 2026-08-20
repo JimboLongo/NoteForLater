@@ -298,7 +298,7 @@ struct HabitsTodayView: View {
         // opinion about whether a log exists — and a caller believing
         // "nil" when one is actually pending is exactly how duplicates
         // were created. `logOrCreate` is the single source of truth.
-        let log = habit.logOrCreate(on: today, context: modelContext, calendar: calendar)
+        let log = habit.logOrCreate(on: today, context: modelContext, calendar: calendar, site: "HabitsView.toggleOccurrence")
         let isNowComplete = log.occurrenceStatus(index) != .complete
         log.setOccurrence(index, to: isNowComplete ? .complete : .none)
 

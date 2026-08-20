@@ -146,6 +146,24 @@ final class Habit {
         }
     }
 
+    /// ⚠️ `logs` is an **unordered** to-many relationship —
+    /// `@Relationship` promises nothing about read-back order, so this
+    /// scans from the end as an *empirical bet*, not because any ordering
+    /// is guaranteed. Measured on device across 9 habits (up to 53 logs
+    /// each): today's log landed 0–3 positions from the end every time,
+    /// including index 50–52 of 53. Forward iteration walked the whole
+    /// history to find the same entry. If that clustering ever stops
+    /// holding, this quietly degrades to a full scan — it stays correct
+    /// either way, it just stops being fast.
+    ///
+    /// ⚠️ `.first` vs `.last` is **not** a no-op in the presence of
+    /// duplicates, and duplicates are real: same-day `HabitLog`s exist in
+    /// live data today (see the Open Decisions entry in
+    /// `docs/NoteForLater-Scheduling-Spec.md`). Nothing enforces
+    /// one-per-day. `.last` is chosen deliberately — the most recently
+    /// appended log for a day is the one most recently written to, so a
+    /// duplicated day reads its newest state rather than a stale earlier
+    /// row. That is damage control, not a fix.
     /// The single entry point for "get this habit's log for this day,
     /// creating it if absent" — every write path routes through here.
     ///
@@ -163,7 +181,7 @@ final class Habit {
     /// Fetching sees pending inserts, so the fetch below is the fix. No
     /// save-before-lookup is needed (and was deliberately avoided: it
     /// would put a synchronous save on the tap path).
-    func logOrCreate(on date: Date, context: ModelContext, calendar: Calendar = .current) -> HabitLog {
+    func logOrCreate(on date: Date, context: ModelContext, calendar: Calendar = .current, site: String = "unknown") -> HabitLog {
         let day = calendar.startOfDay(for: date)
         let sameDay = Self.sameDayLogs(habitID: id, day: day, context: context, calendar: calendar)
         // If duplicates already exist, prefer the most recently written —
@@ -172,8 +190,10 @@ final class Habit {
         if let existing = sameDay.max(by: { $0.lastModified < $1.lastModified }) {
             return existing
         }
+        let before = sameDay.count
         let newLog = HabitLog(habit: self, date: day)
         context.insert(newLog)
+        HabitLogDiag.created(site: site, habit: self, day: day, context: context, log: newLog, sameDayBefore: before, calendar: calendar)
         return newLog
     }
 
@@ -225,16 +245,6 @@ final class Habit {
     /// feeding a write decision; see that method for what goes wrong.
     /// Retained only for callers with no `ModelContext` in reach, and those
     /// should be treated as suspect rather than as legitimate exceptions.
-    ///
-    /// Scans from the end as an *empirical bet*, not an ordering guarantee:
-    /// `logs` is unordered and `@Relationship` promises nothing about
-    /// read-back order. Measured across 9 habits (up to 53 logs each),
-    /// today's log landed 0–3 positions from the end every time, including
-    /// index 50–52 of 53, where forward iteration walked the whole history.
-    /// It degrades to a full scan if that stops holding, and stays correct
-    /// either way. `.first` vs `.last` is also **not** a no-op while
-    /// same-day duplicates exist — `.last` at least reads the most recently
-    /// appended row.
     func log(on date: Date, calendar: Calendar = .current) -> HabitLog? {
         let day = calendar.startOfDay(for: date)
         // TEMP: reverted to `.first` for the (a)-vs-(b) disambiguation run
@@ -483,6 +493,83 @@ struct HabitStats {
 /// means it's untouched. Tapping an occurrence's circle cycles it through
 /// none → complete → missed → excused → none (see `cycleOccurrence`); the
 /// day-level status shown elsewhere is rolled up from these by `Habit.status`.
+/// TEMP instrumentation — duplicate-`HabitLog` investigation. Every one of
+/// the six `HabitLog(habit:date:)` construction sites calls this right
+/// after inserting, so a pulled log says *which* site created a duplicate
+/// and *which* `ModelContext` it was inserted into. The context identity
+/// is the point: an object inserted in one context isn't visible through
+/// another context's object graph until save-and-merge, which would
+/// produce same-day duplicates with no race and no user present. Strip
+/// with the rest of the instrumentation.
+enum HabitLogDiag {
+    static func contextTag(_ context: ModelContext) -> String {
+        String(UInt(bitPattern: ObjectIdentifier(context).hashValue) & 0xFFFFFF, radix: 16, uppercase: true)
+    }
+
+    static func created(
+        site: String,
+        habit: Habit,
+        day: Date,
+        context: ModelContext,
+        log: HabitLog,
+        sameDayBefore: Int,
+        calendar: Calendar = .current
+    ) {
+        let after = (habit.logs ?? []).filter { calendar.isDate($0.date, inSameDayAs: day) }.count
+        let dayLabel = ISO8601DateFormatter().string(from: calendar.startOfDay(for: day)).prefix(10)
+        DiagFileLog.write("CREATE site=\(site) ctx=\(contextTag(context)) habit=\(habit.name) day=\(dayLabel) sameDayBefore=\(sameDayBefore) after=\(after) logID=\(log.id.uuidString.prefix(8))")
+    }
+
+    /// Same-day count immediately *before* a create, captured by each site
+    /// so `created` can report the delta rather than only the result.
+    static func sameDayCount(habit: Habit, day: Date, calendar: Calendar = .current) -> Int {
+        (habit.logs ?? []).filter { calendar.isDate($0.date, inSameDayAs: day) }.count
+    }
+
+    /// Three independent views of the same question — "how many HabitLogs
+    /// exist for this habit on this day" — asked three different ways, to
+    /// separate *invisible* from *discarded*:
+    ///
+    /// - `rel`   — via the `habit.logs` inverse relationship (what
+    ///             `log(on:)` actually uses).
+    /// - `fetch` — via a `FetchDescriptor<HabitLog>` scoped to the day,
+    ///             bypassing the relationship entirely.
+    /// - `pend`  — how many `HabitLog`s the context currently holds as
+    ///             pending inserts.
+    ///
+    /// fetch sees them but rel doesn't  -> pure visibility bug; the funnel
+    ///                                     just needs to fetch, and every
+    ///                                     insert is safe.
+    /// only pend sees them              -> pending, and something is
+    ///                                     preventing the save.
+    /// none see them                    -> inserts are being discarded,
+    ///                                     which is far more serious and
+    ///                                     limits what a repair can
+    ///                                     recover.
+    static func probe(
+        tag: String,
+        habit: Habit,
+        day: Date,
+        context: ModelContext,
+        calendar: Calendar = .current
+    ) -> String {
+        let start = calendar.startOfDay(for: day)
+        let end = calendar.date(byAdding: .day, value: 1, to: start) ?? start
+        let rel = (habit.logs ?? []).filter { calendar.isDate($0.date, inSameDayAs: start) }.count
+        // Relationship predicates are fragile here, so fetch the day and
+        // filter by habit identity in memory — the point is only to avoid
+        // traversing `habit.logs`.
+        let descriptor = FetchDescriptor<HabitLog>(predicate: #Predicate { $0.date >= start && $0.date < end })
+        let fetched = (try? context.fetch(descriptor)) ?? []
+        let habitID = habit.id
+        let fetchCount = fetched.filter { $0.habit?.id == habitID }.count
+        let pending = context.insertedModelsArray.compactMap { $0 as? HabitLog }
+            .filter { calendar.isDate($0.date, inSameDayAs: start) && $0.habit?.id == habitID }
+            .count
+        return "\(tag)[rel=\(rel) fetch=\(fetchCount) pend=\(pending) fetchAnyHabit=\(fetched.count)]"
+    }
+}
+
 @Model
 final class HabitLog {
     var id: UUID

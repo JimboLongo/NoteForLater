@@ -356,7 +356,7 @@ struct HabitDetailView: View {
             // that already had one. It now goes through the same funnel as
             // every other write path; `logsByDay` remains only for
             // *display* (see `dayCell`).
-            let log = habit.logOrCreate(on: day, context: modelContext, calendar: calendar)
+            let log = habit.logOrCreate(on: day, context: modelContext, calendar: calendar, site: "HabitDetailView.setDay")
             log.setAll(to: status, timesPerDay: habit.timesPerDay)
         }
         refreshCoordinator.habitLogsChanged()

@@ -125,7 +125,7 @@ struct DailyDigestCheckInView: View {
     /// `ScheduledBlock.isCompleted`, if that occurrence made it onto
     /// today's calendar, in sync.
     private func toggleHabitOccurrence(habit: Habit, index: Int) {
-        let log = habit.logOrCreate(on: today, context: modelContext, calendar: calendar)
+        let log = habit.logOrCreate(on: today, context: modelContext, calendar: calendar, site: "DailyDigestCheckInView.toggleHabitOccurrence")
         log.setOccurrence(index, to: .complete)
         if let block = (habit.scheduledBlocks ?? []).first(where: {
             $0.habitOccurrenceIndex == index && calendar.isDate($0.date, inSameDayAs: today)
