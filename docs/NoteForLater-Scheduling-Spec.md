@@ -732,6 +732,107 @@ relationship-based reader beside a correct alternative is the same footgun
 shape as the six construction sites, and nothing stops a sixth caller
 picking the wrong one.
 
+### The nightly sweep overwrote completions — and what is unrecoverable
+
+`markUnresolvedHabitOccurrencesAsMissed()` runs on every Nightly Review and
+writes `.missed` to every occurrence it considers unresolved. Unlike the
+duplicates, **it overwrites in place**: `setOccurrence` clears all three
+arrays and sets one. There is no second row holding the original.
+
+**The live vector was the untimed loop.** It iterated
+`openHabitOccurrencesForReview`, which filtered `status == .none` read
+through the `habit.logs` relationship — so a habit completed but not yet
+saved read as unresolved and had its completion overwritten. Closed by
+making that function take a `ModelContext` (`4633633`).
+
+**The block loop was inert for real data, and the census is why we know.**
+It iterates `reviewableBlocks` where `block.habit != nil`, and an
+AM/Midday/PM occurrence never gets a `ScheduledBlock` at all. At the time
+of measurement **no habit had a `.specific` occurrence**, so there were
+zero habit blocks and that loop never fired. The same fact makes
+`AISchedulingService`'s already-resolved guard inert. Both were fixed
+anyway — they are correct fixes and become live the moment any habit gains
+a Specific-Time occurrence — but neither caused the observed damage.
+
+⚠️ **A flag/log drift census returning 0 was vacuous, not clean.** It
+scanned habit blocks; there were none. Any future drift census must report
+how many rows it actually examined, or a zero will be misread as agreement.
+
+#### Damage ceiling — bounded, not estimated
+
+Nothing distinguishes an overwritten completion from a genuine miss: the
+arrays are byte-identical. Three signals were checked and ruled out —
+`lastModified` (added later, defaults to `.distantPast` on all pre-existing
+rows), `ScheduledBlock.isCompleted` (the sweep only fired when it was
+false, so survivors carry no counter-evidence), and array shape (identical
+by construction). **So the number below is an upper bound the damage lives
+inside, never a count of it.**
+
+```
+MISSCEIL TOTAL habitDaysWithMiss=19  distinctDates=8  datesWith2PlusHabits=2
+  2026-08-18  9 habits   Brush Teeth, Clean Before Bed, Clean Litter Box,
+                         Daily Task, Evening Stretches, Exercise,
+                         Make Smoothie, Morning Stretches, Shower
+  2026-08-19  4 habits   Brush Teeth, Clean Litter Box, Exercise,
+                         Morning Stretches
+```
+
+**13 of the 19 sit on two dates; the remaining 6 are singletons on 6
+separate dates**, which is the shape of ordinary missed days. Both cluster
+dates are days of known heavy in-app activity — 08-18 is also the date of
+every duplicate row that carries a miss. That is why those two dates are
+suspect while the raw 19 is not: **9 of 11 habits marked missed in one
+night** fits one sweep run far better than it fits a real day.
+
+#### What the migration can and cannot recover
+
+Rule 1 ranks complete above missed, so where a duplicate row kept the
+completion the sweep destroyed, the merge **restores** it. The duplicates
+accidentally preserved data. On 08-18 that covers four habits: **Brush
+Teeth, Clean Litter Box, Exercise, Morning Stretches**.
+
+**The other five are permanently unrecoverable by any automatic means** —
+no duplicate row, no surviving completion, no distinguishing signal:
+
+- **Clean Before Bed** (2026-08-18)
+- **Daily Task** (2026-08-18)
+- **Evening Stretches** (2026-08-18)
+- **Make Smoothie** (2026-08-18)
+- **Shower** (2026-08-18)
+
+Hand-correction in the habit detail calendar is the only recovery path, and
+it only sticks now that the sweep reads the log (below) and `setDay` syncs
+block flags. **Do not go looking for a clever recovery — there is no
+signal to recover from.** This entry exists so that search is not repeated.
+
+#### The sweep now reads what it writes
+
+The block loop decided purely from `block.isCompleted` and never consulted
+the log, making it a log-writer that did not read logs. Any drift source —
+`HabitDetailView.setDay` wrote a whole day's log and touched no blocks —
+walked straight in. The flag check is now gone entirely and **the log is
+the sole authority in both directions**:
+
+- log `.complete`, flag stale `false` → **skipped** (was: overwritten)
+- log `.none`, flag stale `true` → **swept to `.missed`** (was: skipped
+  forever, leaving the occurrence permanently unresolved and counting as
+  neither complete nor missed in streak/rolling-30 math)
+
+One rule replaced two, and the guard reads through `Habit.logOrCreate`, so
+it sees pending inserts rather than reintroducing the same blindness a
+layer up. `HabitDetailView.setDay` now also syncs each occurrence's block
+flag, fixing the drift at source rather than only tolerating it.
+
+### `HabitLog.lastModified` defaults to `.distantPast` deliberately
+
+**Do not "tidy" this to `.now`.** Rows written before the field existed
+genuinely have unknown modification times, and `.distantPast` says so.
+Defaulting to `.now` would have every legacy row falsely claim it was
+written at migration time, destroying the only means of telling pre-fix
+data from post-fix data later. The repair migration cannot use the field
+for exactly this reason — it operates on rows that predate it — but every
+reconciliation after that can.
+
 ### The prior fix: why a read-site patch could not hold
 
 `HabitDetailView.deduplicateLogs()` already existed, and its doc comment

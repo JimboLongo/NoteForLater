@@ -358,6 +358,22 @@ struct HabitDetailView: View {
             // *display* (see `dayCell`).
             let log = habit.logOrCreate(on: day, context: modelContext, calendar: calendar, site: "HabitDetailView.setDay")
             log.setAll(to: status, timesPerDay: habit.timesPerDay)
+            // Keep each occurrence's own block flag in step with the log
+            // this just rewrote. Every other habit-completion path writes
+            // both together; this one wrote only the log, so marking a day
+            // here left that day's blocks stale — a checkmark contradicting
+            // the log, and (before the sweep started reading the log) a
+            // hand-backfilled completion that the next Nightly Review
+            // silently reverted to `.missed`.
+            //
+            // Currently latent rather than live: an AM/Midday/PM
+            // occurrence never gets a block at all (see
+            // `AISchedulingService.placeHabitsAndRecurringTasks`), so this
+            // only bites once a habit has a Specific-Time occurrence.
+            for block in habit.scheduledBlocks ?? []
+            where calendar.isDate(block.date, inSameDayAs: day) {
+                block.isCompleted = log.occurrenceStatus(block.habitOccurrenceIndex) == .complete
+            }
         }
         refreshCoordinator.habitLogsChanged()
     }

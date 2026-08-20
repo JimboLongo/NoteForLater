@@ -182,6 +182,68 @@ struct NoteForLaterApp: App {
             if habitHasViolation { violatingHabits += 1 }
         }
         DiagFileLog.write("INVARIANT TOTAL violatingHabits=\(violatingHabits) violatingLogs=\(violatingLogs)")
+
+        // Ceiling census for sweep damage. `markUnresolvedHabitOccurrences
+        // AsMissed` overwrites in place, so an overwritten completion is
+        // byte-identical to a genuine miss — nothing here distinguishes
+        // them. This is therefore an **upper bound**, not an estimate: the
+        // population sweep damage must live inside, never a count of it.
+        // Reported per-day-across-habits as well as per-habit, because the
+        // four known-damaged days all landed on one date (2026-08-18) —
+        // if misses cluster on a few dates, the damage is localized to
+        // those nights rather than smeared across the history.
+        var missDaysByDate: [Date: Set<String>] = [:]
+        var missDayCountByHabit: [String: Int] = [:]
+        var totalMissDays = 0
+        for habit in habits {
+            var daysWithMiss = Set<Date>()
+            for log in habit.logs ?? [] where !log.missedOccurrences.isEmpty {
+                daysWithMiss.insert(calendar.startOfDay(for: log.date))
+            }
+            guard !daysWithMiss.isEmpty else { continue }
+            missDayCountByHabit[habit.name] = daysWithMiss.count
+            totalMissDays += daysWithMiss.count
+            for day in daysWithMiss {
+                missDaysByDate[day, default: []].insert(habit.name)
+            }
+        }
+        for (name, count) in missDayCountByHabit.sorted(by: { $0.value > $1.value }) {
+            DiagFileLog.write("  MISSCEIL habit=\(name) daysWithMiss=\(count)")
+        }
+        // Dates where several habits are missed at once — the shape a
+        // single sweep run leaves behind.
+        let clustered = missDaysByDate.filter { $0.value.count >= 2 }.sorted { $0.key < $1.key }
+        for (day, names) in clustered {
+            let label = ISO8601DateFormatter().string(from: day).prefix(10)
+            DiagFileLog.write("  MISSCLUSTER \(label) habits=\(names.count) [\(names.sorted().joined(separator: " "))]")
+        }
+        DiagFileLog.write("MISSCEIL TOTAL habitDaysWithMiss=\(totalMissDays) distinctDates=\(missDaysByDate.count) datesWith2PlusHabits=\(clustered.count)")
+
+        // Flag/log drift census, both directions. Load-bearing for
+        // sequencing the sweep guard: dropping the `!block.isCompleted`
+        // check means DRIFT_FLAG_AHEAD rows (flag says complete, log says
+        // unresolved) stop being skipped and get marked `.missed` on the
+        // next sweep. DRIFT_LOG_AHEAD rows (log resolved, flag not) are
+        // the ones the old sweep was overwriting.
+        var flagAhead = 0      // block.isCompleted true, log .none
+        var logAhead = 0       // log resolved, block.isCompleted false
+        for habit in habits {
+            for block in habit.scheduledBlocks ?? [] {
+                let day = calendar.startOfDay(for: block.date)
+                let log = Habit.sameDayLogs(habitID: habit.id, day: day, context: context, calendar: calendar)
+                    .max(by: { $0.lastModified < $1.lastModified })
+                let status = log?.occurrenceStatus(block.habitOccurrenceIndex) ?? .none
+                let dayLabel = ISO8601DateFormatter().string(from: day).prefix(10)
+                if block.isCompleted, status == .none {
+                    flagAhead += 1
+                    DiagFileLog.write("  DRIFT_FLAG_AHEAD habit=\(habit.name) \(dayLabel) occ=\(block.habitOccurrenceIndex) flag=true log=none -> WILL BECOME MISSED")
+                } else if !block.isCompleted, status == .complete {
+                    logAhead += 1
+                    DiagFileLog.write("  DRIFT_LOG_AHEAD habit=\(habit.name) \(dayLabel) occ=\(block.habitOccurrenceIndex) flag=false log=complete -> was being overwritten")
+                }
+            }
+        }
+        DiagFileLog.write("DRIFT TOTAL flagAheadWillFlipToMissed=\(flagAhead) logAheadWasBeingOverwritten=\(logAhead)")
     }
 
     private static func backfillRemainingMinutesIfNeeded(container: ModelContainer) {

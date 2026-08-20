@@ -488,8 +488,29 @@ struct NightlyReviewView: View {
     /// than in the shared block-clearing helpers.
     private func markUnresolvedHabitOccurrencesAsMissed() {
         for block in reviewableBlocks {
-            guard let habit = block.habit, !block.isCompleted else { continue }
-            habitLog(for: habit, on: block.date).setOccurrence(block.habitOccurrenceIndex, to: .missed)
+            guard let habit = block.habit else { continue }
+            // The LOG is authoritative; `block.isCompleted` is a mirror
+            // written alongside it by every habit-completion path. This
+            // loop used to consult only the flag and never the log, so a
+            // log saying `.complete` got overwritten with `.missed`
+            // whenever the flag had drifted — e.g. `HabitDetailView
+            // .setDay`, which writes the log for a whole day and never
+            // touches any block.
+            //
+            // Reading the log also closes the converse (flag `true`, log
+            // `.none`, reachable by cycling a day back to unselected in
+            // that same calendar): the old flag check skipped those, and
+            // nothing else ever swept them, so the occurrence stayed
+            // unresolved forever and counted as neither complete nor
+            // missed in streak/rolling-30 math.
+            //
+            // `habitLog(for:on:)` routes through `Habit.logOrCreate`,
+            // which FETCHES rather than traversing `habit.logs`, so this
+            // sees a pending unsaved completion. Reading it any other way
+            // would reintroduce the same blindness one layer up.
+            let log = habitLog(for: habit, on: block.date)
+            guard log.occurrenceStatus(block.habitOccurrenceIndex) == .none else { continue }
+            log.setOccurrence(block.habitOccurrenceIndex, to: .missed)
         }
         for occurrence in openHabitOccurrencesForReview where !occurrence.isCompleted {
             habitLog(for: occurrence.habit, on: occurrence.targetTime).setOccurrence(occurrence.index, to: .missed)

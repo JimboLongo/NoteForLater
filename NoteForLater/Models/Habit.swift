@@ -146,28 +146,10 @@ final class Habit {
         }
     }
 
-    /// ⚠️ `logs` is an **unordered** to-many relationship —
-    /// `@Relationship` promises nothing about read-back order, so this
-    /// scans from the end as an *empirical bet*, not because any ordering
-    /// is guaranteed. Measured on device across 9 habits (up to 53 logs
-    /// each): today's log landed 0–3 positions from the end every time,
-    /// including index 50–52 of 53. Forward iteration walked the whole
-    /// history to find the same entry. If that clustering ever stops
-    /// holding, this quietly degrades to a full scan — it stays correct
-    /// either way, it just stops being fast.
-    ///
-    /// ⚠️ `.first` vs `.last` is **not** a no-op in the presence of
-    /// duplicates, and duplicates are real: same-day `HabitLog`s exist in
-    /// live data today (see the Open Decisions entry in
-    /// `docs/NoteForLater-Scheduling-Spec.md`). Nothing enforces
-    /// one-per-day. `.last` is chosen deliberately — the most recently
-    /// appended log for a day is the one most recently written to, so a
-    /// duplicated day reads its newest state rather than a stale earlier
-    /// row. That is damage control, not a fix.
     /// The single entry point for "get this habit's log for this day,
     /// creating it if absent" — every write path routes through here.
     ///
-    /// **Why this cannot use `log(on:)`.** A `HabitLog` that has been
+    /// **Why this cannot traverse the relationship.** A `HabitLog` that has been
     /// `insert`ed but not yet saved is *not* reflected in the `logs`
     /// inverse relationship. Measured on device: across bursts of 4, 6 and
     /// 18 taps, `habit.logs` reported **zero** same-day logs before every
@@ -500,7 +482,7 @@ struct HabitStats {
 /// 0..<timesPerDay is in at most one of `completedOccurrences`,
 /// `missedOccurrences`, or `excusedOccurrences` — absence from all three
 /// means it's untouched. Tapping an occurrence's circle cycles it through
-/// none → complete → missed → excused → none (see `cycleOccurrence`); the
+/// none → complete → missed → excused → none (see `HabitDetailView.cycleDay`); the
 /// day-level status shown elsewhere is rolled up from these by `Habit.status`.
 /// TEMP instrumentation — duplicate-`HabitLog` investigation. Every one of
 /// the six `HabitLog(habit:date:)` construction sites calls this right
@@ -611,10 +593,6 @@ final class HabitLog {
         if missedOccurrences.contains(index) { return .missed }
         if excusedOccurrences.contains(index) { return .excused }
         return .none
-    }
-
-    func cycleOccurrence(_ index: Int) {
-        setOccurrence(index, to: occurrenceStatus(index).next)
     }
 
     func setOccurrence(_ index: Int, to status: OccurrenceStatus) {
