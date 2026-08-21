@@ -799,14 +799,29 @@ about **pending, unsaved** completions — a completion saved for hours is
 visible through the relationship *and* through a fetch, so neither the old
 blind code nor the fixed code would ever mark it missed.
 
-Structurally, the untimed path cannot produce a `PROTECTED` line for a
-saved completion at all: `openHabitOccurrencesForReview` filters to
-`status == .none` **before** the loop runs, so completed occurrences never
-enter the population. **The real protection in that path is the filter, not
-the guard**, and the filter is what was fixed by making that function take
-a `ModelContext`. The one `PROTECTED` line ever observed appeared only
-because the occurrence was completed *inside* the review, which put it in
-`alsoInclude` and kept it visible.
+#### ⚠️ What actually protects the untimed path — read this before touching either
+
+**The untimed (AM/Midday/PM) path is protected by the
+`status == .none` filter in `openHabitOccurrencesForReview`, NOT by the
+guard inside the sweep loop.** That filter runs *before* the loop, so a
+completed occurrence never enters the population at all — which is also why
+the untimed path can never produce a `PROTECTED` line for a saved
+completion. The filter is what was fixed, in `4633633`, by making that
+function take a `ModelContext` so it reads through a fetch instead of the
+`habit.logs` relationship. **Weakening or removing that filter reopens the
+corruption regardless of what the guard says.**
+
+**The guard's value is on the block (Specific-Time) path**, where there is
+no equivalent filter: that loop iterates `reviewableBlocks` directly and
+decides per block. It is **currently inert** — no habit in the store has a
+Specific-Time occurrence, so there are zero habit blocks — but it becomes
+live the moment any habit gets one, and at that point the guard is the only
+thing standing between a completed occurrence and a `.missed` write.
+
+Do not read "the guard passed" as "the untimed case is held by the guard."
+The one `PROTECTED` line ever observed came from an occurrence completed
+*inside* the review, which put it in `alsoInclude` and kept it visible past
+the filter — a special case, not the normal protection.
 
 The 9pm run remains useful as a plain regression check — two `MARK`s on
 genuinely unresolved occurrences, a miss census that rose by exactly two,
@@ -814,11 +829,26 @@ and every one of seven completed occurrences untouched, reconciled per
 occurrence index rather than per habit. It is recorded as that, not as
 closing a gap.
 
-⚠️ Also learned there: the temporary per-occurrence sweep lines rendered
-dates via `ISO8601DateFormatter`, which emits **UTC** — a 9pm EDT
-occurrence logged as the following day. `SWEEP ENTER`'s `reviewDate` is
-correct, but any future date rendered into a diagnostic needs an explicit
-local-timezone formatter.
+#### ⚠️ Diagnostic dates were rendered in UTC — audited, no spec date affected
+
+The temporary per-occurrence sweep lines formatted dates with
+`ISO8601DateFormatter`, which emits **UTC**. A 9pm EDT occurrence was
+therefore logged as *the following day* (`Clean Before Bed 2026-08-21` for
+a 2026-08-20 occurrence).
+
+**Audited rather than assumed:** every date cited in these entries —
+`2026-08-18`, `2026-08-19`, `2026-08-30` — came from census/audit lines
+that rendered `calendar.startOfDay(...)`, not a time-of-day. In US Eastern
+(UTC-4) local midnight is 04:00 UTC the same day, so the date part is
+unaffected. No figure here needs re-deriving. The one corrupted date
+observed was never carried into this document.
+
+⚠️ **The safety is timezone-dependent, not structural.** `startOfDay`
+rendered as UTC is only correct west of Greenwich; at UTC+X the same code
+renders local midnight as the *previous* day. Any future diagnostic that
+prints a date must use an explicit local-timezone formatter rather than
+relying on this happening to work here. `SWEEP ENTER`'s `reviewDate` is
+`startOfDay`-based and unaffected.
 
 ### `SWEEP ENTER` is permanent instrumentation — do not strip it
 
@@ -908,6 +938,33 @@ this took several attempts to test at all:
   the previous 60 days** — every applicable past day already had one.
 
 Both were ultimately exercised with a purpose-made, backdated habit.
+
+### Deferred deliberately: immediate tap feedback on habit rows
+
+**Open, not forgotten, and not abandoned as unnecessary.**
+
+The original plan included giving a habit row immediate visual
+acknowledgement on tap — the rows are `Button` + `.buttonStyle(.plain)`
+inside a `ScrollView`, so they show no highlight and the button defers its
+action pending drag disambiguation.
+
+It was never done, because the investigation established that **the taps
+were never actually being dropped**. Twenty rapid taps registered
+cleanly, and the "unacknowledged tap" was the completion landing in a
+`HabitLog` row that nothing read back — data corruption presenting as
+latency (see the framing note above). Adding feedback would have masked the
+corruption rather than fixed it.
+
+Whether it is still worth doing is now a genuine UX question rather than a
+bug fix, and it cannot be answered from the data: it depends on whether the
+rows still feel unresponsive **now that taps actually take effect**. That
+needs a few days of ordinary use to judge, which is why it is parked here
+rather than closed.
+
+If it is picked up: keep the checkmark/fade/strikethrough semantics
+described at `DayTimelineGridView.habitOccurrenceSection` — an
+already-complete row stays visible, faded and struck through, rather than
+disappearing on tap.
 
 ### Named rule: tests whose failure mode is silence
 
