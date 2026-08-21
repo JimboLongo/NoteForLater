@@ -782,6 +782,44 @@ relationship-based reader beside a correct alternative is the same footgun
 shape as the six construction sites, and nothing stops a sixth caller
 picking the wrong one.
 
+### The "saved-completion gap" was never a real gap
+
+Recorded because it cost a deliberately-timed test to establish, and
+someone will otherwise re-derive the same worry.
+
+After the first sweep-guard verification, the saved-completion case was
+flagged as untested: the run happened at 10:14am, and
+`openHabitOccurrencesForReview` only considers occurrences already due
+(`targetTime < cutoff`; AM=7am, Midday=noon, PM=9pm), so two habits that
+were completed **and saved** were never considered. A second review was run
+after 9pm specifically to cover them.
+
+**It closed nothing, because the gap did not exist.** The bug was only ever
+about **pending, unsaved** completions — a completion saved for hours is
+visible through the relationship *and* through a fetch, so neither the old
+blind code nor the fixed code would ever mark it missed.
+
+Structurally, the untimed path cannot produce a `PROTECTED` line for a
+saved completion at all: `openHabitOccurrencesForReview` filters to
+`status == .none` **before** the loop runs, so completed occurrences never
+enter the population. **The real protection in that path is the filter, not
+the guard**, and the filter is what was fixed by making that function take
+a `ModelContext`. The one `PROTECTED` line ever observed appeared only
+because the occurrence was completed *inside* the review, which put it in
+`alsoInclude` and kept it visible.
+
+The 9pm run remains useful as a plain regression check — two `MARK`s on
+genuinely unresolved occurrences, a miss census that rose by exactly two,
+and every one of seven completed occurrences untouched, reconciled per
+occurrence index rather than per habit. It is recorded as that, not as
+closing a gap.
+
+⚠️ Also learned there: the temporary per-occurrence sweep lines rendered
+dates via `ISO8601DateFormatter`, which emits **UTC** — a 9pm EDT
+occurrence logged as the following day. `SWEEP ENTER`'s `reviewDate` is
+correct, but any future date rendered into a diagnostic needs an explicit
+local-timezone formatter.
+
 ### `SWEEP ENTER` is permanent instrumentation — do not strip it
 
 `markUnresolvedHabitOccurrencesAsMissed` overwrites real user data once a

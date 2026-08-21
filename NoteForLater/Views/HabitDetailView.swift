@@ -356,7 +356,7 @@ struct HabitDetailView: View {
             // that already had one. It now goes through the same funnel as
             // every other write path; `logsByDay` remains only for
             // *display* (see `dayCell`).
-            let log = habit.logOrCreate(on: day, context: modelContext, calendar: calendar, site: "HabitDetailView.setDay")
+            let log = habit.logOrCreate(on: day, context: modelContext, calendar: calendar)
             log.setAll(to: status, timesPerDay: habit.timesPerDay)
             // Keep each occurrence's own block flag in step with the log
             // this just rewrote. Every other habit-completion path writes
