@@ -140,6 +140,7 @@ struct TaskEditSnapshot: Equatable {
     let recurrenceIntervalCount: Int
     let recurrenceUnitRaw: String
     let recurrenceEndDate: Date?
+    let startDate: Date?
 
     init(_ task: TaskItem) {
         title = task.title
@@ -164,6 +165,7 @@ struct TaskEditSnapshot: Equatable {
         recurrenceIntervalCount = task.recurrenceIntervalCount
         recurrenceUnitRaw = task.recurrenceUnitRaw
         recurrenceEndDate = task.recurrenceEndDate
+        startDate = task.startDate
     }
 
     func restore(into task: TaskItem) {
@@ -190,6 +192,7 @@ struct TaskEditSnapshot: Equatable {
         task.recurrenceIntervalCount = recurrenceIntervalCount
         task.recurrenceUnitRaw = recurrenceUnitRaw
         task.recurrenceEndDate = recurrenceEndDate
+        task.startDate = startDate
         // A duration edit already live-resized any scheduled block behind
         // this task (see `TaskItem.syncScheduledBlockDuration`) — restoring
         // the old `estimatedMinutes` here without also re-syncing would

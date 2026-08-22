@@ -2023,4 +2023,31 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertFalse(withoutInbox.contains { $0.id == inboxTask.id }, "includingInbox: false must exclude unsorted tasks")
     }
 
+    // MARK: - TaskEditSnapshot — startDate
+
+    /// `startDate` is edited on the card (Start Date row, and the
+    /// "Recurring?" toggle) same as every other field the snapshot exists
+    /// to protect. `b30d2ba` added the four recurrence fields but missed
+    /// it — the consequence was Cancel not reverting a startDate edit,
+    /// `hasChanges` reading it as untouched (button showed "Skip" instead
+    /// of "Save Changes"), and `advance()` never marking the schedule
+    /// dirty. `Equatable` is synthesized, so once the field exists on the
+    /// struct a mutation is visible for free.
+    func test_taskEditSnapshot_capturesAndRestoresStartDate() {
+        let shelf = Shelf(name: "S")
+        let task = TaskItem(title: "T", shelf: shelf, estimatedMinutes: 30)
+        let originalStart = day(2026, 1, 5)
+        task.startDate = originalStart
+
+        let original = TaskEditSnapshot(task)
+
+        task.startDate = day(2026, 2, 1)
+        let mutated = TaskEditSnapshot(task)
+
+        XCTAssertNotEqual(mutated, original, "a startDate-only edit must be visible to hasChanges")
+
+        original.restore(into: task)
+        XCTAssertEqual(task.startDate, originalStart, "Cancel must put the old startDate back")
+    }
+
 }
