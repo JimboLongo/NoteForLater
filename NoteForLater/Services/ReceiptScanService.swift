@@ -12,6 +12,34 @@ final class ReceiptScanService {
     var errorMessage: String?
 
     func recognizeLines(in image: UIImage) async -> [String] {
+        await recognizeTextLines(in: image).map(\.text)
+    }
+
+    /// One recognized line of text plus where it sits in the image —
+    /// `boundingBox` is Vision's own normalized, bottom-left-origin
+    /// coordinate space (0...1 on both axes). That's deliberately the
+    /// same convention `AVCaptureVideoPreviewLayer
+    /// .layerRectConverted(fromMetadataOutputRect:)` expects, so
+    /// `ReceiptOCRScannerView` can hand this straight through to draw a
+    /// correctly-placed overlay box with no extra conversion math of its
+    /// own — it still has to get `orientation` right first, see below.
+    struct RecognizedTextLine {
+        let text: String
+        let boundingBox: CGRect
+    }
+
+    /// `orientation` matters for anything beyond a `UIImage` whose
+    /// `.cgImage` already reflects the *displayed* orientation (a photo
+    /// from `UIImagePickerController`/`PhotosPicker`, which is what
+    /// `recognizeLines`'s callers use, and why it can leave this at the
+    /// default `.up`). A live camera frame converted straight from a
+    /// `CMSampleBuffer` is raw sensor data — for the back camera held in
+    /// portrait, that's rotated 90° from what's on screen — so
+    /// `ReceiptOCRScannerView` passes `.right` explicitly. Getting this
+    /// wrong doesn't necessarily break text recognition itself (Vision
+    /// tolerates some rotation), but it does put `boundingBox` in visibly
+    /// the wrong place once something tries to draw it.
+    func recognizeTextLines(in image: UIImage, orientation: CGImagePropertyOrientation = .up) async -> [RecognizedTextLine] {
         guard let cgImage = image.cgImage else {
             errorMessage = "Couldn't read that photo."
             return []
@@ -29,13 +57,16 @@ final class ReceiptScanService {
                     return
                 }
                 let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
-                let lines = observations.compactMap { $0.topCandidates(1).first?.string }
+                let lines = observations.compactMap { observation -> RecognizedTextLine? in
+                    guard let text = observation.topCandidates(1).first?.string else { return nil }
+                    return RecognizedTextLine(text: text, boundingBox: observation.boundingBox)
+                }
                 continuation.resume(returning: lines)
             }
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = true
 
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:])
             do {
                 try handler.perform([request])
             } catch {

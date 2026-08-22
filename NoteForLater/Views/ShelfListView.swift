@@ -18,7 +18,7 @@ struct ShelfListView: View {
     @Query(sort: \Shelf.sortOrder) private var allShelves: [Shelf]
     @State private var draftTitle = ""
     @State private var speechCapture = SpeechCaptureService()
-    @State private var isShowingReceiptImporter = false
+    @State private var isShowingReceiptScanner = false
     @State private var isShowingBarcodeScanner = false
     @State private var selectedTask: TaskItem?
     @State private var scrollProxy: ScrollViewProxy?
@@ -153,7 +153,7 @@ struct ShelfListView: View {
                 }
                 .padding(.trailing, 4)
                 Button {
-                    isShowingReceiptImporter = true
+                    isShowingReceiptScanner = true
                 } label: {
                     Image(systemName: "camera.viewfinder")
                 }
@@ -168,8 +168,11 @@ struct ShelfListView: View {
         .padding(.horizontal)
         .padding(.top, 24)
         .padding(.bottom, 4)
-        .sheet(isPresented: $isShowingReceiptImporter) {
-            ReceiptImportView(shelf: shelf)
+        .fullScreenCover(isPresented: $isShowingReceiptScanner) {
+            // Live OCR scanning is the default now — the original
+            // single-photo flow is still reachable, just one tap further
+            // in, via that screen's own "Import from Photo" menu item.
+            ReceiptOCRScannerView(shelf: shelf)
         }
         .fullScreenCover(isPresented: $isShowingBarcodeScanner) {
             BarcodeScannerView(shelf: shelf)
