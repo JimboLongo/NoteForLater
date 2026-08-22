@@ -8,9 +8,20 @@ import PhotosUI
 /// CSV column, so (unlike the file-based imports elsewhere in the app)
 /// this shows a review step before anything is inserted.
 private struct ReceiptCandidate: Identifiable {
+    /// Where `name` actually came from — shown as a small badge so a
+    /// UPC-sourced name (usually cleaner than OCR text) is easy to tell
+    /// apart from a line-parsed one at a glance, and so a wrong-looking
+    /// name is easier to debug: was it a bad OCR read, or a bad barcode
+    /// lookup?
+    enum Source {
+        case upcLookup
+        case lineParsing
+    }
+
     let id = UUID()
     var name: String
     var isSelected: Bool
+    var source: Source
 }
 
 /// Take a photo of a grocery receipt, OCR it, and add the checked lines to
@@ -56,7 +67,14 @@ struct ReceiptImportView: View {
                         Section {
                             ForEach($candidates) { $candidate in
                                 Toggle(isOn: $candidate.isSelected) {
-                                    TextField("Item", text: $candidate.name)
+                                    HStack {
+                                        TextField("Item", text: $candidate.name)
+                                        if candidate.source == .upcLookup {
+                                            Image(systemName: "barcode.viewfinder")
+                                                .foregroundStyle(.secondary)
+                                                .accessibilityLabel("Found via barcode lookup")
+                                        }
+                                    }
                                 }
                             }
                             .onDelete { offsets in
@@ -64,7 +82,7 @@ struct ReceiptImportView: View {
                             }
                         } footer: {
                             if !candidates.isEmpty {
-                                Text("Uncheck anything that isn't actually an item — receipts OCR imperfectly.")
+                                Text("Uncheck anything that isn't actually an item — receipts OCR imperfectly. \(Image(systemName: "barcode.viewfinder")) marks a name looked up from a barcode instead of read off the receipt text.")
                             }
                         }
                     }
@@ -127,9 +145,44 @@ struct ReceiptImportView: View {
 
     private func scan(_ image: UIImage) async {
         let lines = await scanService.recognizeLines(in: image)
-        let items = ReceiptLineParser.candidateItems(from: lines)
-        candidates = items.map { ReceiptCandidate(name: $0, isSelected: true) }
+        candidates = await Self.resolveCandidates(from: lines)
         hasScanned = true
+    }
+
+    /// Resolves every OCR'd line concurrently — one Open Food Facts lookup
+    /// in flight per line that has a UPC-shaped digit run — then re-sorts
+    /// back into the receipt's own original line order. `withTaskGroup`'s
+    /// completion order isn't submission order, and a review list that
+    /// doesn't match the physical receipt top-to-bottom would be
+    /// confusing to check against it.
+    private static func resolveCandidates(from lines: [String]) async -> [ReceiptCandidate] {
+        await withTaskGroup(of: (Int, ReceiptCandidate?).self) { group in
+            for (index, line) in lines.enumerated() {
+                group.addTask { (index, await resolveCandidate(from: line)) }
+            }
+            var indexed: [(index: Int, candidate: ReceiptCandidate)] = []
+            for await (index, candidate) in group {
+                if let candidate {
+                    indexed.append((index, candidate))
+                }
+            }
+            return indexed.sorted { $0.index < $1.index }.map(\.candidate)
+        }
+    }
+
+    /// One line's UPC-then-line-parsing fallback: try
+    /// `ReceiptLineParser.upc(in:)`, then a lookup on it — only reach for
+    /// `cleanedItemName` (today's behavior, unchanged) when either comes
+    /// back empty. `lookupProductName` never throws, so "no UPC found,"
+    /// "UPC found but not a real product," and "network/timeout/JSON
+    /// failure" all take the same fallback path with no special-casing
+    /// needed here.
+    private static func resolveCandidate(from line: String) async -> ReceiptCandidate? {
+        if let upc = ReceiptLineParser.upc(in: line), let productName = await OpenFoodFactsService.lookupProductName(upc: upc) {
+            return ReceiptCandidate(name: productName, isSelected: true, source: .upcLookup)
+        }
+        guard let name = ReceiptLineParser.cleanedItemName(from: line) else { return nil }
+        return ReceiptCandidate(name: name, isSelected: true, source: .lineParsing)
     }
 
     private func addSelectedItems() {

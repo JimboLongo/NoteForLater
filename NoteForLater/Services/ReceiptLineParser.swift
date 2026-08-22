@@ -46,4 +46,23 @@ enum ReceiptLineParser {
         guard line.count > 1, line.contains(where: { $0.isLetter }) else { return nil }
         return line
     }
+
+    /// The first UPC-length digit run anywhere in `rawLine`, or `nil` if
+    /// none exists — the digit run `cleanedItemName` above strips as noise
+    /// from the *start* of a line, kept here instead so the caller can try
+    /// an Open Food Facts lookup before falling back to that stripping.
+    /// 8–12 digits covers UPC-A (12) and EAN-8 (8); a 13-digit EAN-13
+    /// barcode is out of this range by design — it falls through to the
+    /// usual line-parsing path instead of a lookup, same as any other line
+    /// with no matching digit run.
+    ///
+    /// Searched across the whole line, not just a leading anchor —
+    /// `cleanedItemName`'s stripping regex only looks at the start because
+    /// that's the one shape it needs to remove, but a printed barcode can
+    /// sit anywhere in a line (or alone on its own line) depending on the
+    /// receipt format.
+    static func upc(in rawLine: String) -> String? {
+        guard let range = rawLine.range(of: #"\b\d{8,12}\b"#, options: .regularExpression) else { return nil }
+        return String(rawLine[range])
+    }
 }

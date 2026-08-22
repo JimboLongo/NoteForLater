@@ -7,11 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		05E9FEF2A09F4F60BD0F50C8 /* SchedulingEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5013E3FBE3449FA3A0C911 /* SchedulingEngineTests.swift */; };
 		11C9C180B9449F181FC4A6EA /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1FE8D30E50874F1CFBC6C2DA /* Foundation.framework */; };
+		5020DD4813CD545554230040 /* OpenFoodFactsServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09BD699B348D80CB6806E2B9 /* OpenFoodFactsServiceTests.swift */; };
+		7CC5EBE6035848FA82FDB754 /* FakeCalendarService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0445FFD6E3084A6D9EF502B1 /* FakeCalendarService.swift */; };
 		9E6F11BB107A4A089B67FD31 /* HabitRollingStatsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3F965C18B2385814DF25BDD /* HabitRollingStatsTests.swift */; };
 		AC5AC49498EDDFFFE2E161D4 /* ReceiptLineParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99D88D01BE7CD604EA3CD89C /* ReceiptLineParserTests.swift */; };
-		7CC5EBE6035848FA82FDB754 /* FakeCalendarService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0445FFD6E3084A6D9EF502B1 /* FakeCalendarService.swift */; };
-		05E9FEF2A09F4F60BD0F50C8 /* SchedulingEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5013E3FBE3449FA3A0C911 /* SchedulingEngineTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -25,18 +26,21 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		0445FFD6E3084A6D9EF502B1 /* FakeCalendarService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FakeCalendarService.swift; sourceTree = "<group>"; };
+		09BD699B348D80CB6806E2B9 /* OpenFoodFactsServiceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OpenFoodFactsServiceTests.swift; sourceTree = "<group>"; };
 		1FE8D30E50874F1CFBC6C2DA /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		356652DFD867DA051EA36E9A /* NoteForLaterTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NoteForLaterTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		44CB4354301D3EC300B83C83 /* NoteForLater.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NoteForLater.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		99D88D01BE7CD604EA3CD89C /* ReceiptLineParserTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ReceiptLineParserTests.swift; sourceTree = "<group>"; };
 		A3F965C18B2385814DF25BDD /* HabitRollingStatsTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HabitRollingStatsTests.swift; sourceTree = "<group>"; };
-		0445FFD6E3084A6D9EF502B1 /* FakeCalendarService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FakeCalendarService.swift; sourceTree = "<group>"; };
 		DA5013E3FBE3449FA3A0C911 /* SchedulingEngineTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SchedulingEngineTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		44CB4356301D3EC300B83C83 /* NoteForLater */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = NoteForLater;
 			sourceTree = "<group>";
 		};
@@ -87,6 +91,7 @@
 				99D88D01BE7CD604EA3CD89C /* ReceiptLineParserTests.swift */,
 				0445FFD6E3084A6D9EF502B1 /* FakeCalendarService.swift */,
 				DA5013E3FBE3449FA3A0C911 /* SchedulingEngineTests.swift */,
+				09BD699B348D80CB6806E2B9 /* OpenFoodFactsServiceTests.swift */,
 			);
 			path = NoteForLaterTests;
 			sourceTree = "<group>";
@@ -216,6 +221,7 @@
 				AC5AC49498EDDFFFE2E161D4 /* ReceiptLineParserTests.swift in Sources */,
 				7CC5EBE6035848FA82FDB754 /* FakeCalendarService.swift in Sources */,
 				05E9FEF2A09F4F60BD0F50C8 /* SchedulingEngineTests.swift in Sources */,
+				5020DD4813CD545554230040 /* OpenFoodFactsServiceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
