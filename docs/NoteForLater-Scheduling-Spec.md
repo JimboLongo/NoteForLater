@@ -483,7 +483,7 @@ Sorted by §5.1 via `AISchedulingService.taskOrdering` (now `static`, was `priva
 Out of scope **for phases 1–7**. Four of these have since been promoted to prioritized follow-on work — see §10 Follow-On Work below, which supersedes the middle four bullets here.
 
 - ~~Raising or removing the 30-day horizon (§6.4)~~ — **resolved** in Phase 5 (`e18ef4e`) by stall detection rather than a horizon change; see Open Decisions for the tradeoff it introduced
-- Batching `fetchFreeSlots` into a single ranged `freeBusy` call → **now Follow-On #1**
+- ~~Batching `fetchFreeSlots` into a single ranged `freeBusy` call~~ — **resolved**, `493b236`/`176ab46` (2026-08-18); see §6.4 for the batching, the 44-day prefetch horizon it enabled, and the now-unreachable per-day fallback
 - Real Claude API scheduling → **now Follow-On #2**, substantially reframed
 - Background regeneration / `BGAppRefreshTask` → **now Follow-On #3**
 - Splitting `DayTimelineGridView.swift` / `NightlyReviewView.swift` → **now Follow-On #4**
@@ -493,15 +493,11 @@ Out of scope **for phases 1–7**. Four of these have since been promoted to pri
 
 ## §10 Follow-On Work
 
-Priority order. #3 depends on #1; #1, #2, #4, and #5 are independent of each other.
+Priority order. #1 is done, which discharges #3's dependency on it — #3 is now unblocked. #2, #4, and #5 were always independent of the rest.
 
-### 1. Batch `fetchFreeSlots` into one ranged call
+### 1. Batch `fetchFreeSlots` into one ranged call — ✅ done
 
-First because it's nearly free. `GoogleCalendarService.fetchBusyRanges(from:to:)` (`CalendarService.swift:218`) is **already** range-based — it POSTs a single `freeBusy` query for an arbitrary span. What's missing is only that `fetchFreeSlots(for:)` (`CalendarService.swift:84`) calls it one day at a time, then does the busy→free subtraction locally.
-
-Add a `fetchFreeSlots(from:to:)` that makes **one** `fetchBusyRanges` call across the whole walk span and slices per-day locally, applying `workingHoursRange(for:)` per day (it varies by day, so the slicing can't be a naive even split). The existing per-day method stays as a thin wrapper for callers that genuinely want one day.
-
-Why it matters more now than when it was first deferred: Phase 5's dirty flush escalates to `regenerateFromNow` on **every** Calendar appear after an edit, and that walk runs up to `taskStallThresholdDays` (14) task days plus `habitPopulationDays` (30) habit days — each currently its own network round-trip. `FakeCalendarService.fetchFreeSlotsCallCount` already exists in the test suite and asserts exactly this count, so the batching work has a ready-made regression check.
+Shipped 2026-08-18: `493b236` added the ranged `fetchFreeSlots(from:to:)` to `CalendarServiceProtocol` and `GoogleCalendarService`; `176ab46` wired it into both scheduling walks via `prefetchFreeSlots`, with the existing per-day `fetchFreeSlots(for:)` retained as the fallback beyond the prefetch window. Full detail — the 44-day prefetch-horizon derivation, why that makes the per-day fallback unreachable from these two walks, and `FakeCalendarService.fetchFreeSlotsCallCount`'s regression check — lives in §6.4; not duplicated here.
 
 ### 2. Claude API for duration and divisibility estimation
 
