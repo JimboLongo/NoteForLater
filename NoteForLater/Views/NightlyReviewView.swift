@@ -45,14 +45,19 @@ struct NightlyReviewView: View {
     /// checking a task off leaves it in the list, strikethrough, instead of
     /// yanking it out from under the user mid-review.
     @State private var twoMinuteReviewTaskIDs: Set<UUID> = []
-    /// Every habit occurrence id toggled complete during the Today step —
-    /// passed as `alsoInclude` to `openHabitOccurrencesForReview` so
-    /// checking one off leaves it in the list, faded and struck through,
-    /// the same reasoning as `twoMinuteReviewTaskIDs` just above (and
-    /// `ScheduleReviewView`'s own copy of this same pattern) instead of it
-    /// vanishing the instant its status leaves `.none`. Reset whenever a
-    /// different day gets picked, since it's meaningless for any other one.
-    @State private var pastReviewCompletedHabitOccurrenceIDs = Set<String>()
+    /// Taps during the Today step are visual-only — this is what actually
+    /// makes them reversible before Next. Keyed by `ReviewItem.id` (already
+    /// unifies a block's and a habit occurrence's id into one String), so
+    /// one set stages both kinds. Membership means "flip the real model
+    /// once when Next commits" — see `advance()`'s `next == .inbox` branch,
+    /// which replays this set against `reviewItems` and clears it
+    /// afterward. Reset whenever a different day gets picked, same as
+    /// `twoMinuteReviewTaskIDs`, since a stale entry from another day's
+    /// `reviewItems` would never match anything real here anyway.
+    @State private var stagedTodayToggleIDs = Set<String>()
+    /// Same idea as `stagedTodayToggleIDs`, for the 2-Minute Tasks step —
+    /// committed in `advance()`'s `next == .tomorrow` branch instead.
+    @State private var stagedTwoMinuteToggleIDs = Set<UUID>()
     /// Drives the Plan step's Replace-Task sheet — same
     /// `ReplacementPickerSheet` the regular calendar view uses (see
     /// `ScheduleReviewView`).
@@ -213,9 +218,39 @@ struct NightlyReviewView: View {
         }
         if next == .twoMinuteTasks {
             let pending = (twoMinuteShelf?.tasks ?? []).filter { !$0.isCompleted && $0.isEligibleToStart(on: reviewDate) }
-            twoMinuteReviewTaskIDs = Set(pending.map(\.id))
+            // Also pick up anything completed earlier today (or since the
+            // last review closed), before this step's own snapshot: the
+            // old `!$0.isCompleted`-only filter hid these permanently —
+            // there's no later chance to see them, since a completed
+            // 2-minute task never gets a block `reviewableBlocks` could
+            // have shown it through instead.
+            let since = NightlyReviewCompletionState.shared.lastClosedReviewDay ?? .distantPast
+            let completedRecords = (try? modelContext.fetch(FetchDescriptor<TaskCompletionRecord>(
+                predicate: #Predicate { $0.completedAt >= since }
+            ))) ?? []
+            let completedTaskIDs = Set(completedRecords.map(\.taskID))
+            let recentlyCompleted = (twoMinuteShelf?.tasks ?? []).filter { completedTaskIDs.contains($0.id) }
+            twoMinuteReviewTaskIDs = Set(pending.map(\.id) + recentlyCompleted.map(\.id))
+            stagedTwoMinuteToggleIDs = []
         }
         if next == .inbox, let todayViewModel, let tomorrowViewModel {
+            // Today-step taps are visual-only (see `stagedTodayToggleIDs`)
+            // until right here — replay every staged toggle against the
+            // still-real, still-unwritten model, then clear the set. Must
+            // run before `reviewedBlocks` is captured just below, since
+            // that split (and the missed-habit sweep after it) both read
+            // real completion state.
+            for item in reviewItems where stagedTodayToggleIDs.contains(item.id) {
+                switch item {
+                case .block(let block):
+                    todayViewModel.toggleComplete(block)
+                case .habit(let occurrence):
+                    toggleHabitReviewOccurrence(habit: occurrence.habit, index: occurrence.index, isCompleted: occurrence.isCompleted, day: occurrence.targetTime)
+                case .completedTask:
+                    break
+                }
+            }
+            stagedTodayToggleIDs = []
             // §7.2: this whole batch runs "on Next from the Today step,"
             // i.e. right here on the today→inbox transition, not deferred
             // all the way to the tomorrow handoff below. Freeze exactly
@@ -297,6 +332,17 @@ struct NightlyReviewView: View {
             }
         }
         if next == .tomorrow, let tomorrowViewModel {
+            // Two-Minute-Tasks-step taps are visual-only too, same reasons
+            // as the Today step's own staging — commit them here, on the
+            // way out. `setCompleted` flips relative to whatever's still
+            // really there, same as the Today-step commit above, and
+            // (unchanged from before this was staged) marks the schedule
+            // dirty so the check just below actually re-walks.
+            for task in twoMinuteReviewTasks where stagedTwoMinuteToggleIDs.contains(task.id) {
+                task.setCompleted(!task.isCompleted, in: modelContext)
+                ScheduleDirtyState.shared.isDirty = true
+            }
+            stagedTwoMinuteToggleIDs = []
             // The Inbox step just left can route tasks onto a shelf via
             // `TaskReviewCard.advance()`, which already sets
             // `ScheduleDirtyState.shared.isDirty` (see §6.1) — so this
@@ -380,7 +426,7 @@ struct NightlyReviewView: View {
             }
         }
         .onChange(of: reviewDate) { _, _ in
-            pastReviewCompletedHabitOccurrenceIDs = []
+            stagedTodayToggleIDs = []
         }
         .onAppear {
             // Only ever applied once — after this, whatever the user
@@ -424,27 +470,66 @@ struct NightlyReviewView: View {
             .sorted { $0.startTime < $1.startTime }
     }
 
-    /// Blocks and open habit occurrences mixed into one list, organized by
-    /// time within each day — see `ReviewItem`/`OverdueBlocksReviewList`.
+    /// Blocks, open habit occurrences, and completed-with-no-block tasks
+    /// mixed into one list, organized by time within each day — see
+    /// `ReviewItem`/`OverdueBlocksReviewList`.
     private var reviewItems: [ReviewItem] {
-        reviewableBlocks.map { .block($0) } + openHabitOccurrencesForReview.map { .habit($0) }
+        reviewableBlocks.map { .block($0) }
+            + openHabitOccurrencesForReview.map { .habit($0) }
+            + completedTasksWithNoBlock.map { .completedTask($0) }
     }
 
+    /// Task completions with no live `ScheduledBlock` to represent them —
+    /// the 2-Minute Task shelf (already shown separately, in its own step)
+    /// and the older Task Attribute Review "Mark Complete" path both leave
+    /// a task like this, and `purgeCompletedBlocks` deletes it outright the
+    /// moment this review's Today step commits. Without this,
+    /// `reviewableBlocks` (block-only) never shows it at all, and it's
+    /// gone for good the instant Next is tapped. `TaskCompletionRecord` is
+    /// the durable trace that survives that delete, so it's sourced from
+    /// there rather than from `allTasks` directly — that also covers a
+    /// task purged by an *earlier* Nightly Review session that's since
+    /// come and gone.
+    private var completedTasksWithNoBlock: [TaskCompletionRecord] {
+        let since = NightlyReviewCompletionState.shared.lastClosedReviewDay ?? .distantPast
+        let records = (try? modelContext.fetch(FetchDescriptor<TaskCompletionRecord>(
+            predicate: #Predicate { $0.completedAt >= since }
+        ))) ?? []
+        let liveTasksByID = Dictionary(uniqueKeysWithValues: allTasks.map { ($0.id, $0) })
+        return records.filter { record in
+            guard let task = liveTasksByID[record.taskID] else { return true }
+            return (task.scheduledBlocks ?? []).isEmpty && task.shelf?.isTwoMinuteTasks != true
+        }
+    }
+
+    /// A tap here only flips membership in `stagedTodayToggleIDs` — no
+    /// model write happens until `advance()` commits the batch on Next
+    /// (§ requirement that Today-step taps be visual-only and reversible).
+    /// `effectiveCompleted` is what lets the row render that pending state
+    /// without touching `block.isCompleted`/`occurrence.isCompleted`.
     @ViewBuilder
     private var todayStep: some View {
-        if let todayViewModel {
-            OverdueBlocksReviewList(items: reviewItems) { item in
-                switch item {
-                case .block(let block):
-                    todayViewModel.toggleComplete(block)
-                case .habit(let occurrence):
-                    pastReviewCompletedHabitOccurrenceIDs.insert(occurrence.id)
-                    toggleHabitReviewOccurrence(habit: occurrence.habit, index: occurrence.index, isCompleted: occurrence.isCompleted, day: occurrence.targetTime)
+        if todayViewModel != nil {
+            OverdueBlocksReviewList(items: reviewItems, onToggle: { item in
+                if stagedTodayToggleIDs.contains(item.id) {
+                    stagedTodayToggleIDs.remove(item.id)
+                } else {
+                    stagedTodayToggleIDs.insert(item.id)
                 }
-            }
+            }, isEffectivelyCompleted: effectiveCompleted)
         } else {
             ProgressView()
         }
+    }
+
+    private func effectiveCompleted(for item: ReviewItem) -> Bool {
+        let real: Bool
+        switch item {
+        case .block(let block): real = block.isCompleted
+        case .habit(let occurrence): real = occurrence.isCompleted
+        case .completedTask: real = true
+        }
+        return stagedTodayToggleIDs.contains(item.id) ? !real : real
     }
 
     /// An AM/Midday/PM habit occurrence (see `HabitOccurrenceTimeMode`)
@@ -453,15 +538,19 @@ struct NightlyReviewView: View {
     /// doesn't need this, it already shows up as a real block. See
     /// `ScheduleReviewViewModel.openHabitOccurrencesForReview` (this just
     /// supplies `reviewCutoff` — same cutoff `reviewableBlocks` already
-    /// uses — and `pastReviewCompletedHabitOccurrenceIDs`, so a just-
-    /// checked-off occurrence stays visible, faded and struck through,
-    /// instead of vanishing the instant it leaves `.none`).
+    /// uses — and `completedSince`, so an occurrence already checked off
+    /// earlier today, before this review session ever opened, still shows
+    /// up here instead of being invisible until the sweep runs). A
+    /// same-session tap never needs its own escape hatch the way
+    /// `completedSince` does — see `stagedTodayToggleIDs`/
+    /// `effectiveCompleted`: the real status never changes mid-session, so
+    /// the `.none` filter below never has anything to exclude yet.
     private var openHabitOccurrencesForReview: [HabitReviewOccurrence] {
         ScheduleReviewViewModel.openHabitOccurrencesForReview(
             habits: allHabits,
             context: modelContext,
             upTo: reviewCutoff,
-            alsoInclude: pastReviewCompletedHabitOccurrenceIDs
+            completedSince: NightlyReviewCompletionState.shared.lastClosedReviewDay
         )
     }
 
@@ -599,10 +688,17 @@ struct NightlyReviewView: View {
     /// The tasks snapshotted into `twoMinuteReviewTaskIDs` when this step
     /// was entered, oldest first — a fixed list for the duration of the
     /// step so checking one off doesn't yank it out from under the user.
+    /// Now includes tasks already completed before the step was entered
+    /// (see `advance()`'s `next == .twoMinuteTasks` branch), not just
+    /// still-pending ones.
     private var twoMinuteReviewTasks: [TaskItem] {
         allTasks
             .filter { twoMinuteReviewTaskIDs.contains($0.id) }
             .sorted { $0.createdAt < $1.createdAt }
+    }
+
+    private func effectiveTwoMinuteCompleted(_ task: TaskItem) -> Bool {
+        stagedTwoMinuteToggleIDs.contains(task.id) ? !task.isCompleted : task.isCompleted
     }
 
     @ViewBuilder
@@ -632,25 +728,27 @@ struct NightlyReviewView: View {
         }
     }
 
+    /// A tap here only flips membership in `stagedTwoMinuteToggleIDs` — the
+    /// real `setCompleted` write (and the dirty-flag set that used to sit
+    /// right here) is deferred to `advance()`'s `next == .tomorrow` branch,
+    /// same visual-only-until-Next rule as the Today step's own rows.
     private func twoMinuteTaskRow(_ task: TaskItem) -> some View {
-        HStack(spacing: 12) {
-            twoMinuteSelectionCircle(isSelected: task.isCompleted)
+        let isCompleted = effectiveTwoMinuteCompleted(task)
+        return HStack(spacing: 12) {
+            twoMinuteSelectionCircle(isSelected: isCompleted)
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    task.setCompleted(!task.isCompleted, in: modelContext)
-                    // A completed 2-minute task shouldn't claim a slot in
-                    // tomorrow's schedule (see this step's own footer
-                    // text) — a gap in the established per-call-site
-                    // pattern (every other `setCompleted`/`markComplete`
-                    // call site in the app already sets this; this one
-                    // didn't).
-                    ScheduleDirtyState.shared.isDirty = true
+                    if stagedTwoMinuteToggleIDs.contains(task.id) {
+                        stagedTwoMinuteToggleIDs.remove(task.id)
+                    } else {
+                        stagedTwoMinuteToggleIDs.insert(task.id)
+                    }
                 }
             Text(task.title)
-                .strikethrough(task.isCompleted)
+                .strikethrough(isCompleted)
             Spacer()
         }
-        .opacity(task.isCompleted ? 0.5 : 1)
+        .opacity(isCompleted ? 0.5 : 1)
     }
 
     private func twoMinuteSelectionCircle(isSelected: Bool) -> some View {

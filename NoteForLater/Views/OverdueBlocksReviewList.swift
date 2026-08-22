@@ -21,18 +21,29 @@ struct HabitReviewOccurrence: Identifiable {
     let modeLabel: String
 }
 
-/// One row `OverdueBlocksReviewList` can show — a real calendar block or
-/// an untimed habit occurrence standing in as if it had a time, so both
-/// kinds can be grouped by day and sorted together by time instead of
-/// living in separate sections.
+/// One row `OverdueBlocksReviewList` can show — a real calendar block, an
+/// untimed habit occurrence standing in as if it had a time, or a
+/// completed task that never had (or no longer has) a `ScheduledBlock` at
+/// all — so all three kinds can be grouped by day and sorted together by
+/// time instead of living in separate sections.
 enum ReviewItem: Identifiable {
     case block(ScheduledBlock)
     case habit(HabitReviewOccurrence)
+    /// A task completion with no live block to represent it — the
+    /// 2-Minute Task shelf and the older Task Attribute Review "Mark
+    /// Complete" path both leave a task like this, and
+    /// `ScheduleReviewViewModel.purgeCompletedBlocks` deletes it outright
+    /// once Nightly Review's Today step commits. `TaskCompletionRecord`
+    /// is the durable trace that survives the delete. Always shown
+    /// already-checked and non-interactive — there's no live `TaskItem`
+    /// guaranteed to still exist to toggle back.
+    case completedTask(TaskCompletionRecord)
 
     var id: String {
         switch self {
         case .block(let block): return "block-\(block.id)"
         case .habit(let occurrence): return "habit-\(occurrence.id)"
+        case .completedTask(let record): return "completedTask-\(record.id)"
         }
     }
 
@@ -41,6 +52,7 @@ enum ReviewItem: Identifiable {
         switch self {
         case .block(let block): return calendar.startOfDay(for: block.date)
         case .habit(let occurrence): return calendar.startOfDay(for: occurrence.targetTime)
+        case .completedTask(let record): return calendar.startOfDay(for: record.completedAt)
         }
     }
 
@@ -48,6 +60,7 @@ enum ReviewItem: Identifiable {
         switch self {
         case .block(let block): return block.startTime
         case .habit(let occurrence): return occurrence.targetTime
+        case .completedTask(let record): return record.completedAt
         }
     }
 }
@@ -75,13 +88,23 @@ enum ReviewItem: Identifiable {
 /// uses it to dismiss and kick off `regenerateFromNow`.
 struct OverdueBlocksReviewList: View {
     let items: [ReviewItem]
-    /// Fired immediately, every time a row's circle is tapped — the
-    /// caller switches on the item to flip a block's completion
-    /// (`ScheduleReviewViewModel.toggleComplete`) or a habit occurrence's
-    /// (`ScheduleReviewViewModel.toggleHabitOccurrence`, also what
-    /// `NightlyReviewView.toggleHabitReviewOccurrence` wraps).
+    /// Fired every time a row's circle is tapped. What it actually does
+    /// is the caller's choice, not this view's: Nightly Review's Today
+    /// step stages the tap in local state and only writes the real model
+    /// on Next (see `isEffectivelyCompleted` below), while a caller that
+    /// wants the old immediate-write behavior can still flip a block's
+    /// completion (`ScheduleReviewViewModel.toggleComplete`) or a habit
+    /// occurrence's (`ScheduleReviewViewModel.toggleHabitOccurrence`)
+    /// directly from here. Never fired for `.completedTask` — that row
+    /// has no live model to toggle.
     let onToggle: (ReviewItem) -> Void
     var onDone: (() -> Void)? = nil
+    /// Overrides a row's rendered completion state without reading
+    /// `block.isCompleted`/`occurrence.isCompleted` directly — how
+    /// Nightly Review's Today step shows a tap as pending-but-reversible
+    /// before Next actually commits it. `nil` (the default) falls back
+    /// to reading the model directly, unchanged from before this existed.
+    var isEffectivelyCompleted: ((ReviewItem) -> Bool)? = nil
 
     private struct DayGroup: Identifiable {
         let day: Date
@@ -123,15 +146,17 @@ struct OverdueBlocksReviewList: View {
     private func row(for item: ReviewItem) -> some View {
         switch item {
         case .block(let block):
-            blockRow(block)
+            blockRow(block, isCompleted: isEffectivelyCompleted?(item) ?? block.isCompleted)
         case .habit(let occurrence):
-            habitRow(occurrence)
+            habitRow(occurrence, isCompleted: isEffectivelyCompleted?(item) ?? occurrence.isCompleted)
+        case .completedTask(let record):
+            completedTaskRow(record)
         }
     }
 
-    private func blockRow(_ block: ScheduledBlock) -> some View {
+    private func blockRow(_ block: ScheduledBlock, isCompleted: Bool) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            selectionCircle(isSelected: block.isCompleted)
+            selectionCircle(isSelected: isCompleted)
                 .contentShape(Rectangle())
                 .padding(.vertical, 4)
                 .onTapGesture { onToggle(.block(block)) }
@@ -140,7 +165,7 @@ struct OverdueBlocksReviewList: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(block.displayTitle)
-                    .strikethrough(block.isCompleted)
+                    .strikethrough(isCompleted)
             }
             Spacer()
             if block.isLocked {
@@ -149,13 +174,13 @@ struct OverdueBlocksReviewList: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .opacity(block.isCompleted ? 0.5 : 1)
+        .opacity(isCompleted ? 0.5 : 1)
         .listRowBackground((block.task?.shelf?.color ?? Color.clear).opacity(0.2))
     }
 
-    private func habitRow(_ occurrence: HabitReviewOccurrence) -> some View {
+    private func habitRow(_ occurrence: HabitReviewOccurrence, isCompleted: Bool) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            selectionCircle(isSelected: occurrence.isCompleted)
+            selectionCircle(isSelected: isCompleted)
                 .contentShape(Rectangle())
                 .padding(.vertical, 4)
                 .onTapGesture { onToggle(.habit(occurrence)) }
@@ -164,12 +189,31 @@ struct OverdueBlocksReviewList: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(occurrence.habit.name)
-                    .strikethrough(occurrence.isCompleted)
+                    .strikethrough(isCompleted)
             }
             Spacer()
         }
-        .opacity(occurrence.isCompleted ? 0.5 : 1)
+        .opacity(isCompleted ? 0.5 : 1)
         .listRowBackground(Shelf.flatten(.accentColor, opacity: 0.2))
+    }
+
+    /// Read-only — no `onTapGesture` at all. `record`'s underlying task
+    /// may well no longer exist (see `ReviewItem.completedTask`), so
+    /// there's nothing this row could toggle back even if it wanted to.
+    private func completedTaskRow(_ record: TaskCompletionRecord) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            selectionCircle(isSelected: true)
+                .padding(.vertical, 4)
+            VStack(alignment: .leading) {
+                Text("Completed")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(record.title)
+                    .strikethrough(true)
+            }
+            Spacer()
+        }
+        .opacity(0.5)
     }
 
     private func selectionCircle(isSelected: Bool) -> some View {

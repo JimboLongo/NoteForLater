@@ -2050,4 +2050,62 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertEqual(task.startDate, originalStart, "Cancel must put the old startDate back")
     }
 
+    // MARK: - openHabitOccurrencesForReview — completedSince
+
+    /// An AM/Midday/PM occurrence already `.complete` before this review
+    /// session ever opened used to be permanently invisible to Nightly
+    /// Review's Today step — the primary filter is `status == .none`, and
+    /// `alsoInclude` only ever contained ids the caller had itself just
+    /// toggled mid-session. `completedSince` widens the filter itself:
+    /// an already-complete occurrence shows if its own day is on or after
+    /// the last time a review closed a day out.
+    func test_openHabitOccurrencesForReview_completedSince_surfacesAlreadyCompleteOccurrence() {
+        let today = day(2026, 1, 10)
+        // `startDate == today` keeps the backward scan to exactly one day,
+        // so the assertions below aren't drowned out by several other
+        // still-`.none` backlog days this fixture doesn't care about.
+        let habit = Habit(name: "Stretch", startDate: today)
+        habit.occurrenceTimeModesRaw = ["am"]
+        context.insert(habit)
+
+        let log = habit.logOrCreate(on: today, context: context)
+        log.setOccurrence(0, to: .complete)
+
+        let withoutCompletedSince = ScheduleReviewViewModel.openHabitOccurrencesForReview(
+            habits: [habit], context: context, upTo: calendar.date(byAdding: .hour, value: 12, to: today)!
+        )
+        XCTAssertTrue(withoutCompletedSince.isEmpty, "unchanged default behavior: an already-complete occurrence stays hidden with no completedSince")
+
+        let withCompletedSince = ScheduleReviewViewModel.openHabitOccurrencesForReview(
+            habits: [habit], context: context, upTo: calendar.date(byAdding: .hour, value: 12, to: today)!,
+            completedSince: today
+        )
+        let surfaced = try? XCTUnwrap(withCompletedSince.first)
+        XCTAssertEqual(surfaced?.isCompleted, true, "should surface as completed, not pending")
+    }
+
+    /// The flip side: a `completedSince` boundary must not reach backward
+    /// into occurrences from before the last review closed — those were
+    /// already reviewed and closed out, and re-surfacing them would mean
+    /// "everything ever completed" rather than "since last review."
+    func test_openHabitOccurrencesForReview_completedSince_excludesOccurrenceBeforeBoundary() {
+        let habit = Habit(name: "Stretch", startDate: day(2026, 1, 1))
+        habit.occurrenceTimeModesRaw = ["am"]
+        context.insert(habit)
+
+        let yesterday = day(2026, 1, 9)
+        let today = day(2026, 1, 10)
+        let log = habit.logOrCreate(on: yesterday, context: context)
+        log.setOccurrence(0, to: .complete)
+
+        let result = ScheduleReviewViewModel.openHabitOccurrencesForReview(
+            habits: [habit], context: context, upTo: calendar.date(byAdding: .hour, value: 12, to: today)!,
+            completedSince: today
+        )
+        XCTAssertFalse(
+            result.contains { calendar.isDate($0.targetTime, inSameDayAs: yesterday) },
+            "a completion from before the completedSince boundary must stay excluded"
+        )
+    }
+
 }
