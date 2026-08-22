@@ -607,17 +607,23 @@ Left that way deliberately: all 51 runs and all 10 overlapping pairs in the capt
 
 The overlap invariant in `insertSchedulerBlock` is the backstop, and it doesn't care which instance places the block. Its `REJECTED` line (kept as permanent logging in `DiagFileLog`) is the signal: it should never fire, and if one appears, the cross-instance path is the first thing to suspect. Revisit if that happens.
 
-### "Open Slot" block observed next to NSPB — unresolved
+### "Open Slot" block observed next to NSPB — ✅ resolved
 
-A block labeled **Open Slot** was seen rendered beside NSPB with the same duration. Not yet diagnosed, and the distinction determines whether this is a data bug or a rendering one.
+A block labeled **Open Slot** was seen rendered beside NSPB with the same duration.
 
-**What's established:** the string comes from exactly one place — `ScheduledBlock.displayTitle` (`ScheduledBlock.swift:66`), which falls back to `"Open slot"` when **both** `task` and `habit` are nil. It is not a gap or collapse label synthesized by `DayTimelineGridView`; there is no such label in that file. So whatever rendered it was a `ScheduledBlock` instance with no task and no habit attached.
+**What's established (unchanged):** the string comes from exactly one place — `ScheduledBlock.displayTitle` (`ScheduledBlock.swift:66`), which falls back to `"Open slot"` when **both** `task` and `habit` are nil. It is not a gap or collapse label synthesized by `DayTimelineGridView`; there is no such label in that file. So whatever rendered it was a `ScheduledBlock` instance with no task and no habit attached.
 
-**What's not established:** whether such a block was ever persisted. A pull of the live store immediately afterwards found **zero** blocks with both relationships nil, so if one existed it was transient or has since been swept.
+**Root cause: `ScheduleReviewViewModel.trimOverflowingRuleBlocksAcrossFutureDays` (~line 502).** Found and fixed in a prior session, separately from this write-up — see the fix and its regression test below for what to grep for. It captures `allBlocksNow` as a pre-trim snapshot, deletes the excess blocks via `removeBlock` (which nils `task`/`habit` before deleting), then calls `loadExistingBlocks(allBlocksNow)` with that same stale snapshot — putting the objects `removeBlock` just deleted, now with both relationships nil, straight back into `blocks`. That is exactly the shape `displayTitle` renders as "Open slot": not a gap, not a rendering artifact of a timing window, but the deleted block itself being reloaded.
 
-**Leading hypothesis, untested:** `removeBlock` sets `block.task = nil` and `block.habit = nil` *before* `modelContext.delete(block)` — an ordering that is itself deliberate and load-bearing (it avoids a SwiftData "relationship already has a value but it's not the target" crash, see §1.1a). If SwiftUI renders from `viewModel.blocks` in the window between the nil-ing and the delete propagating, a doomed block would display as "Open slot" for exactly that interval. That would make this a rendering artifact of a correct data operation, not an orphan. `insertSchedulerBlock`'s rejection path also nils both relationships, but never inserts the block, so it shouldn't be reachable from there.
+**The leading hypothesis above was wrong, and worth recording as wrong rather than quietly dropped.** It isn't a render-window artifact of `removeBlock`'s nil-then-delete ordering — that ordering is correct, is load-bearing for the reason §1.1a gives, and was never the bug. The actual defect was one caller reloading from the wrong array after deleting from it.
 
-**To resolve:** catch it live and check whether the row persists across a tab switch or app relaunch. Persisting means a real orphan; vanishing points at the render-window hypothesis.
+**The proposed resolution test ("check whether the row persists across a tab switch or app relaunch") would have misled.** It treats the tab switch as a passive probe, but a tab switch is what *triggers* the bug: it runs `setupIfNeeded` → `syncSchedule` → `autoPlaceEligibleTasks` → `trimOverflowingRuleBlocksAcrossFutureDays`. So switching tabs doesn't observe whether an "Open slot" persists — it's the action that produces one. A relaunch re-triggers the same sweep, so a transient artifact of this bug and a genuinely-persisted orphan would have looked identical under that test; it could not have told the two apart.
+
+**Fix:** the post-trim `loadExistingBlocks` call inside `if didTrim` now re-fetches from the store — `(try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []` — instead of reusing `allBlocksNow`, after the existing `try? modelContext.save()`. Same shape `removeStaleNonSpecificHabitBlocksAcrossFutureDays` already handled correctly via a `staleIDs` filter; that function filters rather than re-fetching only because it has its removed blocks' IDs on hand locally, while `trimOverflowingRuleBlocks` only returns a `Bool`, so re-fetching was the simpler fix here. `removeBlock`'s nil-before-delete ordering is untouched.
+
+Regression test: `SchedulingEngineTests.test_trimSweepOfOverflowingRuleBlocks_doesNotResurrectDeletedBlocksAsOpenSlots` — two placed tasks over a `maxTaskCount: 1` rule on a future day, runs `autoPlaceEligibleTasks`, asserts no element of `viewModel.blocks` has both `task` and `habit` nil. Verified failing against the pre-fix code (reproducing this exact "Open slot" shape) and passing with the fix.
+
+**Still not established:** whether a *persisted* orphan can occur through some other path. This entry resolves the specific mechanism that was actually observed; it doesn't prove no other route to a nil/nil block exists.
 
 ### "Delete and shift everything up" can't apply universally
 
