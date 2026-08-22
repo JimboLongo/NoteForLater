@@ -375,6 +375,48 @@ final class TaskItem {
     @Relationship(deleteRule: .nullify, inverse: \ScheduledBlock.task)
     var scheduledBlocks: [ScheduledBlock]? = []
 
+    /// Pantry inventory tracking — meaningful only for a Kitchen-shelf
+    /// Pantry item (see `KitchenView`); every other task ignores all
+    /// three of these. `0`/`nil` are the defaults for every Pantry item
+    /// added before this existed (or added without ever setting these) —
+    /// `PantryDeductionService` deducting against that is a correct
+    /// no-op ("we don't know how much we have, so there's nothing to
+    /// subtract from"), not a bug, and there's no migration backfill for
+    /// the same reason the scheduling spec's own no-backfill precedent
+    /// gives: it's indistinguishable from genuinely having none, and
+    /// guessing would be worse than admitting it's unknown.
+    ///
+    /// `quantity` counts *packages*, not a raw amount — "0.5" means half
+    /// of one container used, "1.5" means one full container plus a
+    /// half-used one. `packageSize`/`unit` describe what one whole
+    /// package actually is (12 and "oz" for a 12 oz tub of sour cream),
+    /// fixed per product rather than changing as it's used up. Buying
+    /// another of the same product adds 1 to `quantity`, it never
+    /// changes `packageSize` — see `ReceiptImportView.addSelectedItems`,
+    /// which merges into an existing pantry item's `quantity` instead of
+    /// inserting a duplicate row when the same product is added again.
+    ///
+    /// A bare-count item (a dozen eggs, an onion — nothing meaningfully
+    /// "packaged") has `packageSize == nil` and `unit == nil`; `quantity`
+    /// is then the raw count of individual items, not a package fraction
+    /// — `PantryDeductionService` reads the two shapes differently for
+    /// exactly this reason.
+    ///
+    /// All three are `Double`/optional-`Double`, not `Int` — a recipe's
+    /// own parsed quantities are commonly fractional (½ cup, 1.5 lb), and
+    /// forcing an integer would mean rounding at every deduction,
+    /// compounding drift over repeated cooking for no real benefit.
+    var quantity: Double = 0
+    /// The size of one whole package, in `unit` — `nil` for a bare-count
+    /// item (see `quantity`'s doc comment) or one added without any
+    /// known size (manually typed, or OCR text with no structured size
+    /// data to parse).
+    var packageSize: Double?
+    /// One of `RecipeIngredientParser`'s canonical unit strings (`tbsp`,
+    /// `tsp`, `oz`, `cup`, `lb`, `g`, `ml`), or `nil` for a bare count
+    /// ("12 eggs" — no unit at all, just a number of items).
+    var unit: String?
+
     init(
         title: String,
         notes: String = "",

@@ -1531,6 +1531,12 @@ private struct DayTimelineSegment: View {
         case .proposed(let block):
             if let habit = block.habit {
                 habitDetailTarget = habit
+            } else if block.mealSelection != nil {
+                // Not tappable at all — the selection already happened
+                // during Nightly Review's Meals step, and completion is
+                // driven from the Today step's own checkbox there, not
+                // from anything on the calendar. See `ScheduledBlock
+                // .mealSelection`'s doc comment.
             } else {
                 actionsTargetBlock = block
             }
@@ -1889,7 +1895,11 @@ private struct DayTimelineSegment: View {
         case .event(let event):
             return lockedStore.isLocked(event.id)
         case .proposed(let block):
-            return block.isLocked || block.habit != nil
+            // A meal-selection block is `isLocked` from the moment it's
+            // inserted anyway (see `ScheduledBlock.mealSelection`'s doc
+            // comment) — checked here too regardless, same defense-in-depth
+            // the habit case already has, in case that ever changes.
+            return block.isLocked || block.habit != nil || block.mealSelection != nil
         }
     }
 

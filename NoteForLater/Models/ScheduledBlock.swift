@@ -32,8 +32,15 @@ final class ScheduledBlock {
     var task: TaskItem?
     /// The habit this block was generated for, if it came from the Habit
     /// Tracker's "Eligible to be Scheduled?" toggle rather than a shelf
-    /// task. A block has at most one of `task`/`habit` set.
+    /// task. A block has at most one of `task`/`habit`/`mealSelection` set.
     var habit: Habit?
+    /// The meal picked during Nightly Review's Meals step, if this is that
+    /// block — inserted directly at selection time (not by
+    /// `AISchedulingService`'s packer, the same way a recurring task's
+    /// fixed-time pass bypasses it too), always at 5pm, always
+    /// `isLocked`. See `MealSelection`'s own doc comment for why this is a
+    /// separate model rather than a `TaskItem`.
+    var mealSelection: MealSelection?
     /// Which of the habit's `timesPerDay` occurrences this block is for
     /// (0-based — "BrushTeeth.1" is index 0, "BrushTeeth.2" is index 1),
     /// meaningless when `habit` is nil. Lets completing this one calendar
@@ -64,6 +71,6 @@ final class ScheduledBlock {
 
     /// What to show for this block regardless of source.
     var displayTitle: String {
-        task?.title ?? habit?.name ?? "Open slot"
+        task?.title ?? habit?.name ?? mealSelection.map { "Dinner: \($0.recipeTitle)" } ?? "Open slot"
     }
 }

@@ -41,7 +41,10 @@ enum MealSuggestionService {
     /// ingredient line go through before comparison. Replacing (not
     /// stripping) punctuation is what keeps "butter," from fusing with
     /// whatever follows it into one token.
-    private static func normalizedWords(_ text: String) -> [String] {
+    /// Not `private` — `PantryDeductionService` reuses this same
+    /// tokenizer/matcher rather than growing a second, subtly-different
+    /// one for the same whole-word-containment question.
+    static func normalizedWords(_ text: String) -> [String] {
         let lowered = text.lowercased()
         let cleaned = String(lowered.unicodeScalars.map { scalar -> Character in
             (CharacterSet.alphanumerics.contains(scalar) || CharacterSet.whitespaces.contains(scalar)) ? Character(scalar) : " "
@@ -51,7 +54,7 @@ enum MealSuggestionService {
 
     /// True if `needle` appears as a contiguous run of whole words
     /// somewhere inside `haystack`.
-    private static func containsWholeWordRun(_ needle: [String], in haystack: [String]) -> Bool {
+    static func containsWholeWordRun(_ needle: [String], in haystack: [String]) -> Bool {
         guard !needle.isEmpty, needle.count <= haystack.count else { return false }
         for start in 0...(haystack.count - needle.count) {
             if Array(haystack[start..<(start + needle.count)]) == needle {

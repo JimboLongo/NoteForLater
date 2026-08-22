@@ -19,6 +19,8 @@ struct NightlyReviewView: View {
     @Query private var eligibleHoursWindows: [EligibleHoursWindow]
     @Query private var calendarSubscriptions: [CalendarSubscription]
     @Query(sort: \TaskItem.createdAt) private var allTasks: [TaskItem]
+    @Query(sort: \Recipe.title) private var allRecipes: [Recipe]
+    @Query private var allMealSelections: [MealSelection]
 
     @State private var step: Step = .chooseDay
     /// The day being reviewed — defaults to today, but overridable (e.g.
@@ -56,8 +58,16 @@ struct NightlyReviewView: View {
     /// `reviewItems` would never match anything real here anyway.
     @State private var stagedTodayToggleIDs = Set<String>()
     /// Same idea as `stagedTodayToggleIDs`, for the 2-Minute Tasks step —
-    /// committed in `advance()`'s `next == .tomorrow` branch instead.
+    /// committed in `advance()`'s `next == .today` branch instead (that
+    /// step now runs *before* Today Review, not after it).
     @State private var stagedTwoMinuteToggleIDs = Set<UUID>()
+    /// Same staging pattern again, for the `MealSelection` rows on the
+    /// Today step — a set, not a single flag, since `todayMealSelections`
+    /// can surface more than one at once (a multi-day backlog, same as
+    /// `reviewableBlocks` already allows for ordinary blocks). Committed
+    /// in `advance()`'s `next == .inbox` branch, same trigger point as
+    /// the rest of Today's staged state.
+    @State private var stagedMealSelectionIDs = Set<UUID>()
     /// Drives the Plan step's Replace-Task sheet — same
     /// `ReplacementPickerSheet` the regular calendar view uses (see
     /// `ScheduleReviewView`).
@@ -75,29 +85,58 @@ struct NightlyReviewView: View {
     private let schedulingService: AISchedulingServiceProtocol = MockAISchedulingService()
 
     private enum Step: Int, CaseIterable {
-        case chooseDay, today, inbox, twoMinuteTasks, tomorrow, atRisk
+        case chooseDay, twoMinuteTasks, today, inbox, atRisk, meals, tomorrow
 
-        /// `planDate` is only meaningful for `.tomorrow` — the day right
-        /// after whichever day was picked in Choose Day, not
+        /// `planDate` is only meaningful for `.meals`/`.tomorrow` — the day
+        /// right after whichever day was picked in Choose Day, not
         /// calendar-tomorrow-from-right-now — so its title can name that
         /// day explicitly instead of just saying "Tomorrow".
         func title(planDate: Date) -> String {
             switch self {
             case .chooseDay: return "Which Day?"
+            case .twoMinuteTasks: return "2-Minute Tasks"
             case .today: return "Review Schedule"
             case .inbox: return "Sort Your Inbox"
-            case .twoMinuteTasks: return "2-Minute Tasks"
+            case .atRisk: return "At Risk"
+            case .meals:
+                let formatter = DateFormatter()
+                formatter.dateFormat = "EEE MMMM d, yyyy"
+                return "Pick a Meal for \(formatter.string(from: planDate))"
             case .tomorrow:
                 let formatter = DateFormatter()
                 formatter.dateFormat = "EEE MMMM d, yyyy"
                 return "Plan for \(formatter.string(from: planDate))"
-            case .atRisk: return "At Risk"
             }
         }
     }
 
     private var planDate: Date {
         Calendar.current.date(byAdding: .day, value: 1, to: reviewDate) ?? reviewDate
+    }
+
+    private var kitchenShelf: Shelf? {
+        allShelves.first { $0.isKitchen }
+    }
+
+    /// Same "still actually in the pantry" filter `ShelfListView
+    /// .visibleTasks`/`MealsView.pantryItemNames` both apply — a completed
+    /// pantry task means "used up," not on hand, so it's excluded from
+    /// what deduction is allowed to touch.
+    private var kitchenPantryItems: [TaskItem] {
+        (kitchenShelf?.tasks ?? []).filter { !$0.isCompleted }
+    }
+
+    /// The meal picked (during a *previous* night's Meals step) for
+    /// whichever day is being reviewed right now — at most one per day.
+    /// Every meal that either belongs to today's review or is still
+    /// unresolved from an earlier one — same shape as `reviewableBlocks`'s
+    /// own filter (`isCompleted || date <= cutoff`), not just an
+    /// exact-day match: a `MealSelection` picked two nights ago and never
+    /// checked off shouldn't have to wait for that day's own review to
+    /// surface, the same way an overdue block doesn't.
+    private var todayMealSelections: [MealSelection] {
+        let cutoffDay = Calendar.current.startOfDay(for: reviewDate)
+        return allMealSelections.filter { $0.isCompleted || $0.date <= cutoffDay }
     }
 
     /// `planDate` is always either real-today or real-tomorrow — it's
@@ -114,11 +153,12 @@ struct NightlyReviewView: View {
             Group {
                 switch step {
                 case .chooseDay: chooseDayStep
+                case .twoMinuteTasks: twoMinuteTasksStep
                 case .today: todayStep
                 case .inbox: inboxStep
-                case .twoMinuteTasks: twoMinuteTasksStep
-                case .tomorrow: tomorrowStep
                 case .atRisk: atRiskStep
+                case .meals: mealsStep
+                case .tomorrow: tomorrowStep
                 }
             }
             .navigationTitle(step == .tomorrow ? "" : step.title(planDate: planDate))
@@ -181,7 +221,7 @@ struct NightlyReviewView: View {
                 Button("Back", action: back)
             }
             Spacer()
-            if step == .atRisk {
+            if step == .tomorrow {
                 Button("Done") { dismiss() }
                     .buttonStyle(.borderedProminent)
             } else {
@@ -199,20 +239,31 @@ struct NightlyReviewView: View {
     }
 
     private func advance() {
-        let next = Step(rawValue: step.rawValue + 1) ?? .atRisk
+        var next = Step(rawValue: step.rawValue + 1) ?? .tomorrow
         if step == .chooseDay {
             setupViewModels()
         }
-        // §7.1: skipped entirely when empty, rather than shown with
-        // nothing in it and a "tap Next to continue" — the only step in
-        // this flow that behaves this way, since unlike Inbox/2-Minute-
-        // Tasks there's nothing actionable to confirm when nothing's at
-        // risk.
+        // §7.1: skipped forward, not dismissed — `.atRisk` is no longer
+        // the last step (Meals/Tomorrow still follow it), so an empty
+        // At-Risk step just advances one further rather than ending the
+        // whole review the way it used to when it was the final step.
         if next == .atRisk, atRiskTasks.isEmpty {
-            dismiss()
-            return
+            next = Step(rawValue: next.rawValue + 1) ?? .tomorrow
         }
         step = next
+        if next == .today {
+            // Two-Minute-Tasks-step taps are visual-only — commit them
+            // here, on the way out, so Today Review (which now runs right
+            // after, not three steps later) can show them as already
+            // completed. Moved here from the old twoMinuteTasks->tomorrow
+            // transition now that Two-Minute Tasks runs *before* Today
+            // Review instead of after it.
+            for task in twoMinuteReviewTasks where stagedTwoMinuteToggleIDs.contains(task.id) {
+                task.setCompleted(!task.isCompleted, in: modelContext)
+                ScheduleDirtyState.shared.isDirty = true
+            }
+            stagedTwoMinuteToggleIDs = []
+        }
         if next == .inbox {
             startAttributeReviewSession()
         }
@@ -251,6 +302,22 @@ struct NightlyReviewView: View {
                 }
             }
             stagedTodayToggleIDs = []
+            // Every meal shown this step (tonight's, plus any earlier
+            // unresolved backlog — see `todayMealSelections`) that got
+            // staged, committed the same visual-only way as everything
+            // else on this step. Committing `true` is the trigger for
+            // pantry deduction: resolve the live `Recipe` by `recipeID`
+            // (may have been edited/deleted since selection — if so, this
+            // silently does nothing, consistent with this feature's whole
+            // "no warnings" policy) and hand it to `PantryDeductionService`
+            // along with the Kitchen shelf's current pantry items.
+            for selection in todayMealSelections where stagedMealSelectionIDs.contains(selection.id) {
+                selection.isCompleted.toggle()
+                if selection.isCompleted, let recipe = allRecipes.first(where: { $0.id == selection.recipeID }) {
+                    PantryDeductionService.deduct(recipe: recipe, pantryItems: kitchenPantryItems)
+                }
+            }
+            stagedMealSelectionIDs = []
             // §7.2: this whole batch runs "on Next from the Today step,"
             // i.e. right here on the today→inbox transition, not deferred
             // all the way to the tomorrow handoff below. Freeze exactly
@@ -332,17 +399,6 @@ struct NightlyReviewView: View {
             }
         }
         if next == .tomorrow, let tomorrowViewModel {
-            // Two-Minute-Tasks-step taps are visual-only too, same reasons
-            // as the Today step's own staging — commit them here, on the
-            // way out. `setCompleted` flips relative to whatever's still
-            // really there, same as the Today-step commit above, and
-            // (unchanged from before this was staged) marks the schedule
-            // dirty so the check just below actually re-walks.
-            for task in twoMinuteReviewTasks where stagedTwoMinuteToggleIDs.contains(task.id) {
-                task.setCompleted(!task.isCompleted, in: modelContext)
-                ScheduleDirtyState.shared.isDirty = true
-            }
-            stagedTwoMinuteToggleIDs = []
             // The Inbox step just left can route tasks onto a shelf via
             // `TaskReviewCard.advance()`, which already sets
             // `ScheduleDirtyState.shared.isDirty` (see §6.1) — so this
@@ -427,6 +483,7 @@ struct NightlyReviewView: View {
         }
         .onChange(of: reviewDate) { _, _ in
             stagedTodayToggleIDs = []
+            stagedMealSelectionIDs = []
         }
         .onAppear {
             // Only ever applied once — after this, whatever the user
@@ -440,33 +497,50 @@ struct NightlyReviewView: View {
         }
     }
 
-    // MARK: - Step 1: Today
+    // MARK: - Step 2: Today
 
-    /// Where "reviewable" ends for `reviewDate` — today or any earlier day,
-    /// whichever was picked in Choose Day. When `reviewDate` is today, the
-    /// cutoff is `.now` itself rather than end-of-day, since a block later
-    /// today hasn't happened yet and isn't reviewable; when it's an earlier
-    /// day (already fully elapsed), the cutoff is that day's midnight
-    /// boundary instead. Shared by `reviewableBlocks` (what the Today step
-    /// shows) and `advance()` (what gets freed up for tomorrow's plan once
-    /// Today is left behind).
+    /// Used only for *operational* decisions — actually marking something
+    /// missed, or clearing/rescheduling an incomplete block — never for
+    /// what the Today step displays (see `reviewDisplayCutoff` for that).
+    /// When `reviewDate` is today, this is `.now` itself rather than
+    /// end-of-day, since a block later today hasn't happened yet and
+    /// can't legitimately be judged "missed" or "not done" until its own
+    /// time actually passes; when `reviewDate` is an earlier day (already
+    /// fully elapsed), it's that day's midnight boundary instead. Shared
+    /// by `markUnresolvedHabitOccurrencesAsMissed` and `advance()` (what
+    /// gets frozen as `frozenCutoff`, for `clearIncompletePastBlocks`).
     private var reviewCutoff: Date {
         let dayEnd = Calendar.current.date(byAdding: .day, value: 1, to: reviewDate) ?? reviewDate
         return min(.now, dayEnd)
     }
 
-    /// Every block (complete or not) up through `reviewCutoff`, plus any
-    /// block already marked complete no matter how far out it's dated — a
-    /// task knocked out ahead of its scheduled day shouldn't have to wait
-    /// for that future day's own review to get checked off here. So a
-    /// backlog left over from a busy week doesn't just quietly pile up
-    /// unreviewed, but a review for a past day never leaks in an
-    /// *incomplete* block from today or later. `markComplete` isn't
+    /// What the Today step actually *shows* — always the full span of
+    /// `reviewDate`, regardless of what time it currently is. A task or
+    /// habit later today should be visible in tonight's review the moment
+    /// you open it, not only once its own time has technically passed —
+    /// unlike `reviewCutoff`, this never clamps to `.now`. Deliberately
+    /// kept separate from `reviewCutoff`: `reviewableBlocks` and
+    /// `openHabitOccurrencesForReview` both read this one, while anything
+    /// that actually *acts* on "is this done or not yet due" — the missed
+    /// sweep, the past-block clear — still reads the narrower
+    /// `reviewCutoff`, so showing a 9pm habit at 6pm review time never
+    /// causes it to be prematurely marked missed or rescheduled off today.
+    private var reviewDisplayCutoff: Date {
+        Calendar.current.date(byAdding: .day, value: 1, to: reviewDate) ?? reviewDate
+    }
+
+    /// Every block (complete or not) up through `reviewDisplayCutoff`,
+    /// plus any block already marked complete no matter how far out it's
+    /// dated — a task knocked out ahead of its scheduled day shouldn't
+    /// have to wait for that future day's own review to get checked off
+    /// here. So a backlog left over from a busy week doesn't just quietly
+    /// pile up unreviewed, but a review for a past day never leaks in an
+    /// *incomplete* block from a day after it. `markComplete` isn't
     /// actually scoped to `todayViewModel`'s own `targetDate` internally,
     /// so reusing it here for a block from any earlier or later day is safe.
     private var reviewableBlocks: [ScheduledBlock] {
         allBlocks
-            .filter { $0.startTime < reviewCutoff || $0.isCompleted }
+            .filter { $0.startTime < reviewDisplayCutoff || $0.isCompleted }
             .sorted { $0.startTime < $1.startTime }
     }
 
@@ -510,16 +584,49 @@ struct NightlyReviewView: View {
     @ViewBuilder
     private var todayStep: some View {
         if todayViewModel != nil {
-            OverdueBlocksReviewList(items: reviewItems, onToggle: { item in
-                if stagedTodayToggleIDs.contains(item.id) {
-                    stagedTodayToggleIDs.remove(item.id)
-                } else {
-                    stagedTodayToggleIDs.insert(item.id)
+            VStack(spacing: 0) {
+                ForEach(todayMealSelections) { selection in
+                    mealSelectionRow(selection)
+                    Divider()
                 }
-            }, isEffectivelyCompleted: effectiveCompleted)
+                OverdueBlocksReviewList(items: reviewItems, onToggle: { item in
+                    if stagedTodayToggleIDs.contains(item.id) {
+                        stagedTodayToggleIDs.remove(item.id)
+                    } else {
+                        stagedTodayToggleIDs.insert(item.id)
+                    }
+                }, isEffectivelyCompleted: effectiveCompleted)
+            }
         } else {
             ProgressView()
         }
+    }
+
+    /// One row per `todayMealSelections` entry — tonight's meal, plus any
+    /// earlier unresolved backlog — staged the same visual-only way as
+    /// everything else on this step. See `stagedMealSelectionIDs` and its
+    /// commit in `advance()`'s `next == .inbox` branch, which is also what
+    /// actually triggers pantry deduction.
+    private func mealSelectionRow(_ selection: MealSelection) -> some View {
+        let isStaged = stagedMealSelectionIDs.contains(selection.id)
+        let isCompleted = isStaged ? !selection.isCompleted : selection.isCompleted
+        return HStack(spacing: 12) {
+            Image(systemName: isCompleted ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(isCompleted ? Color.green : Color.secondary.opacity(0.5))
+            Text("Cooked: \(selection.recipeTitle)")
+                .strikethrough(isCompleted)
+            Spacer()
+        }
+        .padding()
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isStaged {
+                stagedMealSelectionIDs.remove(selection.id)
+            } else {
+                stagedMealSelectionIDs.insert(selection.id)
+            }
+        }
+        .opacity(isCompleted ? 0.5 : 1)
     }
 
     private func effectiveCompleted(for item: ReviewItem) -> Bool {
@@ -537,19 +644,21 @@ struct NightlyReviewView: View {
     /// invisible to `reviewableBlocks` — a Specific-Time occurrence
     /// doesn't need this, it already shows up as a real block. See
     /// `ScheduleReviewViewModel.openHabitOccurrencesForReview` (this just
-    /// supplies `reviewCutoff` — same cutoff `reviewableBlocks` already
-    /// uses — and `completedSince`, so an occurrence already checked off
-    /// earlier today, before this review session ever opened, still shows
-    /// up here instead of being invisible until the sweep runs). A
-    /// same-session tap never needs its own escape hatch the way
-    /// `completedSince` does — see `stagedTodayToggleIDs`/
-    /// `effectiveCompleted`: the real status never changes mid-session, so
-    /// the `.none` filter below never has anything to exclude yet.
+    /// supplies `reviewDisplayCutoff` — same cutoff `reviewableBlocks`
+    /// already uses, so a PM habit shows up here the moment the Today
+    /// step opens rather than only once its own time has passed — and
+    /// `completedSince`, so an occurrence already checked off earlier
+    /// today, before this review session ever opened, still shows up here
+    /// instead of being invisible until the sweep runs). A same-session
+    /// tap never needs its own escape hatch the way `completedSince`
+    /// does — see `stagedTodayToggleIDs`/`effectiveCompleted`: the real
+    /// status never changes mid-session, so the `.none` filter below
+    /// never has anything to exclude yet.
     private var openHabitOccurrencesForReview: [HabitReviewOccurrence] {
         ScheduleReviewViewModel.openHabitOccurrencesForReview(
             habits: allHabits,
             context: modelContext,
-            upTo: reviewCutoff,
+            upTo: reviewDisplayCutoff,
             completedSince: NightlyReviewCompletionState.shared.lastClosedReviewDay
         )
     }
@@ -590,10 +699,22 @@ struct NightlyReviewView: View {
         //
         // `untimedOccurrences=0` means the run was vacuous and any pass
         // drawn from it is worthless. That is the whole value of the line.
-        let sweepBlocks = reviewableBlocks.filter { $0.habit != nil }
-        let sweepOccurrences = openHabitOccurrencesForReview
+        //
+        // Deliberately NOT `reviewableBlocks`/`openHabitOccurrencesForReview`
+        // here — those now show the *whole day* regardless of time (see
+        // `reviewDisplayCutoff`), so reusing them would mark a habit due
+        // later tonight as missed the instant Next is tapped, even though
+        // there's still time left today to actually do it. This sweep
+        // stays scoped to the narrower, `.now`-based `reviewCutoff`.
+        let sweepBlocks = allBlocks.filter { ($0.startTime < reviewCutoff || $0.isCompleted) && $0.habit != nil }
+        let sweepOccurrences = ScheduleReviewViewModel.openHabitOccurrencesForReview(
+            habits: allHabits,
+            context: modelContext,
+            upTo: reviewCutoff,
+            completedSince: NightlyReviewCompletionState.shared.lastClosedReviewDay
+        )
         DiagFileLog.write("SWEEP ENTER reviewDate=\(ISO8601DateFormatter().string(from: reviewDate).prefix(10)) cutoff=\(ISO8601DateFormatter().string(from: reviewCutoff).prefix(19)) habitBlocks=\(sweepBlocks.count) untimedOccurrences=\(sweepOccurrences.count)")
-        for block in reviewableBlocks {
+        for block in sweepBlocks {
             guard let habit = block.habit else { continue }
             // The LOG is authoritative; `block.isCompleted` is a mirror
             // written alongside it by every habit-completion path. This
@@ -628,7 +749,7 @@ struct NightlyReviewView: View {
         HabitStatsRefreshCoordinator.shared.habitLogsChanged()
     }
 
-    // MARK: - Step 2: Inbox (walks TaskCardSheet, one task at a time)
+    // MARK: - Step 3: Inbox (walks TaskCardSheet, one task at a time)
 
     private var routableInboxShelves: [Shelf] {
         allShelves.filter { !$0.isKitchen }
@@ -679,7 +800,7 @@ struct NightlyReviewView: View {
         attributeReviewSession = AttributeReviewSession(queue: queue)
     }
 
-    // MARK: - Step 3: 2-Minute Tasks
+    // MARK: - Step 1: 2-Minute Tasks
 
     private var twoMinuteShelf: Shelf? {
         allShelves.first { $0.isTwoMinuteTasks }
@@ -768,7 +889,139 @@ struct NightlyReviewView: View {
         .frame(width: 22, height: 22)
     }
 
-    // MARK: - Step 4: Tomorrow
+    // MARK: - Step 5: Meals
+
+    /// Ranked the same way Kitchen's own Meals tab ranks them (fewest
+    /// missing ingredients first) — reused, not reimplemented, since
+    /// "what can I actually make" is exactly the question this step is
+    /// also asking, just with the answer feeding a `MealSelection`
+    /// instead of a detail sheet.
+    private var rankedRecipesForSelection: [(recipe: Recipe, missingCount: Int)] {
+        MealSuggestionService.rankRecipes(allRecipes, pantryItems: kitchenPantryItems.map(\.title))
+    }
+
+    /// Already-selected for `planDate`, if any — drives the checkmark
+    /// next to whichever recipe was picked, so re-entering this step
+    /// (e.g. after Back) shows the existing choice rather than looking
+    /// like nothing happened yet.
+    private var plannedMealSelection: MealSelection? {
+        allMealSelections.first { Calendar.current.isDate($0.date, inSameDayAs: planDate) }
+    }
+
+    @ViewBuilder
+    private var mealsStep: some View {
+        if allRecipes.isEmpty {
+            ContentUnavailableView {
+                Label("No Recipes Yet", systemImage: "fork.knife")
+            } description: {
+                Text("Add recipes from the Kitchen shelf's Cookbook tab, then come back here to plan one in.")
+            }
+        } else {
+            List {
+                Section {
+                    ForEach(rankedRecipesForSelection, id: \.recipe.id) { entry in
+                        Button {
+                            selectMeal(entry.recipe)
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(entry.recipe.title)
+                                    if entry.missingCount > 0 {
+                                        Text("\(entry.missingCount) missing")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                Spacer()
+                                if plannedMealSelection?.recipeID == entry.recipe.id {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(.green)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    Text("Pick a Meal")
+                } footer: {
+                    Text("Ranked by fewest missing ingredients, same as the Kitchen's own Meals tab. Placed on tomorrow's calendar at 5pm, locked.")
+                }
+                Section {
+                    ForEach(kitchenPantryItems) { task in
+                        pantryQuantityRow(task)
+                    }
+                } header: {
+                    Text("Pantry")
+                } footer: {
+                    Text("Adjust anything that's out of date before picking a meal — deducting on completion reads these quantities.")
+                }
+            }
+        }
+    }
+
+    private func pantryQuantityRow(_ task: TaskItem) -> some View {
+        HStack {
+            Text(task.title)
+            Spacer()
+            TextField("Qty", value: Binding(
+                get: { task.quantity },
+                set: { task.quantity = max(0, $0) }
+            ), format: .number)
+                .keyboardType(.decimalPad)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 60)
+            Text(task.unit ?? "")
+                .foregroundStyle(.secondary)
+                .frame(width: 40, alignment: .leading)
+        }
+    }
+
+    /// Creates (or, if one already exists for `planDate`, updates in
+    /// place) tomorrow's `MealSelection`, and inserts its 5pm calendar
+    /// block. Re-picking after an earlier choice replaces the old block
+    /// rather than leaving two — `removeExistingMealBlock` runs first.
+    private func selectMeal(_ recipe: Recipe) {
+        if let existing = plannedMealSelection {
+            existing.recipeID = recipe.id
+            existing.recipeTitle = recipe.title
+            removeMealBlock(for: existing)
+            insertMealBlock(for: existing)
+        } else {
+            let selection = MealSelection(recipeID: recipe.id, recipeTitle: recipe.title, date: planDate)
+            modelContext.insert(selection)
+            insertMealBlock(for: selection)
+        }
+    }
+
+    private func removeMealBlock(for selection: MealSelection) {
+        let allBlocksNow = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        for block in allBlocksNow where block.mealSelection?.id == selection.id {
+            block.mealSelection = nil
+            modelContext.delete(block)
+        }
+    }
+
+    /// Always 5pm on `selection.date`, always locked from the moment it's
+    /// created — see `ScheduledBlock.mealSelection`'s doc comment for why
+    /// that's what lets a one-time direct insertion (bypassing
+    /// `AISchedulingService` entirely) survive every later
+    /// `regenerateFromNow` call without being cleared: its sweep removes
+    /// any unlocked, unapproved, incomplete future block with no
+    /// exception for whether `task`/`habit` is set, so `isLocked` is the
+    /// only thing protecting it.
+    private func insertMealBlock(for selection: MealSelection) {
+        let calendar = Calendar.current
+        guard let start = calendar.date(bySettingHour: 17, minute: 0, second: 0, of: selection.date) else { return }
+        let end = calendar.date(byAdding: .minute, value: 60, to: start) ?? start
+        let block = ScheduledBlock(date: selection.date, startTime: start, endTime: end, task: nil)
+        block.isLocked = true
+        block.mealSelection = selection
+        modelContext.insert(block)
+    }
+
+    // MARK: - Step 6: Tomorrow
 
     /// Same real time-grid as `ScheduleReviewView` — drag to move, tap to
     /// mark complete/push/delete/replace, tap a calendar event to edit it —
@@ -822,7 +1075,7 @@ struct NightlyReviewView: View {
         }
     }
 
-    // MARK: - Step 5: At Risk
+    // MARK: - Step 4: At Risk
 
     /// Live, not snapshotted — unlike `twoMinuteReviewTaskIDs`, a task
     /// resolving (extended/cleared due date, or acknowledged) is supposed
