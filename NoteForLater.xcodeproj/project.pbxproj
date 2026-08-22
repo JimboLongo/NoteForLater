@@ -380,7 +380,7 @@
 				DEVELOPMENT_TEAM = QJ4HB93XZ8;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSCameraUsageDescription = "Used to take a photo of a grocery receipt so ingredients can be added to your Pantry shelf.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Used to scan grocery receipts and barcodes so ingredients can be added to your Pantry shelf.";
 				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "Used to notify you when you're near a location tagged on a task.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Used to notify you when you're near a location tagged on a task.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Used to capture voice notes in the Inbox.";
@@ -417,7 +417,7 @@
 				DEVELOPMENT_TEAM = QJ4HB93XZ8;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSCameraUsageDescription = "Used to take a photo of a grocery receipt so ingredients can be added to your Pantry shelf.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Used to scan grocery receipts and barcodes so ingredients can be added to your Pantry shelf.";
 				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "Used to notify you when you're near a location tagged on a task.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Used to notify you when you're near a location tagged on a task.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Used to capture voice notes in the Inbox.";

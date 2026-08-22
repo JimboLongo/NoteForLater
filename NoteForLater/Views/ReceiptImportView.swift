@@ -3,23 +3,34 @@ import SwiftData
 import UIKit
 import PhotosUI
 
-/// One OCR'd candidate line, checkable before it's actually added to the
-/// Kitchen shelf's Pantry — OCR is far less reliable than a well-formed
-/// CSV column, so (unlike the file-based imports elsewhere in the app)
-/// this shows a review step before anything is inserted.
-private struct ReceiptCandidate: Identifiable {
-    /// Where `name` actually came from — shown as a small badge so a
-    /// UPC-sourced name (usually cleaner than OCR text) is easy to tell
-    /// apart from a line-parsed one at a glance, and so a wrong-looking
-    /// name is easier to debug: was it a bad OCR read, or a bad barcode
-    /// lookup?
+/// One OCR'd (or barcode-scanned) candidate line, checkable before it's
+/// actually added to the Kitchen shelf's Pantry — OCR/barcode lookups are
+/// far less reliable than a well-formed CSV column, so (unlike the
+/// file-based imports elsewhere in the app) this shows a review step
+/// before anything is inserted. Not `private` — `BarcodeScannerView`
+/// constructs these directly and hands them to `ReceiptImportView` via
+/// `initialCandidates`, reusing this review/edit/Add UI rather than
+/// duplicating it into a second view.
+struct ReceiptCandidate: Identifiable {
+    /// Where `name` actually came from — a UPC-sourced name is backed by
+    /// a real Open Food Facts catalog entry, so it's shown as its own
+    /// "confirmed" section with a barcode badge; a line-parsed name is
+    /// only ever a best-effort OCR guess, shown separately under
+    /// "Unconfirmed" so the two are never mistaken for each other.
     enum Source {
         case upcLookup
         case lineParsing
     }
 
     let id = UUID()
+    /// The editable core name — bound directly to this row's `TextField`.
+    /// `brand`/`size` are kept as their own fields rather than baked into
+    /// this at creation time, so editing the name never silently discards
+    /// them, and a line-parsed row (which never has either) doesn't need
+    /// any special-casing here.
     var name: String
+    var brand: String?
+    var size: String?
     var isSelected: Bool
     var source: Source
 }
@@ -34,9 +45,20 @@ struct ReceiptImportView: View {
     @State private var scanService = ReceiptScanService()
 
     @State private var isShowingCamera = false
-    @State private var candidates: [ReceiptCandidate] = []
-    @State private var hasScanned = false
+    @State private var candidates: [ReceiptCandidate]
+    @State private var hasScanned: Bool
     @State private var libraryPickerItem: PhotosPickerItem?
+
+    /// `initialCandidates` is how `BarcodeScannerView` hands off its
+    /// scanned-and-looked-up results into this same review/edit/Add UI
+    /// instead of duplicating it — non-empty means the empty "Scan a
+    /// Receipt" state is skipped entirely and the review list shows
+    /// immediately, as if a receipt scan had already produced them.
+    init(shelf: Shelf, initialCandidates: [ReceiptCandidate] = []) {
+        self.shelf = shelf
+        _candidates = State(initialValue: initialCandidates)
+        _hasScanned = State(initialValue: !initialCandidates.isEmpty)
+    }
 
     var body: some View {
         NavigationStack {
@@ -64,25 +86,32 @@ struct ReceiptImportView: View {
                             Text("Couldn't find any items on that receipt. Try a clearer, well-lit photo.")
                                 .foregroundStyle(.secondary)
                         }
-                        Section {
-                            ForEach($candidates) { $candidate in
-                                Toggle(isOn: $candidate.isSelected) {
-                                    HStack {
-                                        TextField("Item", text: $candidate.name)
-                                        if candidate.source == .upcLookup {
-                                            Image(systemName: "barcode.viewfinder")
-                                                .foregroundStyle(.secondary)
-                                                .accessibilityLabel("Found via barcode lookup")
-                                        }
-                                    }
+                        if !confirmedIndices.isEmpty {
+                            Section {
+                                ForEach(confirmedIndices, id: \.self) { index in
+                                    candidateRow($candidates[index])
                                 }
+                                .onDelete { offsets in
+                                    candidates.remove(atOffsets: IndexSet(offsets.map { confirmedIndices[$0] }))
+                                }
+                            } header: {
+                                Text("Confirmed")
+                            } footer: {
+                                Text("Looked up from a barcode on the receipt — name, brand, and size come straight from the product catalog.")
                             }
-                            .onDelete { offsets in
-                                candidates.remove(atOffsets: offsets)
-                            }
-                        } footer: {
-                            if !candidates.isEmpty {
-                                Text("Uncheck anything that isn't actually an item — receipts OCR imperfectly. \(Image(systemName: "barcode.viewfinder")) marks a name looked up from a barcode instead of read off the receipt text.")
+                        }
+                        if !unconfirmedIndices.isEmpty {
+                            Section {
+                                ForEach(unconfirmedIndices, id: \.self) { index in
+                                    candidateRow($candidates[index])
+                                }
+                                .onDelete { offsets in
+                                    candidates.remove(atOffsets: IndexSet(offsets.map { unconfirmedIndices[$0] }))
+                                }
+                            } header: {
+                                Text("Unconfirmed")
+                            } footer: {
+                                Text("No barcode found or matched — read straight off the receipt text instead, so double-check these before adding them.")
                             }
                         }
                     }
@@ -143,6 +172,44 @@ struct ReceiptImportView: View {
         candidates.filter(\.isSelected).count
     }
 
+    /// Index-based, not a filtered copy of `candidates` itself — `onDelete`
+    /// needs to map an offset back to `candidates`' own real index
+    /// regardless of which section it came from, and `$candidates[index]`
+    /// is what gives `candidateRow` a live, two-way `Binding` into the
+    /// original array rather than a disconnected snapshot.
+    private var confirmedIndices: [Int] {
+        candidates.indices.filter { candidates[$0].source == .upcLookup }
+    }
+
+    private var unconfirmedIndices: [Int] {
+        candidates.indices.filter { candidates[$0].source == .lineParsing }
+    }
+
+    /// Shared by both sections — the only thing that actually differs
+    /// between a confirmed and an unconfirmed row is `source`, which this
+    /// already reads to decide whether to show the barcode badge and the
+    /// brand/size caption.
+    private func candidateRow(_ candidate: Binding<ReceiptCandidate>) -> some View {
+        Toggle(isOn: candidate.isSelected) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    TextField("Item", text: candidate.name)
+                    let parenthetical = [candidate.wrappedValue.brand, candidate.wrappedValue.size].compactMap { $0 }.joined(separator: ", ")
+                    if !parenthetical.isEmpty {
+                        Text(parenthetical)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if candidate.wrappedValue.source == .upcLookup {
+                    Image(systemName: "barcode.viewfinder")
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Found via barcode lookup")
+                }
+            }
+        }
+    }
+
     private func scan(_ image: UIImage) async {
         let lines = await scanService.recognizeLines(in: image)
         candidates = await Self.resolveCandidates(from: lines)
@@ -173,16 +240,16 @@ struct ReceiptImportView: View {
     /// One line's UPC-then-line-parsing fallback: try
     /// `ReceiptLineParser.upc(in:)`, then a lookup on it — only reach for
     /// `cleanedItemName` (today's behavior, unchanged) when either comes
-    /// back empty. `lookupProductName` never throws, so "no UPC found,"
+    /// back empty. `lookupProductInfo` never throws, so "no UPC found,"
     /// "UPC found but not a real product," and "network/timeout/JSON
     /// failure" all take the same fallback path with no special-casing
     /// needed here.
     private static func resolveCandidate(from line: String) async -> ReceiptCandidate? {
-        if let upc = ReceiptLineParser.upc(in: line), let productName = await OpenFoodFactsService.lookupProductName(upc: upc) {
-            return ReceiptCandidate(name: productName, isSelected: true, source: .upcLookup)
+        if let upc = ReceiptLineParser.upc(in: line), let info = await OpenFoodFactsService.lookupProductInfo(upc: upc) {
+            return ReceiptCandidate(name: info.name, brand: info.brand, size: info.size, isSelected: true, source: .upcLookup)
         }
         guard let name = ReceiptLineParser.cleanedItemName(from: line) else { return nil }
-        return ReceiptCandidate(name: name, isSelected: true, source: .lineParsing)
+        return ReceiptCandidate(name: name, brand: nil, size: nil, isSelected: true, source: .lineParsing)
     }
 
     private func addSelectedItems() {

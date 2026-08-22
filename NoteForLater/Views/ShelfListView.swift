@@ -19,6 +19,7 @@ struct ShelfListView: View {
     @State private var draftTitle = ""
     @State private var speechCapture = SpeechCaptureService()
     @State private var isShowingReceiptImporter = false
+    @State private var isShowingBarcodeScanner = false
     @State private var selectedTask: TaskItem?
     @State private var scrollProxy: ScrollViewProxy?
     @FocusState private var isCaptureFocused: Bool
@@ -146,6 +147,12 @@ struct ShelfListView: View {
             Spacer()
             if shelf.isKitchen {
                 Button {
+                    isShowingBarcodeScanner = true
+                } label: {
+                    Image(systemName: "barcode.viewfinder")
+                }
+                .padding(.trailing, 4)
+                Button {
                     isShowingReceiptImporter = true
                 } label: {
                     Image(systemName: "camera.viewfinder")
@@ -163,6 +170,9 @@ struct ShelfListView: View {
         .padding(.bottom, 4)
         .sheet(isPresented: $isShowingReceiptImporter) {
             ReceiptImportView(shelf: shelf)
+        }
+        .fullScreenCover(isPresented: $isShowingBarcodeScanner) {
+            BarcodeScannerView(shelf: shelf)
         }
     }
 
