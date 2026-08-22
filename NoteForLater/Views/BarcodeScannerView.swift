@@ -50,7 +50,12 @@ struct BarcodeScannerView: View {
                 }
             }
             .navigationDestination(isPresented: $isShowingReview) {
-                ReceiptImportView(shelf: shelf, initialCandidates: candidates)
+                // This view is pushed onto this screen's own
+                // NavigationStack, so its own `dismiss()` would only pop
+                // back to the live camera feed — `onFinishAdding` here is
+                // what actually closes the whole scanner and lands back
+                // on the Pantry once Add is tapped.
+                ReceiptImportView(shelf: shelf, initialCandidates: candidates, onFinishAdding: { dismiss() })
             }
         }
     }

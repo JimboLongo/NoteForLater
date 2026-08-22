@@ -260,75 +260,119 @@ struct TaskRow: View {
         }
     }
 
+    /// How many packages are selectable — 0 up through 10 in quarter
+    /// steps (41 options). Bounded, not exhaustive: `quantity` counts
+    /// packages of a product (see `TaskItem.quantity`'s doc comment), and
+    /// realistic pantry stock rarely exceeds a handful of any one thing,
+    /// unlike raw ounces/grams which could run into the hundreds.
+    private static let quantityOptions: [Double] = stride(from: 0.0, through: 10.0, by: 0.25).map { $0 }
+
+    private static let quantityFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = 2
+        return formatter
+    }()
+
+    private func formattedQuantity(_ value: Double) -> String {
+        Self.quantityFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+
+    /// A genuine value picker, not relative +/- actions — "I have half of
+    /// this" is a fact you select, not something you'd normally arrive at
+    /// by repeatedly tapping +0.25.
+    private var quantityPicker: some View {
+        Picker("Quantity", selection: Binding(
+            get: { task.quantity },
+            set: { task.quantity = $0 }
+        )) {
+            ForEach(Self.quantityOptions, id: \.self) { value in
+                Text(formattedQuantity(value)).tag(value)
+            }
+        }
+        .pickerStyle(.menu)
+        .labelsHidden()
+        .tint(.primary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color.secondary.opacity(0.15), in: Capsule())
+        .fixedSize()
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(task.title)
-                    .font(.body)
-                    .strikethrough(task.isCompleted)
-                Spacer()
-                if showsScheduledBadge && task.isScheduled,
-                   let scheduledDate = (task.scheduledBlocks ?? []).min(by: { $0.startTime < $1.startTime })?.date {
-                    VStack(alignment: .trailing, spacing: 1) {
-                        Text(Self.scheduledDateFormatter.string(from: scheduledDate))
-                            .font(.caption2)
-                            .foregroundStyle(.green)
-                        Text(Self.relativeDayLabel(for: scheduledDate))
-                            .font(.caption2)
-                            .foregroundStyle(.green)
+        HStack(alignment: .top, spacing: 8) {
+            if showsPantryAge {
+                quantityPicker
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(task.title)
+                        .font(.body)
+                        .strikethrough(task.isCompleted)
+                    Spacer()
+                    if showsScheduledBadge && task.isScheduled,
+                       let scheduledDate = (task.scheduledBlocks ?? []).min(by: { $0.startTime < $1.startTime })?.date {
+                        VStack(alignment: .trailing, spacing: 1) {
+                            Text(Self.scheduledDateFormatter.string(from: scheduledDate))
+                                .font(.caption2)
+                                .foregroundStyle(.green)
+                            Text(Self.relativeDayLabel(for: scheduledDate))
+                                .font(.caption2)
+                                .foregroundStyle(.green)
+                        }
                     }
                 }
-            }
-            if !task.notes.isEmpty {
-                Text(task.notes)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if !task.nextStep.isEmpty {
-                Label(task.nextStep, systemImage: "arrow.turn.down.right")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            if showsPantryAge {
-                Label(pantryAgeText, systemImage: "calendar")
+                if !task.notes.isEmpty {
+                    Text(task.notes)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if !task.nextStep.isEmpty {
+                    Label(task.nextStep, systemImage: "arrow.turn.down.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                if showsPantryAge {
+                    Label(pantryAgeText, systemImage: "calendar")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    HStack(spacing: 12) {
+                        Label(addedAgeText, systemImage: "hourglass")
+                        // A recurring task's own `dueDate` is just its
+                        // recurrence anchor (see `TaskItem.hasRecurringOccurrence`)
+                        // — once that anchor's passed, showing it here reads as
+                        // a stale/wrong date. `nextRecurringOccurrenceDate()` is
+                        // the same "soonest still-ahead occurrence" this list is
+                        // already sorted by (see `ShelfListView.sortDate`), so
+                        // the date shown here always matches the date it's
+                        // ordered by.
+                        if let previewDate = task.isRecurring ? task.nextRecurringOccurrenceDate() : task.dueDate {
+                            Label(previewDate.formatted(date: .abbreviated, time: .omitted), systemImage: "calendar")
+                        }
+                        if task.estimatedMinutes > 0 {
+                            Label(task.durationLabel, systemImage: "clock")
+                        }
+                        if task.pushedCount > 0 {
+                            Label(pushedCountText, systemImage: "arrow.uturn.forward")
+                                .foregroundStyle(.orange)
+                        }
+                    }
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-            } else {
-                HStack(spacing: 12) {
-                    Label(addedAgeText, systemImage: "hourglass")
-                    // A recurring task's own `dueDate` is just its
-                    // recurrence anchor (see `TaskItem.hasRecurringOccurrence`)
-                    // — once that anchor's passed, showing it here reads as
-                    // a stale/wrong date. `nextRecurringOccurrenceDate()` is
-                    // the same "soonest still-ahead occurrence" this list is
-                    // already sorted by (see `ShelfListView.sortDate`), so
-                    // the date shown here always matches the date it's
-                    // ordered by.
-                    if let previewDate = task.isRecurring ? task.nextRecurringOccurrenceDate() : task.dueDate {
-                        Label(previewDate.formatted(date: .abbreviated, time: .omitted), systemImage: "calendar")
-                    }
-                    if task.estimatedMinutes > 0 {
-                        Label(task.durationLabel, systemImage: "clock")
-                    }
-                    if task.pushedCount > 0 {
-                        Label(pushedCountText, systemImage: "arrow.uturn.forward")
-                            .foregroundStyle(.orange)
-                    }
                 }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            }
-            if !task.tags.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(task.tags, id: \.self) { tag in
-                            Text(tag)
-                                .font(.caption2)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(Color.accentColor.opacity(0.15))
-                                .clipShape(Capsule())
+                if !task.tags.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(task.tags, id: \.self) { tag in
+                                Text(tag)
+                                    .font(.caption2)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(Color.accentColor.opacity(0.15))
+                                    .clipShape(Capsule())
+                            }
                         }
                     }
                 }

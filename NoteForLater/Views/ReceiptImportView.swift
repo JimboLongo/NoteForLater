@@ -40,6 +40,16 @@ struct ReceiptCandidate: Identifiable {
 /// shelf's own Pantry pane.
 struct ReceiptImportView: View {
     let shelf: Shelf
+    /// Called after `addSelectedItems()` finishes inserting everything,
+    /// instead of this view's own `dismiss()` — `nil` (the plain "present
+    /// as a sheet straight from the Pantry" case, unchanged from before
+    /// `BarcodeScannerView` existed) means dismissing this view alone
+    /// already lands back on the Pantry. `BarcodeScannerView` passes one
+    /// instead, because it pushes this view onto *its own* NavigationStack
+    /// rather than presenting it directly — this view's `dismiss()` would
+    /// only pop back to the live camera screen, not out to the Pantry the
+    /// user actually wants to land on after tapping Add.
+    var onFinishAdding: (() -> Void)?
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @State private var scanService = ReceiptScanService()
@@ -54,8 +64,9 @@ struct ReceiptImportView: View {
     /// instead of duplicating it — non-empty means the empty "Scan a
     /// Receipt" state is skipped entirely and the review list shows
     /// immediately, as if a receipt scan had already produced them.
-    init(shelf: Shelf, initialCandidates: [ReceiptCandidate] = []) {
+    init(shelf: Shelf, initialCandidates: [ReceiptCandidate] = [], onFinishAdding: (() -> Void)? = nil) {
         self.shelf = shelf
+        self.onFinishAdding = onFinishAdding
         _candidates = State(initialValue: initialCandidates)
         _hasScanned = State(initialValue: !initialCandidates.isEmpty)
     }
@@ -258,7 +269,11 @@ struct ReceiptImportView: View {
             guard !trimmed.isEmpty else { continue }
             modelContext.insert(TaskItem(title: trimmed, shelf: shelf))
         }
-        dismiss()
+        if let onFinishAdding {
+            onFinishAdding()
+        } else {
+            dismiss()
+        }
     }
 }
 
