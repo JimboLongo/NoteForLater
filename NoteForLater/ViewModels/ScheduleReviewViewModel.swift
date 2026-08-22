@@ -514,7 +514,14 @@ final class ScheduleReviewViewModel {
 
         if didTrim {
             try? modelContext.save()
-            loadExistingBlocks(allBlocksNow)
+            // Not `allBlocksNow` — that's a pre-trim snapshot, and every
+            // block `removeBlock` deleted above is still in it, just with
+            // `task`/`habit` now nil (see `removeBlock`'s nil-before-delete
+            // ordering, §1.1a). Loading it back in would resurrect those
+            // objects into `blocks` with both relationships nil, which
+            // `ScheduledBlock.displayTitle` renders as "Open slot". Re-fetch
+            // so deleted blocks are actually gone from what gets loaded.
+            loadExistingBlocks((try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? [])
         }
     }
 

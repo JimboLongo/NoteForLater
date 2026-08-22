@@ -1128,6 +1128,48 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertEqual(fixture.task.remainingMinutes, 120, "the trim sweep must give back the time it reclaims — this is the leak that ran on every Calendar appear")
     }
 
+    /// `trimOverflowingRuleBlocksAcrossFutureDays` loaded its pre-trim
+    /// `allBlocksNow` snapshot back into `blocks` after deleting the excess
+    /// groups — reinserting the very objects `removeBlock` had just nil'd
+    /// out and deleted. `ScheduledBlock.displayTitle` falls back to "Open
+    /// slot" for a block with no task and no habit, so a trimmed block
+    /// resurrected this way rendered as a phantom "Open slot" row.
+    func test_trimSweepOfOverflowingRuleBlocks_doesNotResurrectDeletedBlocksAsOpenSlots() async throws {
+        let (shelf, rule) = makeShelf(fillStrategy: .maxTaskCount, maxTaskCount: 1, maxMinutesPerTask: 120)
+
+        let futureDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+
+        let first = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        first.remainingMinutes = 0
+        first.isScheduled = true
+        let firstStart = calendar.date(byAdding: .hour, value: 9, to: futureDay)!
+        let firstBlock = ScheduledBlock(date: futureDay, startTime: firstStart, endTime: calendar.date(byAdding: .minute, value: 60, to: firstStart)!, task: first)
+        context.insert(firstBlock)
+        first.scheduledBlocks = [firstBlock]
+
+        // Starts later than `first`, so it's the one the count-cap trim
+        // pops off (`groups` sorted ascending by `earliestStart`, excess
+        // popped from the end).
+        let second = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        second.remainingMinutes = 0
+        second.isScheduled = true
+        let secondStart = calendar.date(byAdding: .hour, value: 12, to: futureDay)!
+        let secondBlock = ScheduledBlock(date: futureDay, startTime: secondStart, endTime: calendar.date(byAdding: .minute, value: 60, to: secondStart)!, task: second)
+        context.insert(secondBlock)
+        second.scheduledBlocks = [secondBlock]
+
+        let calendarService = FakeCalendarService()
+        calendarService.freeSlotsProvider = { [self.businessHoursSlot(on: $0)] }
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: futureDay)
+
+        await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+
+        XCTAssertFalse(
+            viewModel.blocks.contains { $0.task == nil && $0.habit == nil },
+            "a block the trim sweep just deleted must not come back as a task-less, habit-less \"Open slot\""
+        )
+    }
+
     /// The counterpart guard: a *completed* block's time was genuinely
     /// spent, so removal must NOT hand it back.
     func test_completedBlockRemoval_doesNotRestore() async throws {
