@@ -3,10 +3,12 @@ import SwiftData
 
 /// The Kitchen shelf's own screen — a segmented switch between Pantry
 /// (ingredients on hand, same concept as the plain shelf list, just
-/// styled for it — see `ShelfListView`'s `showsPantryAge`) and Cookbook
-/// (saved recipes — see `CookbookView`). Reached the same way any other
-/// shelf is, via `ShelfCarouselView`, which routes here instead of the
-/// plain `ShelfListView` whenever `shelf.isKitchen`.
+/// styled for it — see `ShelfListView`'s `showsPantryAge`), Cookbook
+/// (saved recipes — see `CookbookView`), and Meals (recipes ranked by how
+/// many ingredients are still missing from the Pantry — see `MealsView`).
+/// Reached the same way any other shelf is, via `ShelfCarouselView`, which
+/// routes here instead of the plain `ShelfListView` whenever
+/// `shelf.isKitchen`.
 struct KitchenView: View {
     let shelf: Shelf
     @State private var selectedPane: Pane = .pantry
@@ -14,6 +16,7 @@ struct KitchenView: View {
     private enum Pane: String, CaseIterable {
         case pantry = "Pantry"
         case cookbook = "Cookbook"
+        case meals = "Meals"
     }
 
     var body: some View {
@@ -38,6 +41,8 @@ struct KitchenView: View {
                 ShelfListView(shelf: shelf, displayName: "Pantry")
             case .cookbook:
                 CookbookView(shelf: shelf)
+            case .meals:
+                MealsView(shelf: shelf)
             }
         }
     }

@@ -12,6 +12,7 @@
 		5020DD4813CD545554230040 /* OpenFoodFactsServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09BD699B348D80CB6806E2B9 /* OpenFoodFactsServiceTests.swift */; };
 		7CC5EBE6035848FA82FDB754 /* FakeCalendarService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0445FFD6E3084A6D9EF502B1 /* FakeCalendarService.swift */; };
 		9E6F11BB107A4A089B67FD31 /* HabitRollingStatsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3F965C18B2385814DF25BDD /* HabitRollingStatsTests.swift */; };
+		A85A179B079F60FD5A4043E9 /* MealSuggestionServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EEEA0F8829F20DBDC58BF32 /* MealSuggestionServiceTests.swift */; };
 		AC5AC49498EDDFFFE2E161D4 /* ReceiptLineParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99D88D01BE7CD604EA3CD89C /* ReceiptLineParserTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -28,6 +29,7 @@
 /* Begin PBXFileReference section */
 		0445FFD6E3084A6D9EF502B1 /* FakeCalendarService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FakeCalendarService.swift; sourceTree = "<group>"; };
 		09BD699B348D80CB6806E2B9 /* OpenFoodFactsServiceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OpenFoodFactsServiceTests.swift; sourceTree = "<group>"; };
+		1EEEA0F8829F20DBDC58BF32 /* MealSuggestionServiceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MealSuggestionServiceTests.swift; sourceTree = "<group>"; };
 		1FE8D30E50874F1CFBC6C2DA /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		356652DFD867DA051EA36E9A /* NoteForLaterTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NoteForLaterTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		44CB4354301D3EC300B83C83 /* NoteForLater.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NoteForLater.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -92,6 +94,7 @@
 				0445FFD6E3084A6D9EF502B1 /* FakeCalendarService.swift */,
 				DA5013E3FBE3449FA3A0C911 /* SchedulingEngineTests.swift */,
 				09BD699B348D80CB6806E2B9 /* OpenFoodFactsServiceTests.swift */,
+				1EEEA0F8829F20DBDC58BF32 /* MealSuggestionServiceTests.swift */,
 			);
 			path = NoteForLaterTests;
 			sourceTree = "<group>";
@@ -222,6 +225,7 @@
 				7CC5EBE6035848FA82FDB754 /* FakeCalendarService.swift in Sources */,
 				05E9FEF2A09F4F60BD0F50C8 /* SchedulingEngineTests.swift in Sources */,
 				5020DD4813CD545554230040 /* OpenFoodFactsServiceTests.swift in Sources */,
+				A85A179B079F60FD5A4043E9 /* MealSuggestionServiceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
