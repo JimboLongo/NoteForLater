@@ -127,8 +127,19 @@ struct ReceiptOCRScannerView: View {
             for line in lines {
                 guard let upc = ReceiptLineParser.upc(in: line.text) else { continue }
                 newVisibleBoxes.append((upc, line.boundingBox))
-                if lookupCache[upc] == nil {
+                switch lookupCache[upc] {
+                case .none:
                     newUPCs.append(upc)
+                case .retryable(let lastAttempt) where Date().timeIntervalSince(lastAttempt) > Self.retryBackoff:
+                    // Eligible again — enough time has passed that Open
+                    // Food Facts' own rate-limit window has likely
+                    // cleared. Checked against `lastAttempt`, not just
+                    // "was it ever `.retryable`," so a UPC still on
+                    // screen doesn't get re-fired on every single frame
+                    // while the limiter is still actively backing off.
+                    newUPCs.append(upc)
+                default:
+                    break
                 }
             }
             // Replaced wholesale, not appended — see `visibleBoxes`'s own
@@ -141,23 +152,81 @@ struct ReceiptOCRScannerView: View {
                 lookupCache[upc] = .pending
             }
 
-            // Concurrent, not queued behind each other — a single receipt
-            // frame can show several UPC-bearing lines at once, same
-            // convention the original photo-based receipt flow already
-            // established for a whole receipt's worth of lines together.
-            await withTaskGroup(of: (String, OpenFoodFactsService.ProductInfo?).self) { group in
-                for upc in newUPCs {
-                    group.addTask { (upc, await OpenFoodFactsService.lookupProductInfo(upc: upc)) }
-                }
-                for await (upc, info) in group {
-                    if let info {
-                        lookupCache[upc] = .found
-                        candidates.append(ReceiptCandidate(name: info.name, brand: info.brand, size: info.size, isSelected: true, source: .upcLookup))
-                    } else {
-                        lookupCache[upc] = .notFound
-                    }
+            // Capped at `maxConcurrentLookups`, not one Task per UPC — a
+            // single receipt frame with a dozen-plus lines used to fire
+            // that many concurrent Open Food Facts requests at once,
+            // which is exactly what pushed their API into rate-limiting
+            // the whole burst with HTTP 429 (found via the diag logging
+            // `OpenFoodFactsService.lookupProductInfo` added for that
+            // investigation). A handful in flight at a time still
+            // overlaps lookups enough to feel instant without tripping
+            // the limiter.
+            let results = await Self.lookupConcurrently(newUPCs, maxConcurrent: Self.maxConcurrentLookups) { upc in
+                (upc, await OpenFoodFactsService.lookupProductInfoDetailed(upc: upc))
+            }
+            for (upc, outcome) in results {
+                switch outcome {
+                case .found(let info):
+                    lookupCache[upc] = .found
+                    candidates.append(ReceiptCandidate(name: info.name, brand: info.brand, size: info.size, isSelected: true, source: .upcLookup))
+                case .notFound:
+                    lookupCache[upc] = .notFound
+                case .rateLimited:
+                    lookupCache[upc] = .retryable(lastAttempt: .now)
                 }
             }
+        }
+    }
+
+    /// How long a `.retryable` UPC sits out before `handleFrame` will
+    /// fire it again — long enough that a rate-limited burst has a real
+    /// chance to clear, short enough that a still-visible line resolves
+    /// within a couple of retry windows rather than needing the user to
+    /// hold the camera on it indefinitely.
+    private static let retryBackoff: TimeInterval = 3
+
+    /// The middle of Open Food Facts' own suggested range for a
+    /// well-behaved anonymous client — enough overlap to still feel
+    /// instant, without reproducing the 429 cascade a full, unbounded
+    /// burst caused.
+    private static let maxConcurrentLookups = 4
+
+    /// Runs `operation` over `items` with at most `maxConcurrent` running
+    /// at once, returning results in `items`' own order rather than
+    /// completion order.
+    ///
+    /// Deliberately not a `DispatchSemaphore` around the loop below —
+    /// `semaphore.wait()` blocks whatever thread is running this `Task`,
+    /// and Swift Concurrency's cooperative thread pool has a fixed, small
+    /// number of threads with no guarantee one is free to keep other work
+    /// moving while this one sits blocked; that's a real deadlock risk,
+    /// not just a style preference. This gets the same cap with no
+    /// blocking at all: only `maxConcurrent` child tasks are ever alive
+    /// in the group at once, and the next one starts the instant any one
+    /// finishes.
+    private static func lookupConcurrently<Result: Sendable>(
+        _ items: [String],
+        maxConcurrent: Int,
+        operation: @escaping @Sendable (String) async -> Result
+    ) async -> [Result] {
+        await withTaskGroup(of: (Int, Result).self) { group in
+            var nextIndex = 0
+            func startNext() {
+                guard nextIndex < items.count else { return }
+                let index = nextIndex
+                let item = items[index]
+                nextIndex += 1
+                group.addTask { (index, await operation(item)) }
+            }
+            for _ in 0..<min(maxConcurrent, items.count) {
+                startNext()
+            }
+            var indexed: [(Int, Result)] = []
+            for await entry in group {
+                indexed.append(entry)
+                startNext()
+            }
+            return indexed.sorted { $0.0 < $1.0 }.map(\.1)
         }
     }
 }
@@ -168,6 +237,14 @@ enum UPCLookupState {
     case pending
     case found
     case notFound
+    /// Hit Open Food Facts' rate limiter (HTTP 429) rather than a real
+    /// "not a product" answer — kept distinct from `.notFound` so it
+    /// stays eligible for another attempt once the limiter backs off,
+    /// instead of being written off permanently for the rest of the
+    /// session. `lastAttempt` is what lets `handleFrame` wait a beat
+    /// before trying the same UPC again rather than re-firing it on
+    /// every subsequent frame while still rate-limited.
+    case retryable(lastAttempt: Date)
 
     var boxColor: UIColor {
         switch self {
@@ -176,6 +253,7 @@ enum UPCLookupState {
         // "lime green" actually names than either of those reads as.
         case .found: return UIColor(red: 0.6, green: 1.0, blue: 0.2, alpha: 1)
         case .notFound: return .red
+        case .retryable: return .orange
         }
     }
 }
