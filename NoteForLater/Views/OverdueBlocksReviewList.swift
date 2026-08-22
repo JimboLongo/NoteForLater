@@ -154,12 +154,14 @@ struct OverdueBlocksReviewList: View {
         }
     }
 
+    /// The whole row is the tap target, not just the circle —
+    /// `.contentShape(Rectangle())` on the outer `HStack` is what makes
+    /// the `Spacer()`'s blank space and the lock icon tappable too, not
+    /// just wherever the row happens to draw something.
     private func blockRow(_ block: ScheduledBlock, isCompleted: Bool) -> some View {
         HStack(alignment: .top, spacing: 12) {
             selectionCircle(isSelected: isCompleted)
-                .contentShape(Rectangle())
                 .padding(.vertical, 4)
-                .onTapGesture { onToggle(.block(block)) }
             VStack(alignment: .leading) {
                 Text(timeRangeText(block))
                     .font(.caption)
@@ -174,16 +176,17 @@ struct OverdueBlocksReviewList: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .contentShape(Rectangle())
+        .onTapGesture { onToggle(.block(block)) }
         .opacity(isCompleted ? 0.5 : 1)
         .listRowBackground((block.task?.shelf?.color ?? Color.clear).opacity(0.2))
     }
 
+    /// Same full-row tap target as `blockRow`.
     private func habitRow(_ occurrence: HabitReviewOccurrence, isCompleted: Bool) -> some View {
         HStack(alignment: .top, spacing: 12) {
             selectionCircle(isSelected: isCompleted)
-                .contentShape(Rectangle())
                 .padding(.vertical, 4)
-                .onTapGesture { onToggle(.habit(occurrence)) }
             VStack(alignment: .leading) {
                 Text(occurrence.modeLabel)
                     .font(.caption)
@@ -193,6 +196,8 @@ struct OverdueBlocksReviewList: View {
             }
             Spacer()
         }
+        .contentShape(Rectangle())
+        .onTapGesture { onToggle(.habit(occurrence)) }
         .opacity(isCompleted ? 0.5 : 1)
         .listRowBackground(Shelf.flatten(.accentColor, opacity: 0.2))
     }

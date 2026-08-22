@@ -728,25 +728,28 @@ struct NightlyReviewView: View {
         }
     }
 
-    /// A tap here only flips membership in `stagedTwoMinuteToggleIDs` — the
-    /// real `setCompleted` write (and the dirty-flag set that used to sit
-    /// right here) is deferred to `advance()`'s `next == .tomorrow` branch,
-    /// same visual-only-until-Next rule as the Today step's own rows.
+    /// A tap anywhere on the row only flips membership in
+    /// `stagedTwoMinuteToggleIDs` — the real `setCompleted` write (and the
+    /// dirty-flag set that used to sit right here) is deferred to
+    /// `advance()`'s `next == .tomorrow` branch, same visual-only-until-
+    /// Next rule as the Today step's own rows. `.contentShape(Rectangle())`
+    /// on the whole `HStack`, not just the circle, is what makes the title
+    /// text and the `Spacer()`'s blank space tappable too.
     private func twoMinuteTaskRow(_ task: TaskItem) -> some View {
         let isCompleted = effectiveTwoMinuteCompleted(task)
         return HStack(spacing: 12) {
             twoMinuteSelectionCircle(isSelected: isCompleted)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    if stagedTwoMinuteToggleIDs.contains(task.id) {
-                        stagedTwoMinuteToggleIDs.remove(task.id)
-                    } else {
-                        stagedTwoMinuteToggleIDs.insert(task.id)
-                    }
-                }
             Text(task.title)
                 .strikethrough(isCompleted)
             Spacer()
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if stagedTwoMinuteToggleIDs.contains(task.id) {
+                stagedTwoMinuteToggleIDs.remove(task.id)
+            } else {
+                stagedTwoMinuteToggleIDs.insert(task.id)
+            }
         }
         .opacity(isCompleted ? 0.5 : 1)
     }
