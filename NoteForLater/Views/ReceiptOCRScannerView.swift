@@ -291,12 +291,20 @@ private final class ReceiptOCRCaptureViewController: UIViewController, AVCapture
     /// removed first, so one that's no longer in `entries` (its line
     /// scrolled out of frame, per `ReceiptOCRScannerView.visibleBoxes`'s
     /// own doc comment) simply isn't recreated, rather than needing to be
-    /// explicitly cleaned up. `layerRectConverted(fromMetadataOutputRect:)`
-    /// is what turns Vision's normalized, bottom-left-origin box into the
-    /// correct on-screen rect for this exact preview layer, accounting
-    /// for `.resizeAspectFill`'s own cropping — the same conversion
-    /// AVFoundation's own metadata-object APIs use, which is why Vision's
-    /// coordinate convention was designed to match it in the first place.
+    /// explicitly cleaned up.
+    ///
+    /// `layerRectConverted(fromMetadataOutputRect:)` expects its input in
+    /// `AVCaptureMetadataOutput`'s own coordinate space: normalized,
+    /// **top-left origin, on the raw/unrotated buffer** — that's what
+    /// makes it correctly account for `.resizeAspectFill`'s cropping.
+    /// `entry.boundingBox` is Vision's own **bottom-left origin** box,
+    /// and — because `handleFrame` hands Vision's request an explicit
+    /// `.right` orientation — Vision reports it in the coordinate space
+    /// of the *already-rotated, upright* image, not the raw landscape
+    /// buffer. Both of those differ from what `layerRectConverted`
+    /// wants, so `rawBufferRect(for:)` below undoes both before handing
+    /// off to it — skipping either step is what previously put boxes at
+    /// 90° from where they belonged.
     func updateOverlays(_ entries: [(boundingBox: CGRect, state: UPCLookupState)]) {
         overlayLayers.forEach { $0.removeFromSuperlayer() }
         guard let previewLayer else {
@@ -304,7 +312,8 @@ private final class ReceiptOCRCaptureViewController: UIViewController, AVCapture
             return
         }
         overlayLayers = entries.map { entry in
-            let rect = previewLayer.layerRectConverted(fromMetadataOutputRect: entry.boundingBox)
+            let metadataRect = Self.rawBufferRect(for: entry.boundingBox)
+            let rect = previewLayer.layerRectConverted(fromMetadataOutputRect: metadataRect)
             let layer = CAShapeLayer()
             layer.path = UIBezierPath(rect: rect).cgPath
             layer.strokeColor = entry.state.boxColor.cgColor
@@ -313,6 +322,29 @@ private final class ReceiptOCRCaptureViewController: UIViewController, AVCapture
             previewLayer.addSublayer(layer)
             return layer
         }
+    }
+
+    /// Maps a Vision `boundingBox` — bottom-left origin, normalized to
+    /// the `.right`-corrected upright image — back to
+    /// `AVCaptureMetadataOutput`'s own convention: top-left origin,
+    /// normalized to the raw, unrotated buffer.
+    ///
+    /// Two independent corrections, composed:
+    /// - Bottom-left → top-left origin is an ordinary Y-flip:
+    ///   `y' = 1 - y - height`.
+    /// - Undoing the `.right` rotation (raw buffer needs a 90° clockwise
+    ///   turn to become the upright image Vision actually measured
+    ///   against) swaps width/height and remaps each axis through the
+    ///   other: `x' = 1 - maxY`, `y' = 1 - maxX`. Composed with the
+    ///   Y-flip above, the two collapse to the single formula below —
+    ///   there's no separate intermediate rect to build.
+    private static func rawBufferRect(for boundingBox: CGRect) -> CGRect {
+        CGRect(
+            x: 1 - boundingBox.maxY,
+            y: 1 - boundingBox.maxX,
+            width: boundingBox.height,
+            height: boundingBox.width
+        )
     }
 
     deinit {
