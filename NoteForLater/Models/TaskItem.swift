@@ -416,6 +416,13 @@ final class TaskItem {
     /// `tsp`, `oz`, `cup`, `lb`, `g`, `ml`), or `nil` for a bare count
     /// ("12 eggs" — no unit at all, just a number of items).
     var unit: String?
+    /// The brand name, if a UPC lookup found one — display-only, never
+    /// read by `PantryDeductionService`'s matching (that's still
+    /// whole-word against `title` alone, unaffected by this). `title`
+    /// itself is just the bare product name ("Sour Cream") — brand and
+    /// size are kept out of it entirely and shown as their own subtitle
+    /// in `ShelfListView.TaskRow` instead of baked into one string.
+    var brand: String?
 
     init(
         title: String,

@@ -278,9 +278,30 @@ struct TaskRow: View {
         Self.quantityFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 
+    /// "Culture · 8 oz" — brand and package size, read straight from
+    /// `TaskItem`'s own structured fields rather than parsed back out of
+    /// the title, since the title no longer carries either (see
+    /// `ReceiptImportView.addSelectedItems`). `nil` when there's nothing
+    /// to show at all — a bare-count or manually-typed item with neither
+    /// piece of data doesn't get an empty subtitle line.
+    private var pantrySubtitle: String? {
+        let sizeText: String? = {
+            guard let packageSize = task.packageSize else { return nil }
+            let numberText = formattedQuantity(packageSize)
+            guard let unit = task.unit, !unit.isEmpty else { return numberText }
+            return "\(numberText) \(unit)"
+        }()
+        let parts = [task.brand, sizeText].compactMap { $0 }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: " · ")
+    }
+
     /// A genuine value picker, not relative +/- actions — "I have half of
     /// this" is a fact you select, not something you'd normally arrive at
-    /// by repeatedly tapping +0.25.
+    /// by repeatedly tapping +0.25. Brand/size are shown in their own
+    /// subtitle (`pantrySubtitle`) rather than baked into the title, so
+    /// this only needs to show and set how many packages you have, not
+    /// repeat the unit here too.
     private var quantityPicker: some View {
         Picker("Quantity", selection: Binding(
             get: { task.quantity },
@@ -306,9 +327,17 @@ struct TaskRow: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text(task.title)
+                    // `.capitalized` is display-only — the stored title
+                    // stays whatever it actually is (usually already a
+                    // clean bare name post-scan, but this also normalizes
+                    // older ALL-CAPS-from-OCR titles without touching the
+                    // data). `.fixedSize` forces full wrapping instead of
+                    // letting the `Spacer()`/scheduled-badge siblings
+                    // squeeze this down to one truncated line.
+                    Text(task.title.capitalized)
                         .font(.body)
                         .strikethrough(task.isCompleted)
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer()
                     if showsScheduledBadge && task.isScheduled,
                        let scheduledDate = (task.scheduledBlocks ?? []).min(by: { $0.startTime < $1.startTime })?.date {
@@ -322,6 +351,15 @@ struct TaskRow: View {
                         }
                     }
                 }
+                if showsPantryAge {
+                    // Brand/size and the added-date both on one line
+                    // rather than two — `pantrySubtitle` is `nil` for an
+                    // item with neither piece of data, in which case this
+                    // is just the date on its own.
+                    Text([pantrySubtitle, pantryAgeText].compactMap { $0 }.joined(separator: " · "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if !task.notes.isEmpty {
                     Text(task.notes)
                         .font(.caption)
@@ -333,11 +371,7 @@ struct TaskRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                if showsPantryAge {
-                    Label(pantryAgeText, systemImage: "calendar")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                } else {
+                if !showsPantryAge {
                     HStack(spacing: 12) {
                         Label(addedAgeText, systemImage: "hourglass")
                         // A recurring task's own `dueDate` is just its

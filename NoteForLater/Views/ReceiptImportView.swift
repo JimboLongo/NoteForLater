@@ -264,10 +264,47 @@ struct ReceiptImportView: View {
     }
 
     private func addSelectedItems() {
+        // Keyed by title so a product already on the shelf (added by an
+        // earlier scan, or just now earlier in this same batch) gets
+        // "bought another one" treatment — `quantity += 1` — instead of
+        // a duplicate row. Rebuilt as new items are inserted, not just
+        // read once up front, so two matching candidates in the same Add
+        // tap correctly merge into each other too.
+        var existingByTitle = Dictionary(
+            (shelf.tasks ?? []).filter { !$0.isCompleted }.map { ($0.title.lowercased(), $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         for candidate in candidates where candidate.isSelected {
             let trimmed = candidate.name.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
-            modelContext.insert(TaskItem(title: trimmed, shelf: shelf))
+            let key = trimmed.lowercased()
+
+            if let existing = existingByTitle[key] {
+                existing.quantity += 1
+                continue
+            }
+
+            let task = TaskItem(title: trimmed, shelf: shelf)
+            task.brand = candidate.brand
+            // `candidate.size` is Open Food Facts' free-text quantity
+            // field ("16 oz") — the same shape a recipe ingredient line's
+            // leading amount takes, so the existing parser reads it
+            // directly with no new logic: fed "16 oz" alone, it returns
+            // quantity 16, unit "oz", and an empty (ignored) name. That's
+            // the *package size* (a fixed fact about the product), not
+            // how many you have — `quantity` is the count of packages,
+            // starting at 1 for a just-added item, same as the bare-count
+            // case (a line-parsed candidate with no size data at all)
+            // also starting at 1 rather than the old default of 0, which
+            // read as "I have none of this" for something just bought.
+            if let size = candidate.size {
+                let parsed = RecipeIngredientParser.parse(size)
+                task.packageSize = parsed.quantity
+                task.unit = parsed.unit
+            }
+            task.quantity = 1
+            modelContext.insert(task)
+            existingByTitle[key] = task
         }
         if let onFinishAdding {
             onFinishAdding()
