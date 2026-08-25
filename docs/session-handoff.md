@@ -1,5 +1,70 @@
 # Session handoff — open queue
 
+## 2026-08-24 — six-issue queue, tier 1/2 status
+
+Six issues were triaged this session, tackled in tier order. Current state:
+
+**Done:**
+- **#3 — deleted task's Tomorrow step didn't persist.** Root cause:
+  `NightlyReviewView`'s Done/Close buttons called `dismiss()` with no paired
+  save, relying on non-guaranteed SwiftData autosave. Fixed via
+  `finishAndDismiss()` (`try? modelContext.save(); dismiss()`), both buttons
+  now route through it. Shipped in `d99dbdb`.
+- **#2 — incomplete recurring tasks should push forward, not vanish.**
+  `PushedRecurringOccurrence` (taskID/originalDate/currentDate/isCompleted)
+  is captured in `NightlyReviewView.advance()` before
+  `clearIncompletePastBlocks` deletes the incomplete block. On launch,
+  `NoteForLaterApp.processPushedRecurringOccurrencesIfNeeded` →
+  `advanceOneDay` walks `currentDate` forward — **the whole gap in one
+  call**, not one day per launch (traced through the 9/1→9/2→9/3→9/4
+  example, confirmed correct) — relocating one placeholder `ScheduledBlock`
+  as it goes (never leaving orphans at intermediate days), stopping the
+  instant the next day is a real recurrence. `recurrenceEndDate` is
+  deliberately never checked. Shipped in `d99dbdb`. Still wants real
+  on-device, multi-day verification — nothing in this session simulated an
+  actual multi-day gap between launches, only traced the code by hand.
+
+**Open — #4, event duplication across days in day view — genuinely
+unresolved, NOT "root cause found":**
+
+Investigated across several rounds this session, no confirmed root cause.
+Do not restart from "it's `.startTime` corruption" — that hypothesis was
+tried and the one piece of ground-truth evidence obtained *contradicts* it.
+
+- Hypothesis 1 (moveEntry desyncs `.date`/`.startTime` during drag-reorder):
+  implemented a fix, deployed, user reported a regression (Clean Up Office
+  appearing on every day). Fix was fully reverted; confirmed via `git diff`
+  no trace remains in `ScheduleReviewViewModel.moveEntry`.
+- Hypothesis 2 (genuine data duplication — two block records): grepped
+  every `.startTime =` write site in the app (4 total, all behind explicit
+  drag gestures, one — `reorderTimeline`/`TimelineEntryRef` — dead code,
+  never called from anywhere). Nothing found that explains a duplicate
+  write outside user-initiated drags.
+- Hypothesis 3 (`.startTime` dynamically resetting to "now"): added
+  diagnostic logging (`ScheduleReviewView.logDuplicateInvestigationBlocks`,
+  since **removed** in `d99dbdb` — temporary, hardcoded to "clean up
+  office"/"fsa account") dumping every matching block's raw
+  `id`/`date`/`startTime`/`endTime` on `setupIfNeeded()`. The one capture
+  obtained (before the user deleted the test tasks) showed **exactly one
+  block each, `.date` and `.startTime` both correct and internally
+  consistent** — no duplication, no corruption. This is evidence *against*
+  all three hypotheses, not confirmation of any.
+
+**First step:** recreate a reproducible test case (a task that shows up on
+multiple days in day view but correctly once in week view) and re-add
+targeted diagnostic logging *before* touching any fix — the last round
+ended because the repro tasks were deleted mid-investigation, not because
+the bug was found. Get a log capture spanning the moment the duplicate
+*appears* in day view, not just a static dump at load time.
+
+**Not started:** #5 (2-Minute Tasks tap-to-edit → `TaskCardSheet`), #1
+(meal ingredient checklist → interactive pantry deduction).
+
+**Next session:** #4 (finish the investigation with a fresh repro before
+attempting any fix), then #5, then #1 if time allows.
+
+---
+
 Written 2026-08-21, after the habit-tap investigation (commits `2318fb0`…`3baf55e`).
 
 Detail lives in `docs/NoteForLater-Scheduling-Spec.md`; this file only says
