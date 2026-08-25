@@ -24,6 +24,7 @@ import CoreImage
 struct ReceiptOCRScannerView: View {
     let shelf: Shelf
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
     @State private var scanService = ReceiptScanService()
     @State private var candidates: [ReceiptCandidate] = []
     /// Every UPC any OCR pass has ever extracted, and what's known about
@@ -41,6 +42,24 @@ struct ReceiptOCRScannerView: View {
     @State private var isProcessingFrame = false
     @State private var isShowingReview = false
     @State private var isShowingPhotoImporter = false
+    @State private var isShowingUnmatchedEditor = false
+    /// Every UPC in the order it was *first* extracted by OCR — since a
+    /// receipt is naturally scanned top to bottom in one continuous pass,
+    /// this is a reliable stand-in for physical receipt order without
+    /// needing to reconstruct real on-page position across frames.
+    /// Appended to exactly once per UPC, in `handleFrame`'s `.none` case,
+    /// regardless of whether that UPC goes on to resolve or not — this is
+    /// what lets `UnmatchedUPCsEditorView` show matched and unmatched
+    /// lines interleaved the way they actually appeared, instead of two
+    /// disconnected lists.
+    @State private var upcOrder: [String] = []
+    /// The resolved product info behind every `.found` entry in
+    /// `lookupCache`, keyed by UPC — `ReceiptCandidate` itself doesn't
+    /// retain the UPC it came from, so this is what lets the combined
+    /// review list show an already-matched line's name/brand/size (and
+    /// what `attemptAutoPopulate`'s duplicate check in
+    /// `UnmatchedUPCsEditorView` compares a corrected UPC against).
+    @State private var foundInfo: [String: OpenFoodFactsService.ProductInfo] = [:]
 
     /// What `ReceiptOCRCaptureRepresentable` actually draws — each
     /// currently-visible box paired with whatever `lookupCache` currently
@@ -55,22 +74,74 @@ struct ReceiptOCRScannerView: View {
         }
     }
 
+    /// Every UPC seen this session that never became a real candidate —
+    /// genuinely not in Open Food Facts' catalog, still `.retryable`, or
+    /// simply never got a turn before "Done Scanning" was tapped. Offered
+    /// to `UnmatchedUPCsEditorView` for manual entry rather than just
+    /// being dropped silently. Ordered via `upcOrder`, not just filtered
+    /// out of `lookupCache` (a `Dictionary`, with no meaningful order of
+    /// its own) — only actually matters for "is there anything to
+    /// review" here, but keeps this consistent with `upcOrder` being the
+    /// one source of truth for order everywhere else it's used.
+    private var unmatchedUPCs: [String] {
+        upcOrder.filter { upc in
+            if case .found = lookupCache[upc] { return false }
+            return true
+        }
+    }
+
+    /// Whether any box currently on screen came back not-found — a
+    /// stronger hint that OCR misread a digit than that the product is
+    /// genuinely absent from Open Food Facts' catalog: real grocery UPCs
+    /// resolve the large majority of the time (confirmed by
+    /// `OpenFoodFactsService`'s own diag logging during an earlier
+    /// investigation, where several of the "not found" results turned
+    /// out to be truncated digit runs, not real answers). Surfaced as a
+    /// live nudge to reposition the camera over that specific line —
+    /// re-reading the same physical barcode from a slightly different
+    /// angle is what actually produces a different (hopefully correct)
+    /// OCR extraction, not anything this code can retry on its own.
+    private var hasVisibleNotFoundBox: Bool {
+        visibleBoxes.contains { box in
+            if case .notFound = lookupCache[box.upc] { return true }
+            return false
+        }
+    }
+
     var body: some View {
         NavigationStack {
             ZStack(alignment: .bottom) {
                 ReceiptOCRCaptureRepresentable(onFrame: handleFrame, overlayEntries: overlayEntries)
                     .ignoresSafeArea()
                 VStack(spacing: 12) {
+                    if hasVisibleNotFoundBox {
+                        Text("Red box: no match found. Often a misread digit — try repositioning the camera over it.")
+                            .font(.caption)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(.red.opacity(0.85), in: Capsule())
+                    }
                     Text("\(candidates.count) scanned")
                         .font(.headline)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 8)
                         .background(.thinMaterial, in: Capsule())
                     Button("Done Scanning") {
-                        isShowingReview = true
+                        if unmatchedUPCs.isEmpty {
+                            isShowingReview = true
+                        } else {
+                            isShowingUnmatchedEditor = true
+                        }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(candidates.isEmpty)
+                    // Not just `candidates.isEmpty` — a receipt where
+                    // every line so far is unmatched (nothing resolved
+                    // yet) still has UPCs worth reviewing manually, and
+                    // gating on matches alone would trap the user with no
+                    // way to ever reach that editor.
+                    .disabled(candidates.isEmpty && unmatchedUPCs.isEmpty)
                 }
                 .padding(.bottom, 32)
             }
@@ -105,6 +176,21 @@ struct ReceiptOCRScannerView: View {
             .fullScreenCover(isPresented: $isShowingPhotoImporter) {
                 ReceiptImportView(shelf: shelf)
             }
+            .sheet(isPresented: $isShowingUnmatchedEditor) {
+                // Every UPC seen this session, not just the unmatched
+                // ones — showing matched lines alongside unmatched ones
+                // in their original scan order is what makes it obvious
+                // which specific lines were missed, rather than a bare
+                // list of failures with no receipt context around them.
+                UnmatchedUPCsEditorView(orderedUPCs: upcOrder, foundInfo: foundInfo) { newCandidates in
+                    // Only ever *new* candidates from originally-unmatched
+                    // rows — an originally-matched row's own candidate is
+                    // already sitting in `candidates` from `handleFrame`,
+                    // so re-adding it here would duplicate it.
+                    candidates.append(contentsOf: newCandidates)
+                    isShowingReview = true
+                }
+            }
         }
     }
 
@@ -129,7 +215,28 @@ struct ReceiptOCRScannerView: View {
                 newVisibleBoxes.append((upc, line.boundingBox))
                 switch lookupCache[upc] {
                 case .none:
-                    newUPCs.append(upc)
+                    // First time this UPC has ever been seen — recorded
+                    // here, unconditionally, regardless of which branch
+                    // below it then takes. See `upcOrder`'s own doc
+                    // comment for why this is the one place that's
+                    // guaranteed to run exactly once per UPC.
+                    upcOrder.append(upc)
+                    // Checked synchronously, outside the concurrent/
+                    // rate-limited path below — a banked UPC resolves
+                    // for free and never needs to touch the network or
+                    // wait on `RequestRateLimiter` at all. Kept here
+                    // rather than inside `lookupConcurrently`'s closure
+                    // because that closure is `@Sendable` and
+                    // `ModelContext` isn't; a plain synchronous check in
+                    // this main-actor loop sidesteps the problem
+                    // entirely instead of needing a workaround for it.
+                    if let banked = UPCLookupService.checkUPCBank(upc: upc, in: modelContext) {
+                        lookupCache[upc] = .found
+                        foundInfo[upc] = banked
+                        candidates.append(ReceiptCandidate(name: banked.name, brand: banked.brand, size: banked.size, isSelected: true, source: .upcLookup))
+                    } else {
+                        newUPCs.append(upc)
+                    }
                 case .retryable(let lastAttempt) where Date().timeIntervalSince(lastAttempt) > Self.retryBackoff:
                     // Eligible again — enough time has passed that Open
                     // Food Facts' own rate-limit window has likely
@@ -168,6 +275,7 @@ struct ReceiptOCRScannerView: View {
                 switch outcome {
                 case .found(let info):
                     lookupCache[upc] = .found
+                    foundInfo[upc] = info
                     candidates.append(ReceiptCandidate(name: info.name, brand: info.brand, size: info.size, isSelected: true, source: .upcLookup))
                 case .notFound:
                     lookupCache[upc] = .notFound
