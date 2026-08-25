@@ -1731,6 +1731,25 @@ final class ScheduleReviewViewModel {
         let completed = (try? modelContext.fetch(FetchDescriptor<MealSelection>(
             predicate: #Predicate { $0.isCompleted }
         ))) ?? []
+        guard !completed.isEmpty else { return }
+
+        // `ScheduledBlock.mealSelection` has no explicit delete rule, so
+        // SwiftData defaults to `.nullify` — deleting the selection alone
+        // leaves its block behind with `mealSelection` set to nil instead
+        // of removing it. That orphan then passes `reviewableBlocks`'s own
+        // `mealSelection == nil` filter (meant to exclude *live* meal
+        // blocks, handled separately as `.meal`) and reappears as a
+        // phantom "Open slot" row — same day, same 5pm slot as the dinner
+        // that was just purged. Delete the block explicitly first, same
+        // as `purgeCompletedBlocks` removes a block alongside its task
+        // rather than relying on a cascade that isn't there.
+        let completedIDs = Set(completed.map(\.id))
+        let allBlocks = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        for block in allBlocks where block.mealSelection.map({ completedIDs.contains($0.id) }) ?? false {
+            removeBlock(block)
+            blocks.removeAll { $0.id == block.id }
+        }
+
         for selection in completed {
             modelContext.delete(selection)
         }

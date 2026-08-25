@@ -1272,6 +1272,38 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertTrue(remaining.contains { $0.id == incomplete.id }, "an incomplete meal selection is still-open backlog and must not be swept")
     }
 
+    /// `ScheduledBlock.mealSelection` has no explicit delete rule, so
+    /// SwiftData defaults to `.nullify` — deleting only the `MealSelection`
+    /// would leave its block behind with `mealSelection` set to nil, which
+    /// then passes `reviewableBlocks`'s own `mealSelection == nil` filter
+    /// and reappears as a phantom "Open slot" row on the same day/time the
+    /// purged dinner occupied. The purge must remove the block too.
+    func test_purgeCompletedMealSelections_alsoDeletesAssociatedBlock() async throws {
+        let completed = MealSelection(recipeID: UUID(), recipeTitle: "Tacos", date: day(2026, 1, 1))
+        completed.isCompleted = true
+        context.insert(completed)
+        let completedStart = calendar.date(byAdding: .hour, value: 17, to: day(2026, 1, 1))!
+        let completedBlock = ScheduledBlock(date: day(2026, 1, 1), startTime: completedStart, endTime: calendar.date(byAdding: .hour, value: 1, to: completedStart)!, task: nil)
+        completedBlock.isLocked = true
+        completedBlock.mealSelection = completed
+        context.insert(completedBlock)
+
+        let incomplete = MealSelection(recipeID: UUID(), recipeTitle: "Soup", date: day(2026, 1, 2))
+        context.insert(incomplete)
+        let incompleteStart = calendar.date(byAdding: .hour, value: 17, to: day(2026, 1, 2))!
+        let incompleteBlock = ScheduledBlock(date: day(2026, 1, 2), startTime: incompleteStart, endTime: calendar.date(byAdding: .hour, value: 1, to: incompleteStart)!, task: nil)
+        incompleteBlock.isLocked = true
+        incompleteBlock.mealSelection = incomplete
+        context.insert(incompleteBlock)
+
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: day(2026, 1, 2))
+        viewModel.purgeCompletedMealSelections()
+
+        let remainingBlocks = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        XCTAssertFalse(remainingBlocks.contains { $0.id == completedBlock.id }, "the purged meal's block must be deleted, not just nulled out — an orphan survives as a phantom \"Open slot\" row")
+        XCTAssertTrue(remainingBlocks.contains { $0.id == incompleteBlock.id }, "a still-open meal's block is live backlog and must not be touched")
+    }
+
     // MARK: - Unplaced reasons — one coarse explanation per task per walk
 
     /// Builds a shelf whose single rule runs on `daysOfWeek` between the
