@@ -60,14 +60,22 @@ struct ShelfListView: View {
             .sorted { sortDate(for: $0) < sortDate(for: $1) }
     }
 
-    /// A recurring task sorts by its own next occurrence (soonest first)
-    /// rather than `createdAt` — otherwise it'd sit wherever it happened
-    /// to be added instead of where it's actually coming up next. A
-    /// recurring task with nothing left coming (past `recurrenceEndDate`)
-    /// sorts to the very end rather than fighting for a spot among what's
-    /// still upcoming. Every other task keeps the query's own oldest-first
-    /// `createdAt` order.
+    /// A task that's actually landed on the calendar sorts by that real
+    /// slot — same earliest-block lookup `TaskRow`'s own scheduled-date
+    /// badge uses — before anything else gets a say, so the shelf order
+    /// matches what's actually coming up rather than when the task was
+    /// added or (for a recurring one) some future occurrence that isn't
+    /// this scheduled instance. A recurring task sorts by its own next
+    /// occurrence (soonest first) rather than `createdAt` — otherwise it'd
+    /// sit wherever it happened to be added instead of where it's
+    /// actually coming up next. A recurring task with nothing left coming
+    /// (past `recurrenceEndDate`) sorts to the very end rather than
+    /// fighting for a spot among what's still upcoming. Every other task
+    /// keeps the query's own oldest-first `createdAt` order.
     private func sortDate(for task: TaskItem) -> Date {
+        if task.isScheduled, let earliest = (task.scheduledBlocks ?? []).min(by: { $0.startTime < $1.startTime })?.date {
+            return earliest
+        }
         guard task.isRecurring else { return task.createdAt }
         return task.nextRecurringOccurrenceDate() ?? .distantFuture
     }
@@ -374,6 +382,12 @@ struct TaskRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
+                if !eligibleScheduleNames.isEmpty {
+                    Label(eligibleScheduleNames.joined(separator: ", "), systemImage: "calendar.badge.clock")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 if !showsPantryAge {
                     HStack(spacing: 12) {
                         Label(addedAgeText, systemImage: "hourglass")
@@ -449,6 +463,19 @@ struct TaskRow: View {
     /// other caption-sized badges here.
     private var pushedCountText: String {
         "Pushed \(task.pushedCount)×"
+    }
+
+    /// Same eligibility check the full task-edit sheet's "Eligible
+    /// Schedules" section uses (`task.isEligible(for: rule)` against
+    /// `shelf.schedulingRules`, `NightlyReviewView`'s `rules.sorted { $0
+    /// .sortOrder < $1.sortOrder }`) — just the names here, not the
+    /// toggle UI, so a glance at the shelf shows which schedules a task
+    /// is opted into without opening the full edit sheet.
+    private var eligibleScheduleNames: [String] {
+        (task.shelf?.schedulingRules ?? [])
+            .sorted { $0.sortOrder < $1.sortOrder }
+            .filter { task.isEligible(for: $0) }
+            .map { $0.displayName.isEmpty ? $0.summary : $0.displayName }
     }
 
     private var pantryAgeText: String {
