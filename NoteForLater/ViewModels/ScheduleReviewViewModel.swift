@@ -1755,6 +1755,40 @@ final class ScheduleReviewViewModel {
         }
     }
 
+    /// The flip side of `purgeCompletedMealSelections`: a `MealSelection`
+    /// that's still *incomplete* by the time its own day (or an earlier
+    /// one — same "unresolved backlog" idea `NightlyReviewView
+    /// .todayMealSelections` already applies) has been reviewed has
+    /// nothing left to wait for either. Without this it would otherwise
+    /// resurface in every future Nightly Review forever, the same
+    /// never-resolves bug `purgeCompletedMealSelections` fixed for the
+    /// completed side. No pantry deduction on this path — an incomplete
+    /// selection means the dinner never happened, so nothing should be
+    /// deducted for it. `reviewDate` is the caller's frozen day, not a
+    /// live re-read, for the same staleness reason `clearIncompletePastBlocks`
+    /// takes its own `cutoff` as a parameter rather than reading `.now`.
+    func resolveIncompleteMealSelections(reviewDate: Date) {
+        let cutoff = Calendar.current.startOfDay(for: reviewDate)
+        let incomplete = (try? modelContext.fetch(FetchDescriptor<MealSelection>(
+            predicate: #Predicate { !$0.isCompleted && $0.date <= cutoff }
+        ))) ?? []
+        guard !incomplete.isEmpty else { return }
+
+        // Same orphan-block problem `purgeCompletedMealSelections` has —
+        // `ScheduledBlock.mealSelection` nullifies rather than cascades,
+        // so the block has to be deleted explicitly too.
+        let incompleteIDs = Set(incomplete.map(\.id))
+        let allBlocks = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        for block in allBlocks where block.mealSelection.map({ incompleteIDs.contains($0.id) }) ?? false {
+            removeBlock(block)
+            blocks.removeAll { $0.id == block.id }
+        }
+
+        for selection in incomplete {
+            modelContext.delete(selection)
+        }
+    }
+
     /// Run at the start of every generate/regenerate — clears out every
     /// block (task or habit) left over from a day before today, so old
     /// days never just keep silently piling up unreviewed. An
@@ -2133,6 +2167,31 @@ final class ScheduleReviewViewModel {
         task.isScheduled = true
         blocks.append(block)
         blocks.sort { $0.startTime < $1.startTime }
+    }
+
+    /// Keeps `blocks` in sync with a `ScheduledBlock` a caller inserted
+    /// directly into `modelContext`, bypassing this view model entirely —
+    /// currently only `NightlyReviewView.insertMealBlock`, which creates
+    /// the Meals step's 5pm block itself rather than going through
+    /// `insertBlock`. `blocks` is `private(set)` and is what the Tomorrow
+    /// step actually renders (`DayTimelineGridView`'s `rows` come from
+    /// `tomorrowViewModel.blocks`, not a live fetch) — without this, a
+    /// newly picked meal's block exists in the store but the already-
+    /// loaded `blocks` snapshot never learns about it, so it never
+    /// appears on the calendar until something else happens to reload.
+    func registerInsertedBlock(_ block: ScheduledBlock) {
+        blocks.append(block)
+        blocks.sort { $0.startTime < $1.startTime }
+    }
+
+    /// Mirror of `registerInsertedBlock`, for a caller that deletes a
+    /// block directly rather than through `removeBlock` — currently only
+    /// `NightlyReviewView.removeMealBlock`, run right before re-picking a
+    /// meal inserts its replacement. Without this, re-picking would leave
+    /// the old block's now-stale entry sitting in `blocks` alongside the
+    /// new one.
+    func deregisterBlock(_ block: ScheduledBlock) {
+        blocks.removeAll { $0.id == block.id }
     }
 
     /// §5.1/§8: same `taskOrdering` the auto-scheduler itself sorts

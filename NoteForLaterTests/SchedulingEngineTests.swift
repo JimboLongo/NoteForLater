@@ -42,7 +42,7 @@ final class SchedulingEngineTests: XCTestCase {
         container = try ModelContainer(
             for: TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self,
                 SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self,
-                Habit.self, HabitLog.self, MealSelection.self,
+                Habit.self, HabitLog.self, MealSelection.self, Recipe.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
         context = ModelContext(container)
@@ -1302,6 +1302,94 @@ final class SchedulingEngineTests: XCTestCase {
         let remainingBlocks = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
         XCTAssertFalse(remainingBlocks.contains { $0.id == completedBlock.id }, "the purged meal's block must be deleted, not just nulled out — an orphan survives as a phantom \"Open slot\" row")
         XCTAssertTrue(remainingBlocks.contains { $0.id == incompleteBlock.id }, "a still-open meal's block is live backlog and must not be touched")
+    }
+
+    /// The flip side of the completed-purge tests: a `MealSelection` from
+    /// an earlier, unresolved day must be swept (selection and block
+    /// alike, same orphan-block concern as `purgeCompletedMealSelections`)
+    /// once the day it's for has been reviewed — otherwise it resurfaces
+    /// in every future Nightly Review forever. Also proves no pantry
+    /// deduction happens on this path: the matching pantry item's
+    /// quantity must be untouched, since an incomplete selection means
+    /// the dinner never happened.
+    func test_resolveIncompleteMealSelections_deletesBacklogSelectionAndBlockWithNoDeduction() async throws {
+        let recipe = Recipe(title: "Omelette", ingredients: ["2 eggs"])
+        context.insert(recipe)
+        let eggs = TaskItem(title: "Eggs")
+        eggs.quantity = 12
+        context.insert(eggs)
+
+        let backlogDay = day(2026, 1, 1)
+        let reviewDay = day(2026, 1, 3)
+        let selection = MealSelection(recipeID: recipe.id, recipeTitle: recipe.title, date: backlogDay)
+        context.insert(selection)
+        let start = calendar.date(byAdding: .hour, value: 17, to: backlogDay)!
+        let block = ScheduledBlock(date: backlogDay, startTime: start, endTime: calendar.date(byAdding: .hour, value: 1, to: start)!, task: nil)
+        block.isLocked = true
+        block.mealSelection = selection
+        context.insert(block)
+
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: reviewDay)
+        viewModel.resolveIncompleteMealSelections(reviewDate: reviewDay)
+
+        let remainingSelections = (try? context.fetch(FetchDescriptor<MealSelection>())) ?? []
+        XCTAssertFalse(remainingSelections.contains { $0.id == selection.id }, "an incomplete backlog meal selection must be resolved away once its day has been reviewed, or it resurfaces forever")
+        let remainingBlocks = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        XCTAssertFalse(remainingBlocks.contains { $0.id == block.id }, "the backlog selection's block must go with it — an orphan survives as a phantom \"Open slot\" row")
+        XCTAssertEqual(eggs.quantity, 12, "an incomplete meal never happened — resolving it must not trigger pantry deduction")
+    }
+
+    /// A meal still due today or later — not backlog — must survive: only
+    /// a selection whose own day is on or before the reviewed day is
+    /// resolved away.
+    func test_resolveIncompleteMealSelections_leavesFutureSelectionUntouched() async throws {
+        let reviewDay = day(2026, 1, 3)
+        let futureDay = day(2026, 1, 4)
+        let selection = MealSelection(recipeID: UUID(), recipeTitle: "Soup", date: futureDay)
+        context.insert(selection)
+
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: reviewDay)
+        viewModel.resolveIncompleteMealSelections(reviewDate: reviewDay)
+
+        let remaining = (try? context.fetch(FetchDescriptor<MealSelection>())) ?? []
+        XCTAssertTrue(remaining.contains { $0.id == selection.id }, "a meal planned for a day after the one being reviewed hasn't had its chance yet and must not be swept")
+    }
+
+    /// `insertMealBlock` calls `modelContext.insert(block)` directly,
+    /// bypassing `ScheduleReviewViewModel.insertBlock` entirely — without
+    /// `registerInsertedBlock` keeping the view model's own `blocks` in
+    /// sync, the Tomorrow step (which renders `tomorrowViewModel.blocks`,
+    /// not a live fetch) never learns the new block exists.
+    func test_registerInsertedBlock_addsToBlocksSortedByStartTime() async throws {
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: day(2026, 1, 2))
+        let earlyStart = calendar.date(byAdding: .hour, value: 9, to: day(2026, 1, 2))!
+        let earlyBlock = ScheduledBlock(date: day(2026, 1, 2), startTime: earlyStart, endTime: calendar.date(byAdding: .hour, value: 1, to: earlyStart)!, task: nil)
+        context.insert(earlyBlock)
+        viewModel.loadExistingBlocks([earlyBlock])
+
+        let mealStart = calendar.date(byAdding: .hour, value: 17, to: day(2026, 1, 2))!
+        let mealBlock = ScheduledBlock(date: day(2026, 1, 2), startTime: mealStart, endTime: calendar.date(byAdding: .hour, value: 1, to: mealStart)!, task: nil)
+        context.insert(mealBlock)
+        viewModel.registerInsertedBlock(mealBlock)
+
+        XCTAssertTrue(viewModel.blocks.contains { $0.id == mealBlock.id }, "a directly-inserted block must be reflected in the cached blocks array the Tomorrow step actually renders")
+        XCTAssertEqual(viewModel.blocks.map(\.id), [earlyBlock.id, mealBlock.id], "blocks must stay sorted by startTime after the insert")
+    }
+
+    /// Mirror of the above: `removeMealBlock` deletes the old block
+    /// directly when re-picking a meal, and must clear the stale entry out
+    /// of `blocks` too, or it lingers alongside the replacement.
+    func test_deregisterBlock_removesFromBlocks() async throws {
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: day(2026, 1, 2))
+        let start = calendar.date(byAdding: .hour, value: 17, to: day(2026, 1, 2))!
+        let block = ScheduledBlock(date: day(2026, 1, 2), startTime: start, endTime: calendar.date(byAdding: .hour, value: 1, to: start)!, task: nil)
+        context.insert(block)
+        viewModel.registerInsertedBlock(block)
+        XCTAssertTrue(viewModel.blocks.contains { $0.id == block.id })
+
+        viewModel.deregisterBlock(block)
+
+        XCTAssertFalse(viewModel.blocks.contains { $0.id == block.id }, "re-picking a meal must not leave the old block's stale entry sitting in blocks")
     }
 
     // MARK: - Unplaced reasons — one coarse explanation per task per walk

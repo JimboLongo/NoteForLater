@@ -359,6 +359,7 @@ struct NightlyReviewView: View {
             let reviewedBlocks = reviewableBlocks
             let frozenCutoff = reviewCutoff
             let frozenAllBlocks = allBlocks
+            let frozenReviewDate = reviewDate
             for block in reviewedBlocks {
                 block.task?.isNightlyReviewed = true
             }
@@ -420,6 +421,7 @@ struct NightlyReviewView: View {
                 // instead.
                 await tomorrowViewModel.purgeCompletedBlocks()
                 tomorrowViewModel.purgeCompletedMealSelections()
+                tomorrowViewModel.resolveIncompleteMealSelections(reviewDate: frozenReviewDate)
                 for task in recurringCompletedTasks {
                     task.isNightlyReviewed = false
                 }
@@ -1068,6 +1070,7 @@ struct NightlyReviewView: View {
         for block in allBlocksNow where block.mealSelection?.id == selection.id {
             block.mealSelection = nil
             modelContext.delete(block)
+            tomorrowViewModel?.deregisterBlock(block)
         }
     }
 
@@ -1087,6 +1090,7 @@ struct NightlyReviewView: View {
         block.isLocked = true
         block.mealSelection = selection
         modelContext.insert(block)
+        tomorrowViewModel?.registerInsertedBlock(block)
     }
 
     // MARK: - Step 6: Tomorrow
