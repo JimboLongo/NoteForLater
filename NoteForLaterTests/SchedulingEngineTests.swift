@@ -42,7 +42,7 @@ final class SchedulingEngineTests: XCTestCase {
         container = try ModelContainer(
             for: TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self,
                 SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self,
-                Habit.self, HabitLog.self,
+                Habit.self, HabitLog.self, MealSelection.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
         context = ModelContext(container)
@@ -1251,6 +1251,27 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertEqual(fixture.task.remainingMinutes, 0, "completed work must stay spent — restoring it would resurrect finished time")
     }
 
+    /// `MealSelection` has no delete/expiry logic anywhere else in the
+    /// app — `NightlyReviewView.todayMealSelections`'s own
+    /// `$0.isCompleted` clause has no date bound, so a completed meal
+    /// would match that filter forever unless something actually deletes
+    /// the record. `purgeCompletedMealSelections` is that something,
+    /// called alongside `purgeCompletedBlocks` at the same commit point.
+    func test_purgeCompletedMealSelections_deletesCompletedKeepsIncomplete() async throws {
+        let completed = MealSelection(recipeID: UUID(), recipeTitle: "Tacos", date: day(2026, 1, 1))
+        completed.isCompleted = true
+        context.insert(completed)
+        let incomplete = MealSelection(recipeID: UUID(), recipeTitle: "Soup", date: day(2026, 1, 2))
+        context.insert(incomplete)
+
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: day(2026, 1, 2))
+        viewModel.purgeCompletedMealSelections()
+
+        let remaining = (try? context.fetch(FetchDescriptor<MealSelection>())) ?? []
+        XCTAssertFalse(remaining.contains { $0.id == completed.id }, "a completed meal selection must not survive the purge — nothing else ever deletes it")
+        XCTAssertTrue(remaining.contains { $0.id == incomplete.id }, "an incomplete meal selection is still-open backlog and must not be swept")
+    }
+
     // MARK: - Unplaced reasons — one coarse explanation per task per walk
 
     /// Builds a shelf whose single rule runs on `daysOfWeek` between the
@@ -2126,9 +2147,14 @@ final class SchedulingEngineTests: XCTestCase {
     /// Review's Today step — the primary filter is `status == .none`, and
     /// `alsoInclude` only ever contained ids the caller had itself just
     /// toggled mid-session. `completedSince` widens the filter itself:
-    /// an already-complete occurrence shows if its own day is on or after
-    /// the last time a review closed a day out.
+    /// an already-complete occurrence shows if its own day is strictly
+    /// after the last time a review closed a day out. `completedSince`
+    /// here is `yesterday`, not `today` itself — that's what
+    /// `lastClosedReviewDay` actually holds in production (the day the
+    /// *previous* review session closed), so this is the real shape of
+    /// the call, not just "same day as the occurrence."
     func test_openHabitOccurrencesForReview_completedSince_surfacesAlreadyCompleteOccurrence() {
+        let yesterday = day(2026, 1, 9)
         let today = day(2026, 1, 10)
         // `startDate == today` keeps the backward scan to exactly one day,
         // so the assertions below aren't drowned out by several other
@@ -2147,10 +2173,31 @@ final class SchedulingEngineTests: XCTestCase {
 
         let withCompletedSince = ScheduleReviewViewModel.openHabitOccurrencesForReview(
             habits: [habit], context: context, upTo: calendar.date(byAdding: .hour, value: 12, to: today)!,
-            completedSince: today
+            completedSince: yesterday
         )
         let surfaced = try? XCTUnwrap(withCompletedSince.first)
         XCTAssertEqual(surfaced?.isCompleted, true, "should surface as completed, not pending")
+    }
+
+    /// The other flip side: `completedSince` set to the occurrence's own
+    /// day (not the day before it) must NOT surface it — that occurrence
+    /// was already reviewed and closed out by the session that set
+    /// `lastClosedReviewDay` to that exact day, so showing it again in
+    /// the very next review would leak it into one extra review cycle.
+    func test_openHabitOccurrencesForReview_completedSince_excludesOccurrenceOnBoundaryItself() {
+        let today = day(2026, 1, 10)
+        let habit = Habit(name: "Stretch", startDate: today)
+        habit.occurrenceTimeModesRaw = ["am"]
+        context.insert(habit)
+
+        let log = habit.logOrCreate(on: today, context: context)
+        log.setOccurrence(0, to: .complete)
+
+        let result = ScheduleReviewViewModel.openHabitOccurrencesForReview(
+            habits: [habit], context: context, upTo: calendar.date(byAdding: .hour, value: 12, to: today)!,
+            completedSince: today
+        )
+        XCTAssertTrue(result.isEmpty, "a completion on the boundary day itself was already closed out by that day's own review")
     }
 
     /// The flip side: a `completedSince` boundary must not reach backward

@@ -419,6 +419,7 @@ struct NightlyReviewView: View {
                 // regenerate leaves a completed block faded in place
                 // instead.
                 await tomorrowViewModel.purgeCompletedBlocks()
+                tomorrowViewModel.purgeCompletedMealSelections()
                 for task in recurringCompletedTasks {
                     task.isNightlyReviewed = false
                 }

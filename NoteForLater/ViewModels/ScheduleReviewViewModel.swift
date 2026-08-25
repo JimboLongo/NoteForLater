@@ -1718,6 +1718,24 @@ final class ScheduleReviewViewModel {
         }
     }
 
+    /// A completed `MealSelection` has nothing further to say once
+    /// tonight's review has committed it — same "nothing else ever
+    /// sweeps it" problem `purgeCompletedBlocks` exists to solve for a
+    /// completed block/task, called alongside it for the same reason.
+    /// Without this, `NightlyReviewView.todayMealSelections`'s own
+    /// `$0.isCompleted` clause has no date bound and matches every
+    /// completed meal forever, since nothing else ever deletes the
+    /// record — a dinner picked and checked off weeks ago would still
+    /// surface in tonight's Today step alongside tonight's own meal.
+    func purgeCompletedMealSelections() {
+        let completed = (try? modelContext.fetch(FetchDescriptor<MealSelection>(
+            predicate: #Predicate { $0.isCompleted }
+        ))) ?? []
+        for selection in completed {
+            modelContext.delete(selection)
+        }
+    }
+
     /// Run at the start of every generate/regenerate — clears out every
     /// block (task or habit) left over from a day before today, so old
     /// days never just keep silently piling up unreviewed. An
@@ -1833,14 +1851,18 @@ final class ScheduleReviewViewModel {
     /// required, just completing a habit and opening Nightly Review before
     /// a save landed. See `Habit.log(on:context:)`.
     /// `completedSince`, unlike `alsoInclude`, isn't id-based — it widens
-    /// the *status* filter itself: any occurrence whose own day is on or
-    /// after this date is included even when `.complete`, not just
-    /// `.none`. Lets a caller show "everything completed since the last
-    /// review" (an occurrence checked off earlier today, before this
+    /// the *status* filter itself: any occurrence whose own day is
+    /// strictly after this date is included even when `.complete`, not
+    /// just `.none`. Lets a caller show "everything completed since the
+    /// last review" (an occurrence checked off earlier today, before this
     /// review session ever opened) without the caller having to have
     /// already seen and remembered that occurrence's id the way
     /// `alsoInclude` requires. `nil` (the default) preserves the original
-    /// `.none`-only behavior for every other caller.
+    /// `.none`-only behavior for every other caller. Strictly-after, not
+    /// on-or-after: `completedSince` is `lastClosedReviewDay`, the day
+    /// *already* closed out by the previous review session — a habit
+    /// completed on that day was already surfaced and handled then, so
+    /// including it again here would leak it into one extra review cycle.
     static func openHabitOccurrencesForReview(habits: [Habit], context: ModelContext, upTo cutoff: Date = .now, alsoInclude: Set<String> = [], completedSince: Date? = nil) -> [HabitReviewOccurrence] {
         let calendar = Calendar.current
         let cutoffDay = calendar.startOfDay(for: cutoff)
@@ -1862,7 +1884,7 @@ final class ScheduleReviewViewModel {
                         guard targetTime < cutoff else { continue }
                         let id = "\(habit.id)-\(index)-\(Int(cursor.timeIntervalSince1970))"
                         let status = habit.occurrenceStatus(index, on: cursor, context: context, calendar: calendar)
-                        let completedRecently = status == .complete && completedSinceDay.map { cursor >= $0 } ?? false
+                        let completedRecently = status == .complete && completedSinceDay.map { cursor > $0 } ?? false
                         guard status == .none || alsoInclude.contains(id) || completedRecently else { continue }
                         result.append(HabitReviewOccurrence(id: id, habit: habit, index: index, isCompleted: status == .complete, targetTime: targetTime, modeLabel: mode.label))
                     }

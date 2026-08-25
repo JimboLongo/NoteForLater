@@ -26,6 +26,7 @@ struct NoteForLaterApp: App {
             TaskCompletionRecord.self,
             TagLink.self,
             Recipe.self,
+            MealSelection.self,
             UPCBank.self,
             RecurringTaskLog.self,
             PushedRecurringOccurrence.self
