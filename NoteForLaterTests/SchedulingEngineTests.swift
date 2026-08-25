@@ -1043,6 +1043,75 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertNil(task.repairedRemainingMinutes())
     }
 
+    // MARK: - Monthly recurrence on a day short months don't have
+
+    /// A task recurring monthly with `dueDate` anchored to the 31st lands
+    /// on the last real day of any month too short to have one, without
+    /// permanently drifting off day 31 once a long-enough month comes
+    /// back around — Jan 31 -> Feb 28 -> Mar 31 -> Apr 30 -> May 31, all
+    /// twelve months walked directly against `hasRecurringOccurrence`,
+    /// the same production code path `AISchedulingService
+    /// .placeHabitsAndRecurringTasks` calls per day.
+    func test_hasRecurringOccurrence_monthlyOn31st_landsOnLastDayOfShortMonths() {
+        let shelf = Shelf(name: "S")
+        let task = TaskItem(title: "Monthly", shelf: shelf)
+        task.isRecurring = true
+        task.recurrenceIntervalCount = 1
+        task.recurrenceUnit = .months
+        task.dueDate = day(2026, 1, 31)
+
+        let expectedFireDays: [Int: Int] = [
+            1: 31, 2: 28, 3: 31, 4: 30, 5: 31, 6: 30,
+            7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 31
+        ]
+        for month in 1...12 {
+            let daysInMonth = calendar.range(of: .day, in: .month, for: day(2026, month, 1))!.count
+            let firingDays = (1...daysInMonth).filter { task.hasRecurringOccurrence(on: day(2026, month, $0), calendar: calendar) }
+            XCTAssertEqual(firingDays, [expectedFireDays[month]!], "month \(month) (has \(daysInMonth) days)")
+        }
+    }
+
+    /// Same shape, but every 2 months — confirms the short-month clamp
+    /// doesn't throw off the interval itself (a naive day-count-based
+    /// implementation could plausibly fire an extra time recovering from
+    /// February's clamp).
+    func test_hasRecurringOccurrence_monthlyOn31stEveryTwoMonths_skipsAlternateMonths() {
+        let shelf = Shelf(name: "S")
+        let task = TaskItem(title: "Bimonthly", shelf: shelf)
+        task.isRecurring = true
+        task.recurrenceIntervalCount = 2
+        task.recurrenceUnit = .months
+        task.dueDate = day(2026, 1, 31)
+
+        let expectedFireDays: [Int: Int?] = [
+            1: 31, 2: nil, 3: 31, 4: nil, 5: 31, 6: nil,
+            7: 31, 8: nil, 9: 30, 10: nil, 11: 30, 12: nil
+        ]
+        for month in 1...12 {
+            let daysInMonth = calendar.range(of: .day, in: .month, for: day(2026, month, 1))!.count
+            let firingDays = (1...daysInMonth).filter { task.hasRecurringOccurrence(on: day(2026, month, $0), calendar: calendar) }
+            let expected = expectedFireDays[month]!.map { [$0] } ?? []
+            XCTAssertEqual(firingDays, expected, "month \(month) (has \(daysInMonth) days)")
+        }
+    }
+
+    // MARK: - TaskItem.recurrenceTimeMode
+
+    func test_recurrenceTimeMode_defaultsToSpecific() {
+        let shelf = Shelf(name: "S")
+        let task = TaskItem(title: "T", shelf: shelf)
+        XCTAssertEqual(task.recurrenceTimeMode, .specific, "an existing recurring task with no raw value set yet must keep behaving exactly as before this field existed")
+    }
+
+    func test_recurrenceTimeMode_getSetRoundTrips() {
+        let shelf = Shelf(name: "S")
+        let task = TaskItem(title: "T", shelf: shelf)
+        for mode in HabitOccurrenceTimeMode.allCases {
+            task.recurrenceTimeMode = mode
+            XCTAssertEqual(task.recurrenceTimeMode, mode)
+        }
+    }
+
     // MARK: - remainingMinutes must survive every block deletion
 
     /// Builds a task fully placed into one block, i.e. the state

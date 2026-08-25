@@ -362,17 +362,24 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
 
         // Any task with "Recurring?" toggled on (see `TaskItem.isRecurring`,
         // toggleable from the top of any task card, on any shelf) is
-        // treated the same way habits are — every occurrence due today
-        // (see `TaskItem.hasRecurringOccurrence`) is placed unconditionally
-        // at its own fixed anchor time (`recurringOccurrenceTime`),
-        // regardless of what else is going on: a recurring task is a
-        // commitment with a fixed time, not something competing for free
-        // time the way a shelf's rule-packed tasks do. One recurring task
-        // can carry many blocks over its lifetime — unlike every other
-        // task, `TaskItem.isScheduled`/`isCompleted` stay meaningless
-        // here; completion lives entirely on each occurrence's own block.
+        // treated the same way habits are — a Specific Time occurrence due
+        // today (see `TaskItem.hasRecurringOccurrence`) is placed
+        // unconditionally at its own fixed anchor time
+        // (`recurringOccurrenceTime`), regardless of what else is going
+        // on: a recurring task is a commitment with a fixed time, not
+        // something competing for free time the way a shelf's rule-packed
+        // tasks do. One recurring task can carry many blocks over its
+        // lifetime — unlike every other task,
+        // `TaskItem.isScheduled`/`isCompleted` stay meaningless here;
+        // completion lives entirely on each occurrence's own block.
         for task in shelves.flatMap({ $0.tasks ?? [] }) where task.isRecurring {
             guard task.hasRecurringOccurrence(on: date, calendar: calendar) else { continue }
+            // An AM/Midday/PM occurrence (see `TaskItem.recurrenceTimeMode`)
+            // never gets a calendar block at all, mirroring the habit skip
+            // just above — it surfaces instead as an untimed list item
+            // (see `DayTimelineGridView`), completion tracked in
+            // `RecurringTaskLog` rather than a block's own `isCompleted`.
+            guard task.recurrenceTimeMode == .specific else { continue }
             guard let start = task.recurringOccurrenceTime(on: date, calendar: calendar) else { continue }
             let alreadyExists = (task.scheduledBlocks ?? []).contains { calendar.isDate($0.date, inSameDayAs: date) }
             guard !alreadyExists else { continue }

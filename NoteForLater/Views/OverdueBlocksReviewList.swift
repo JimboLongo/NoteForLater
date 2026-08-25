@@ -29,21 +29,40 @@ struct HabitReviewOccurrence: Identifiable {
 enum ReviewItem: Identifiable {
     case block(ScheduledBlock)
     case habit(HabitReviewOccurrence)
-    /// A task completion with no live block to represent it — the
-    /// 2-Minute Task shelf and the older Task Attribute Review "Mark
-    /// Complete" path both leave a task like this, and
-    /// `ScheduleReviewViewModel.purgeCompletedBlocks` deletes it outright
-    /// once Nightly Review's Today step commits. `TaskCompletionRecord`
-    /// is the durable trace that survives the delete. Always shown
-    /// already-checked and non-interactive — there's no live `TaskItem`
-    /// guaranteed to still exist to toggle back.
-    case completedTask(TaskCompletionRecord)
+    /// A task completion with no live block to represent it — a 2-Minute
+    /// Task and the older Task Attribute Review "Mark Complete" path both
+    /// leave a task like this, and `ScheduleReviewViewModel
+    /// .purgeCompletedBlocks` deletes it outright once Nightly Review's
+    /// Today step commits. `TaskCompletionRecord` is the durable trace
+    /// that survives the delete. Always shown already-checked and
+    /// non-interactive — there's no live `TaskItem` guaranteed to still
+    /// exist to toggle back. `isTwoMinuteTask` is what pins it to the
+    /// front of its day (see `sortTime`) — supplied by the caller rather
+    /// than derived here, since telling a 2-Minute Task's completion
+    /// apart from an ordinary one needs a same-session snapshot
+    /// (`NightlyReviewView.twoMinuteReviewTaskIDs`) this enum has no way
+    /// to reach on its own, especially once the live task backing this
+    /// record is gone.
+    case completedTask(TaskCompletionRecord, isTwoMinuteTask: Bool)
+    /// The meal picked during Nightly Review's Meals step — never has
+    /// its own `ScheduledBlock` represented here (`NightlyReviewView
+    /// .reviewableBlocks` excludes it deliberately), even though a real,
+    /// locked block does exist for it on the calendar — this is the sole
+    /// representation, so the two are never shown as two separate rows
+    /// for the same meal. `targetTime` is that same block's own
+    /// `startTime` (or `MealSelection.date` if the block's since gone
+    /// missing) — stand-in-by-necessity, same idea as
+    /// `HabitReviewOccurrence.targetTime`, since it's what lets a meal
+    /// sort into its correct position among blocks and habits instead of
+    /// living in its own separate section.
+    case meal(MealSelection, targetTime: Date)
 
     var id: String {
         switch self {
         case .block(let block): return "block-\(block.id)"
         case .habit(let occurrence): return "habit-\(occurrence.id)"
-        case .completedTask(let record): return "completedTask-\(record.id)"
+        case .completedTask(let record, _): return "completedTask-\(record.id)"
+        case .meal(let selection, _): return "meal-\(selection.id)"
         }
     }
 
@@ -52,15 +71,32 @@ enum ReviewItem: Identifiable {
         switch self {
         case .block(let block): return calendar.startOfDay(for: block.date)
         case .habit(let occurrence): return calendar.startOfDay(for: occurrence.targetTime)
-        case .completedTask(let record): return calendar.startOfDay(for: record.completedAt)
+        case .completedTask(let record, _): return calendar.startOfDay(for: record.completedAt)
+        case .meal(_, let targetTime): return calendar.startOfDay(for: targetTime)
         }
     }
 
+    /// A 2-Minute Task completion — whether it still has a live
+    /// `ScheduledBlock` behind it (the `.block` case) or not (the
+    /// `.completedTask` case, once that task's gone) — sorts to the very
+    /// front of its day regardless of whatever time it happened to be
+    /// scheduled or completed at: these read as "already cleared out of
+    /// the way," not as competing with the day's actual timed habits and
+    /// tasks for a position among them.
     fileprivate var sortTime: Date {
         switch self {
-        case .block(let block): return block.startTime
+        case .block(let block):
+            if block.task?.shelf?.isTwoMinuteTasks == true {
+                return Calendar.current.startOfDay(for: block.startTime)
+            }
+            return block.startTime
         case .habit(let occurrence): return occurrence.targetTime
-        case .completedTask(let record): return record.completedAt
+        case .completedTask(let record, let isTwoMinuteTask):
+            if isTwoMinuteTask {
+                return Calendar.current.startOfDay(for: record.completedAt)
+            }
+            return record.completedAt
+        case .meal(_, let targetTime): return targetTime
         }
     }
 }
@@ -149,8 +185,10 @@ struct OverdueBlocksReviewList: View {
             blockRow(block, isCompleted: isEffectivelyCompleted?(item) ?? block.isCompleted)
         case .habit(let occurrence):
             habitRow(occurrence, isCompleted: isEffectivelyCompleted?(item) ?? occurrence.isCompleted)
-        case .completedTask(let record):
+        case .completedTask(let record, _):
             completedTaskRow(record)
+        case .meal(let selection, let targetTime):
+            mealRow(selection, targetTime: targetTime, isCompleted: isEffectivelyCompleted?(item) ?? selection.isCompleted)
         }
     }
 
@@ -200,6 +238,25 @@ struct OverdueBlocksReviewList: View {
         .onTapGesture { onToggle(.habit(occurrence)) }
         .opacity(isCompleted ? 0.5 : 1)
         .listRowBackground(Shelf.flatten(.accentColor, opacity: 0.2))
+    }
+
+    /// Same full-row tap target as `blockRow`/`habitRow` — reconstructs
+    /// `.meal(selection, targetTime:)` for the toggle callback rather
+    /// than needing the original `ReviewItem` threaded through; `id`
+    /// only ever depends on `selection.id`, so passing `targetTime` again
+    /// here (rather than the exact value this row was built with)
+    /// doesn't change which item the caller ends up toggling.
+    private func mealRow(_ selection: MealSelection, targetTime: Date, isCompleted: Bool) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            selectionCircle(isSelected: isCompleted)
+                .padding(.vertical, 4)
+            Text("Cooked: \(selection.recipeTitle)")
+                .strikethrough(isCompleted)
+            Spacer()
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { onToggle(.meal(selection, targetTime: targetTime)) }
+        .opacity(isCompleted ? 0.5 : 1)
     }
 
     /// Read-only — no `onTapGesture` at all. `record`'s underlying task

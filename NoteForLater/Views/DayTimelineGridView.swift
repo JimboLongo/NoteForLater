@@ -70,6 +70,16 @@ struct DayTimelineGridView: View {
     let viewModel: ScheduleReviewViewModel
     let isToday: Bool
     let allTasks: [TaskItem]
+    /// Every recurring task occurrence still being pushed forward (see
+    /// `PushedRecurringOccurrence`'s own doc comment) — read here so an
+    /// AM/Midday/PM task with one sitting on `targetDate` still shows up
+    /// (with a "Pushed" indicator) even on a day that isn't one of its
+    /// own real recurrence days. A Specific Time task needs nothing extra
+    /// here — its pushed instance is a real `ScheduledBlock` by the time
+    /// this view ever sees it (see `NoteForLaterApp
+    /// .processPushedRecurringOccurrencesIfNeeded`), so it already flows
+    /// through `rows` like any other block.
+    let allPushedRecurringOccurrences: [PushedRecurringOccurrence]
     /// For presenting `TaskCardSheet` (See Task Card) with somewhere to
     /// move a task to.
     let allShelves: [Shelf]
@@ -269,6 +279,61 @@ struct DayTimelineGridView: View {
         return result
     }
 
+    /// Same shape as `OpenHabitOccurrence`, for a recurring `TaskItem`
+    /// occurrence shown as a plain check-off item instead of a calendar
+    /// block (see `TaskItem.recurrenceTimeMode`) — reads `RecurringTaskLog`
+    /// where a habit occurrence reads `HabitLog`.
+    private struct OpenRecurringTaskOccurrence: Identifiable {
+        let id: String
+        let task: TaskItem
+        let isCompleted: Bool
+        /// True when this occurrence is showing on `targetDate` only
+        /// because it's being pushed forward from an earlier miss (see
+        /// `PushedRecurringOccurrence`), not because today is actually
+        /// one of this task's own recurrence days — drives the "Pushed"
+        /// indicator in `occurrenceRow`.
+        let isPushed: Bool
+    }
+
+    /// One row `habitOccurrenceSection` can show — a habit occurrence or a
+    /// recurring task occurrence, merged into the same AM/Midday/PM list
+    /// (see `computeOpenHabitOccurrenceLists`) so the two interleave in
+    /// one section instead of habits and recurring tasks living in visibly
+    /// separate lists for the same part of the day.
+    private enum OpenOccurrenceRow: Identifiable {
+        case habit(OpenHabitOccurrence)
+        case recurringTask(OpenRecurringTaskOccurrence)
+
+        var id: String {
+            switch self {
+            case .habit(let occurrence): return occurrence.id
+            case .recurringTask(let occurrence): return occurrence.id
+            }
+        }
+    }
+
+    /// Every recurring task occurrence today whose own `TaskItem
+    /// .recurrenceTimeMode` is `mode` — mirrors `openHabitOccurrences`,
+    /// reading `RecurringTaskLog` instead of `HabitLog` for completion.
+    /// Also includes a task that isn't due for a real recurrence today at
+    /// all, but has an unresolved `PushedRecurringOccurrence` currently
+    /// sitting on `targetDate` — pushed forward from an earlier miss, not
+    /// shown here because today is one of its own pattern days.
+    private func openRecurringTaskOccurrences(mode: HabitOccurrenceTimeMode) -> [OpenRecurringTaskOccurrence] {
+        let calendar = Calendar.current
+        let pushedTaskIDs = Set(allPushedRecurringOccurrences
+            .filter { !$0.isCompleted && calendar.isDate($0.currentDate, inSameDayAs: targetDate) }
+            .map(\.taskID))
+        var result: [OpenRecurringTaskOccurrence] = []
+        for task in allTasks where task.isRecurring && task.recurrenceTimeMode == mode {
+            let isPushed = pushedTaskIDs.contains(task.id)
+            guard task.hasRecurringOccurrence(on: targetDate, calendar: calendar) || isPushed else { continue }
+            let isCompleted = RecurringTaskLog.log(taskID: task.id, on: targetDate, context: modelContext, calendar: calendar)?.isCompleted ?? false
+            result.append(OpenRecurringTaskOccurrence(id: "recurringTask.\(task.id)", task: task, isCompleted: isCompleted, isPushed: isPushed))
+        }
+        return result
+    }
+
     private var amOccurrences: [OpenHabitOccurrence] { openHabitOccurrences(mode: .am) }
     private var middayOccurrences: [OpenHabitOccurrence] { openHabitOccurrences(mode: .midday) }
     private var pmOccurrences: [OpenHabitOccurrence] { openHabitOccurrences(mode: .pm) }
@@ -281,27 +346,35 @@ struct DayTimelineGridView: View {
     /// four separate times per body pass, redoing the same per-habit scan
     /// each time.
     private struct OpenHabitOccurrenceLists {
-        let am: [OpenHabitOccurrence]
-        let midday: [OpenHabitOccurrence]
-        let pm: [OpenHabitOccurrence]
+        let am: [OpenOccurrenceRow]
+        let midday: [OpenOccurrenceRow]
+        let pm: [OpenOccurrenceRow]
         /// Same rule as the standalone `isSplitAtNoon`: the day only
         /// splits when there's a Midday occurrence to show between the
         /// halves.
         var isSplitAtNoon: Bool { !midday.isEmpty }
     }
 
+    /// Habits and recurring tasks merged into one row list per mode —
+    /// habits first, then recurring tasks, so a habit's own `sortOrder`
+    /// still governs its position relative to other habits without
+    /// recurring tasks (which have no comparable ordering field)
+    /// interleaving mid-list.
     private func computeOpenHabitOccurrenceLists() -> OpenHabitOccurrenceLists {
         OpenHabitOccurrenceLists(
-            am: openHabitOccurrences(mode: .am),
-            midday: openHabitOccurrences(mode: .midday),
-            pm: openHabitOccurrences(mode: .pm)
+            am: openHabitOccurrences(mode: .am).map(OpenOccurrenceRow.habit)
+                + openRecurringTaskOccurrences(mode: .am).map(OpenOccurrenceRow.recurringTask),
+            midday: openHabitOccurrences(mode: .midday).map(OpenOccurrenceRow.habit)
+                + openRecurringTaskOccurrences(mode: .midday).map(OpenOccurrenceRow.recurringTask),
+            pm: openHabitOccurrences(mode: .pm).map(OpenOccurrenceRow.habit)
+                + openRecurringTaskOccurrences(mode: .pm).map(OpenOccurrenceRow.recurringTask)
         )
     }
 
     /// The calendar only actually splits in two when there's a Midday
     /// occurrence to show between the halves — a day with no Midday
     /// habits renders as the single continuous grid it always has.
-    private var isSplitAtNoon: Bool { !middayOccurrences.isEmpty }
+    private var isSplitAtNoon: Bool { !middayOccurrences.isEmpty || !openRecurringTaskOccurrences(mode: .midday).isEmpty }
 
     /// Where the day actually splits for Midday habits, in minutes since
     /// midnight — noon by default, but pushed later to clear any row
@@ -635,71 +708,178 @@ struct DayTimelineGridView: View {
         }
     }
 
-    /// One of the Morning/Midday/Evening lists — every still-open habit
-    /// occurrence whose `HabitOccurrenceTimeMode` puts it in this section,
-    /// as a plain check-off row (no calendar time at all). Same visual
-    /// shape as `twoMinuteTasksSection` — a neutral background here since
-    /// a habit has no shelf color of its own — but a checked row stays
-    /// visible (checkmark filled, name faded/struck through), same as a
-    /// Specific-Time habit's own calendar block, rather than disappearing
-    /// the instant it's tapped.
-    @ViewBuilder
-    private func habitOccurrenceSection(title: String, occurrences: [OpenHabitOccurrence]) -> some View {
-        if !occurrences.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+    /// One visually distinct box within a Morning/Midday/Evening section —
+    /// either every habit occurrence in that part of the day (one shared
+    /// box, blue), or one shelf's recurring task occurrences (its own box,
+    /// that shelf's own color) — so a recurring task never reads as
+    /// belonging to the habit group it happens to share a time mode with.
+    private struct OccurrenceGroup: Identifiable {
+        let id: String
+        let title: String
+        let backgroundColor: Color
+        let rows: [OpenOccurrenceRow]
+    }
 
-                VStack(spacing: 12) {
-                    ForEach(occurrences) { occurrence in
-                        Button {
+    /// Splits one mode's occurrences (habits and recurring tasks mixed
+    /// together, as `computeOpenHabitOccurrenceLists` builds them) back
+    /// apart into the boxes `habitOccurrenceSection` actually renders —
+    /// habits always first (as one group, titled `habitsTitle`), then one
+    /// group per distinct shelf a recurring task in this list belongs to,
+    /// in the order each shelf is first encountered. A `Dictionary`-based
+    /// grouping alone won't do for that last part — its iteration order
+    /// isn't guaranteed, which would make the shelf boxes reorder
+    /// themselves from one render to the next for no reason a user could
+    /// see.
+    private func occurrenceGroups(from occurrences: [OpenOccurrenceRow], habitsTitle: String) -> [OccurrenceGroup] {
+        var groups: [OccurrenceGroup] = []
+
+        let habitRows = occurrences.filter { if case .habit = $0 { return true }; return false }
+        if !habitRows.isEmpty {
+            groups.append(OccurrenceGroup(id: "habits", title: habitsTitle, backgroundColor: Shelf.flatten(.accentColor, opacity: 0.35), rows: habitRows))
+        }
+
+        var shelfOrder: [UUID?] = []
+        var rowsByShelfID: [UUID?: [OpenOccurrenceRow]] = [:]
+        var shelfByID: [UUID?: Shelf?] = [:]
+        for row in occurrences {
+            guard case .recurringTask(let occurrence) = row else { continue }
+            let shelfID = occurrence.task.shelf?.id
+            if rowsByShelfID[shelfID] == nil {
+                shelfOrder.append(shelfID)
+                rowsByShelfID[shelfID] = []
+                shelfByID[shelfID] = occurrence.task.shelf
+            }
+            rowsByShelfID[shelfID, default: []].append(row)
+        }
+        for shelfID in shelfOrder {
+            let shelf = shelfByID[shelfID] ?? nil
+            groups.append(OccurrenceGroup(
+                id: "shelf-\(shelfID?.uuidString ?? "none")",
+                // Falls back to a generic title only for a recurring task
+                // with no shelf at all — not a normal state (every shelf
+                // list a task can live on has a name), but not one this
+                // view should crash or show a blank header over either.
+                title: shelf?.name ?? "Recurring Tasks",
+                backgroundColor: shelf?.flattenedColor(opacity: 0.35) ?? Color.secondary.opacity(0.35),
+                rows: rowsByShelfID[shelfID] ?? []
+            ))
+        }
+        return groups
+    }
+
+    /// One of the Morning/Midday/Evening lists — every still-open habit or
+    /// recurring task occurrence whose time mode puts it in this section,
+    /// each as its own box (see `occurrenceGroups`) rather than one shared
+    /// box for everything, so a recurring task's own shelf color is what
+    /// actually colors its box instead of blending into the habit group's
+    /// blue tint.
+    @ViewBuilder
+    private func habitOccurrenceSection(title: String, occurrences: [OpenOccurrenceRow]) -> some View {
+        let groups = occurrenceGroups(from: occurrences, habitsTitle: title)
+        if !groups.isEmpty {
+            // Zero spacing — the habit box and each shelf's own recurring-
+            // task box sit flush against each other, not as visually
+            // separate cards with a gap between them. Each box's own
+            // internal `.padding(.vertical, 10)` (see `occurrenceBox`) is
+            // untouched, so there's still breathing room *inside* each
+            // one — only the space *between* boxes is gone.
+            VStack(spacing: 0) {
+                ForEach(groups) { group in
+                    occurrenceBox(title: group.title, backgroundColor: group.backgroundColor, rows: group.rows)
+                }
+            }
+            .padding(.bottom, 10)
+        }
+    }
+
+    /// One rendered box — header plus its own rows plus its own
+    /// background — shared by the habit group and every per-shelf
+    /// recurring task group so the two read as the exact same *kind* of
+    /// thing, just colored and grouped differently. Same visual shape as
+    /// `twoMinuteTasksSection` — a checked row stays visible (checkmark
+    /// filled, name faded/struck through), same as a Specific-Time
+    /// habit's own calendar block, rather than disappearing the instant
+    /// it's tapped.
+    private func occurrenceBox(title: String, backgroundColor: Color, rows: [OpenOccurrenceRow]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            VStack(spacing: 12) {
+                ForEach(rows) { row in
+                    switch row {
+                    case .habit(let occurrence):
+                        occurrenceRow(name: occurrence.habit.name, isCompleted: occurrence.isCompleted) {
                             toggleHabitOccurrence(habit: occurrence.habit, index: occurrence.index, isCompleted: occurrence.isCompleted)
-                        } label: {
-                            HStack(spacing: 10) {
-                                // Same checkmark-circle look
-                                // `DayTimelineSegment.completeCircle` uses
-                                // for a calendar block, so a habit reads
-                                // the same way whether it's timed or not.
-                                ZStack {
-                                    Circle()
-                                        .fill(occurrence.isCompleted ? Color.green : Color.clear)
-                                        .overlay(Circle().strokeBorder(occurrence.isCompleted ? Color.green : Color.secondary.opacity(0.7), lineWidth: 1.5))
-                                    if occurrence.isCompleted {
-                                        Image(systemName: "checkmark")
-                                            .font(.system(size: 8, weight: .bold))
-                                            .foregroundStyle(.white)
-                                    }
-                                }
-                                .frame(width: 15, height: 15)
-                                // Same title font a Specific-Time habit's
-                                // own calendar block uses (see
-                                // `DayTimelineSegment.blockContent`), so an
-                                // AM/Midday/PM occurrence reads as the same
-                                // kind of thing, just without a time.
-                                Text(occurrence.habit.name)
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.primary)
-                                    .strikethrough(occurrence.isCompleted)
-                                Spacer()
-                            }
-                            .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
-                        .opacity(occurrence.isCompleted ? 0.5 : 1)
+                    case .recurringTask(let occurrence):
+                        occurrenceRow(name: occurrence.task.title, isCompleted: occurrence.isCompleted, isPushed: occurrence.isPushed) {
+                            toggleRecurringTaskOccurrence(task: occurrence.task, isCompleted: occurrence.isCompleted)
+                        }
                     }
                 }
             }
-            .padding(.horizontal)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            // Same tint a habit's own calendar block uses — `Color
-            // .accentColor.opacity(0.35)` — flattened to a solid color
-            // the same way `twoMinuteTasksSection` is, so it reads as
-            // opaque rather than washed-out.
-            .background(Shelf.flatten(.accentColor, opacity: 0.35))
-            .padding(.bottom, 10)
         }
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Same tint a habit's own calendar block uses — `Color.accentColor
+        // .opacity(0.35)` — flattened to a solid color the same way
+        // `twoMinuteTasksSection` is, so it reads as opaque rather than
+        // washed-out. A recurring task's own box uses its shelf's color
+        // here instead (see `occurrenceGroups`).
+        .background(backgroundColor)
+    }
+
+    /// The shared row content for both a habit occurrence and a recurring
+    /// task occurrence — same checkmark-circle-plus-title shape either
+    /// way, just parameterized by name/completion/tap-action so
+    /// `habitOccurrenceSection` doesn't duplicate this markup per kind.
+    /// `isPushed` (never true for a habit — only `OpenRecurringTaskOccurrence`
+    /// ever sets it) shows a small "Pushed" tag, so it's clear this row is
+    /// here because of an earlier miss rather than today being one of
+    /// this task's own recurrence days.
+    private func occurrenceRow(name: String, isCompleted: Bool, isPushed: Bool = false, onToggle: @escaping () -> Void) -> some View {
+        Button(action: onToggle) {
+            HStack(spacing: 10) {
+                // Same checkmark-circle look
+                // `DayTimelineSegment.completeCircle` uses for a calendar
+                // block, so an occurrence reads the same way whether it's
+                // timed or not.
+                ZStack {
+                    Circle()
+                        .fill(isCompleted ? Color.green : Color.clear)
+                        .overlay(Circle().strokeBorder(isCompleted ? Color.green : Color.secondary.opacity(0.7), lineWidth: 1.5))
+                    if isCompleted {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                }
+                .frame(width: 15, height: 15)
+                // Same title font a Specific-Time habit's own calendar
+                // block uses (see `DayTimelineSegment.blockContent`), so
+                // an AM/Midday/PM occurrence reads as the same kind of
+                // thing, just without a time.
+                Text(name)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .strikethrough(isCompleted)
+                if isPushed {
+                    Text("Pushed")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.2), in: Capsule())
+                }
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .opacity(isCompleted ? 0.5 : 1)
     }
 
     /// Mirrors `HabitsView.toggleOccurrence`'s completion side (both
@@ -714,6 +894,27 @@ struct DayTimelineGridView: View {
         log.setOccurrence(index, to: isCompleted ? .none : .complete)
         habitOccurrenceRefreshTick += 1
         HabitStatsRefreshCoordinator.shared.habitLogsChanged()
+    }
+
+    /// Same shape as `toggleHabitOccurrence`, for a recurring task's own
+    /// `RecurringTaskLog` instead of a `HabitLog`. Also upserts/removes a
+    /// `TaskCompletionRecord` on the way — an ordinary task's completion
+    /// already feeds Task Stats through every other "mark complete" entry
+    /// point (see `TaskItem.setCompleted`), and a recurring task shown
+    /// this way has no `ScheduledBlock`/`setCompleted` call of its own to
+    /// do that for it.
+    private func toggleRecurringTaskOccurrence(task: TaskItem, isCompleted: Bool) {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: targetDate)
+        let log = RecurringTaskLog.logOrCreate(taskID: task.id, on: today, context: modelContext, calendar: calendar)
+        log.isCompleted = !isCompleted
+        log.lastModified = .now
+        if log.isCompleted {
+            TaskCompletionRecord.upsert(for: task, in: modelContext)
+        } else {
+            TaskCompletionRecord.remove(for: task, in: modelContext)
+        }
+        habitOccurrenceRefreshTick += 1
     }
 }
 

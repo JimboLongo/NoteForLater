@@ -14,6 +14,7 @@ struct NightlyReviewView: View {
     @Environment(\.dismiss) private var dismiss
 
     @Query private var allBlocks: [ScheduledBlock]
+    @Query private var allPushedRecurringOccurrences: [PushedRecurringOccurrence]
     @Query(sort: \Shelf.sortOrder) private var allShelves: [Shelf]
     @Query(sort: \Habit.sortOrder) private var allHabits: [Habit]
     @Query private var eligibleHoursWindows: [EligibleHoursWindow]
@@ -216,13 +217,13 @@ struct NightlyReviewView: View {
 
     private var navBar: some View {
         HStack {
-            Button("Close") { dismiss() }
+            Button("Close") { finishAndDismiss() }
             if step != .chooseDay {
                 Button("Back", action: back)
             }
             Spacer()
             if step == .tomorrow {
-                Button("Done") { dismiss() }
+                Button("Done") { finishAndDismiss() }
                     .buttonStyle(.borderedProminent)
             } else {
                 Button("Next", action: advance)
@@ -236,6 +237,26 @@ struct NightlyReviewView: View {
 
     private func back() {
         step = Step(rawValue: step.rawValue - 1) ?? .chooseDay
+    }
+
+    /// Both "Close" and "Done" route through here rather than calling
+    /// `dismiss()` directly — an explicit save first, since neither one
+    /// otherwise flushes anything to disk. Most writes this session makes
+    /// do eventually reach a real `ScheduledBlock`/`TaskItem` write (task
+    /// completions, habit toggles, and so on all mutate live SwiftData
+    /// models), but a straight `dismiss()` was relying entirely on
+    /// SwiftData's own opportunistic autosave to actually persist that —
+    /// which isn't guaranteed to run before the app is later force-quit or
+    /// the device locks. Concretely: swiping to delete a block on the
+    /// Tomorrow step (`ScheduleReviewViewModel.deleteBlock`) does call
+    /// `modelContext.delete(block)` right away, but that deletion was only
+    /// ever actually durable if autosave happened to fire in the window
+    /// between the swipe and whatever came next — otherwise the block was
+    /// still sitting in the store the next time the app launched, exactly
+    /// as if the delete had silently not happened at all.
+    private func finishAndDismiss() {
+        try? modelContext.save()
+        dismiss()
     }
 
     private func advance() {
@@ -299,6 +320,15 @@ struct NightlyReviewView: View {
                     toggleHabitReviewOccurrence(habit: occurrence.habit, index: occurrence.index, isCompleted: occurrence.isCompleted, day: occurrence.targetTime)
                 case .completedTask:
                     break
+                case .meal:
+                    // Never actually reached — a `.meal` tap stages into
+                    // `stagedMealSelectionIDs`, not `stagedTodayToggleIDs`
+                    // (see `todayStep`), so this loop's own `where`
+                    // clause never matches one. Committed separately,
+                    // right below, since that commit also needs to
+                    // trigger pantry deduction — something neither a
+                    // block nor a habit occurrence ever does.
+                    break
                 }
             }
             stagedTodayToggleIDs = []
@@ -339,6 +369,28 @@ struct NightlyReviewView: View {
             // case that needs its stamp explicitly reset afterward.
             let recurringCompletedTasks = reviewedBlocks.filter(\.isCompleted).compactMap(\.task).filter(\.isRecurring)
             let incompleteTasks = reviewedBlocks.filter { !$0.isCompleted }.compactMap(\.task)
+
+            // A recurring task's own incomplete block is about to be
+            // deleted outright by `clearIncompletePastBlocks` below, same
+            // as any other stale block, with nothing else stepping in to
+            // replace it — captured here, before that happens, so the
+            // app-launch catch-up routine
+            // (`NoteForLaterApp.processPushedRecurringOccurrencesIfNeeded`)
+            // has something to push forward instead of the occurrence
+            // just silently vanishing until its next real recurrence day.
+            // Skipped if one's already being pushed (an earlier miss that
+            // hasn't resolved yet) — that record's own `currentDate`
+            // already points at today's block, so there's nothing new to
+            // record.
+            for block in reviewedBlocks where !block.isCompleted {
+                guard let task = block.task, task.isRecurring else { continue }
+                let taskID = task.id
+                let alreadyPushed = (try? modelContext.fetch(FetchDescriptor<PushedRecurringOccurrence>(
+                    predicate: #Predicate { $0.taskID == taskID && !$0.isCompleted }
+                )))?.first != nil
+                guard !alreadyPushed else { continue }
+                modelContext.insert(PushedRecurringOccurrence(taskID: taskID, originalDate: block.date))
+            }
 
             // Any habit occurrence the Today review showed but never got
             // checked off — timed or not — is done being reviewable the
@@ -540,30 +592,63 @@ struct NightlyReviewView: View {
     /// so reusing it here for a block from any earlier or later day is safe.
     private var reviewableBlocks: [ScheduledBlock] {
         allBlocks
-            .filter { $0.startTime < reviewDisplayCutoff || $0.isCompleted }
+            // `mealSelection != nil` blocks are excluded here — a meal
+            // gets its own `.meal` `ReviewItem` (see `reviewItems`)
+            // instead, sorted into the same list by that same block's
+            // own `startTime`. Without this exclusion the same meal
+            // would show up twice: once correctly, once as a bare
+            // "Dinner: X" block row with no pantry-deduction wiring
+            // behind its tap at all.
+            .filter { ($0.startTime < reviewDisplayCutoff || $0.isCompleted) && $0.mealSelection == nil }
             .sorted { $0.startTime < $1.startTime }
     }
 
-    /// Blocks, open habit occurrences, and completed-with-no-block tasks
-    /// mixed into one list, organized by time within each day — see
-    /// `ReviewItem`/`OverdueBlocksReviewList`.
+    /// Blocks, open habit occurrences, completed-with-no-block tasks, and
+    /// tonight's meal(s) mixed into one list, organized by time within
+    /// each day — see `ReviewItem`/`OverdueBlocksReviewList`. This is what
+    /// makes habits, tasks, and dinner land in the same order they
+    /// actually sit on the calendar, instead of dinner being hardcoded to
+    /// the top regardless of its own scheduled time — and, separately,
+    /// what pins a 2-Minute Task completion to the very front of its day
+    /// regardless of either: `isTwoMinuteTask` is checked against
+    /// `twoMinuteReviewTaskIDs` (this session's own snapshot from the
+    /// step just before this one) rather than the record's live task,
+    /// since nothing guarantees that task is still around by the time
+    /// this reads it.
     private var reviewItems: [ReviewItem] {
         reviewableBlocks.map { .block($0) }
             + openHabitOccurrencesForReview.map { .habit($0) }
-            + completedTasksWithNoBlock.map { .completedTask($0) }
+            + completedTasksWithNoBlock.map { record in
+                .completedTask(record, isTwoMinuteTask: twoMinuteReviewTaskIDs.contains(record.taskID))
+            }
+            + todayMealSelections.map { selection in
+                // The real backing block's own `startTime` (see
+                // `insertMealBlock`) is what a meal actually sorts
+                // by — `MealSelection.date` alone is day-granularity
+                // only, with no time-of-day to sort against. Falls back
+                // to `selection.date` only if that block's since gone
+                // missing somehow, which shouldn't normally happen.
+                let targetTime = allBlocks.first { $0.mealSelection?.id == selection.id }?.startTime ?? selection.date
+                return .meal(selection, targetTime: targetTime)
+            }
     }
 
     /// Task completions with no live `ScheduledBlock` to represent them —
-    /// the 2-Minute Task shelf (already shown separately, in its own step)
-    /// and the older Task Attribute Review "Mark Complete" path both leave
-    /// a task like this, and `purgeCompletedBlocks` deletes it outright the
+    /// a 2-Minute Task completed in the step just before this one, and the
+    /// older Task Attribute Review "Mark Complete" path, both leave a task
+    /// like this, and `purgeCompletedBlocks` deletes it outright the
     /// moment this review's Today step commits. Without this,
     /// `reviewableBlocks` (block-only) never shows it at all, and it's
     /// gone for good the instant Next is tapped. `TaskCompletionRecord` is
     /// the durable trace that survives that delete, so it's sourced from
     /// there rather than from `allTasks` directly — that also covers a
     /// task purged by an *earlier* Nightly Review session that's since
-    /// come and gone.
+    /// come and gone (and, not incidentally, a 2-Minute Task completed
+    /// this same session: `setCompleted` doesn't delete it right away, but
+    /// nothing guarantees it's still live by the time this reads —
+    /// `reviewItems`'s own `isTwoMinuteTask` flag is what keeps it sorted
+    /// to the front regardless, via `twoMinuteReviewTaskIDs` rather than
+    /// this task's own, possibly-already-gone `shelf`).
     private var completedTasksWithNoBlock: [TaskCompletionRecord] {
         let since = NightlyReviewCompletionState.shared.lastClosedReviewDay ?? .distantPast
         let records = (try? modelContext.fetch(FetchDescriptor<TaskCompletionRecord>(
@@ -572,71 +657,53 @@ struct NightlyReviewView: View {
         let liveTasksByID = Dictionary(uniqueKeysWithValues: allTasks.map { ($0.id, $0) })
         return records.filter { record in
             guard let task = liveTasksByID[record.taskID] else { return true }
-            return (task.scheduledBlocks ?? []).isEmpty && task.shelf?.isTwoMinuteTasks != true
+            return (task.scheduledBlocks ?? []).isEmpty
         }
     }
 
-    /// A tap here only flips membership in `stagedTodayToggleIDs` — no
-    /// model write happens until `advance()` commits the batch on Next
-    /// (§ requirement that Today-step taps be visual-only and reversible).
-    /// `effectiveCompleted` is what lets the row render that pending state
-    /// without touching `block.isCompleted`/`occurrence.isCompleted`.
+    /// A tap here only flips membership in `stagedTodayToggleIDs` (or, for
+    /// a `.meal` item, `stagedMealSelectionIDs` — its own separate set,
+    /// since its eventual commit in `advance()` does something neither
+    /// other kind needs: trigger pantry deduction) — no model write
+    /// happens until `advance()` commits the batch on Next (§ requirement
+    /// that Today-step taps be visual-only and reversible).
+    /// `effectiveCompleted` is what lets the row render that pending
+    /// state without touching the underlying model directly.
     @ViewBuilder
     private var todayStep: some View {
         if todayViewModel != nil {
-            VStack(spacing: 0) {
-                ForEach(todayMealSelections) { selection in
-                    mealSelectionRow(selection)
-                    Divider()
-                }
-                OverdueBlocksReviewList(items: reviewItems, onToggle: { item in
-                    if stagedTodayToggleIDs.contains(item.id) {
-                        stagedTodayToggleIDs.remove(item.id)
+            OverdueBlocksReviewList(items: reviewItems, onToggle: { item in
+                if case .meal(let selection, _) = item {
+                    if stagedMealSelectionIDs.contains(selection.id) {
+                        stagedMealSelectionIDs.remove(selection.id)
                     } else {
-                        stagedTodayToggleIDs.insert(item.id)
+                        stagedMealSelectionIDs.insert(selection.id)
                     }
-                }, isEffectivelyCompleted: effectiveCompleted)
-            }
+                } else if stagedTodayToggleIDs.contains(item.id) {
+                    stagedTodayToggleIDs.remove(item.id)
+                } else {
+                    stagedTodayToggleIDs.insert(item.id)
+                }
+            }, isEffectivelyCompleted: effectiveCompleted)
         } else {
             ProgressView()
         }
     }
 
-    /// One row per `todayMealSelections` entry — tonight's meal, plus any
-    /// earlier unresolved backlog — staged the same visual-only way as
-    /// everything else on this step. See `stagedMealSelectionIDs` and its
-    /// commit in `advance()`'s `next == .inbox` branch, which is also what
-    /// actually triggers pantry deduction.
-    private func mealSelectionRow(_ selection: MealSelection) -> some View {
-        let isStaged = stagedMealSelectionIDs.contains(selection.id)
-        let isCompleted = isStaged ? !selection.isCompleted : selection.isCompleted
-        return HStack(spacing: 12) {
-            Image(systemName: isCompleted ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(isCompleted ? Color.green : Color.secondary.opacity(0.5))
-            Text("Cooked: \(selection.recipeTitle)")
-                .strikethrough(isCompleted)
-            Spacer()
-        }
-        .padding()
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if isStaged {
-                stagedMealSelectionIDs.remove(selection.id)
-            } else {
-                stagedMealSelectionIDs.insert(selection.id)
-            }
-        }
-        .opacity(isCompleted ? 0.5 : 1)
-    }
-
+    /// `.meal` reads/writes `stagedMealSelectionIDs` instead of
+    /// `stagedTodayToggleIDs` — see `todayStep`'s own doc comment for why
+    /// it needs its own separate staged set.
     private func effectiveCompleted(for item: ReviewItem) -> Bool {
-        let real: Bool
         switch item {
-        case .block(let block): real = block.isCompleted
-        case .habit(let occurrence): real = occurrence.isCompleted
-        case .completedTask: real = true
+        case .block(let block):
+            return stagedTodayToggleIDs.contains(item.id) ? !block.isCompleted : block.isCompleted
+        case .habit(let occurrence):
+            return stagedTodayToggleIDs.contains(item.id) ? !occurrence.isCompleted : occurrence.isCompleted
+        case .completedTask:
+            return true
+        case .meal(let selection, _):
+            return stagedMealSelectionIDs.contains(selection.id) ? !selection.isCompleted : selection.isCompleted
         }
-        return stagedTodayToggleIDs.contains(item.id) ? !real : real
     }
 
     /// An AM/Midday/PM habit occurrence (see `HabitOccurrenceTimeMode`)
@@ -1053,6 +1120,7 @@ struct NightlyReviewView: View {
                     viewModel: tomorrowViewModel,
                     isToday: Calendar.current.isDateInToday(tomorrowViewModel.targetDate),
                     allTasks: allTasks,
+                    allPushedRecurringOccurrences: allPushedRecurringOccurrences,
                     allShelves: allShelves,
                     allHabits: allHabits,
                     onSaveEvent: { updated in tomorrowViewModel.saveEventEdit(updated) },
@@ -1586,10 +1654,11 @@ struct TaskReviewCard: View {
     /// occurrence steps forward from (`task.dueDate`, kept in sync with
     /// `task.startDate` — see the "Recurring?" toggle and Start Date
     /// picker in `cardScrollBody`), so there's nothing left for this
-    /// section to ask beyond the interval/end-date questions below. No
-    /// time-of-day question either — every occurrence still lands at a
-    /// fixed time on the calendar (see `TaskItem.recurringOccurrenceTime`),
-    /// it just isn't user-picked; see `combiningDate(_:withTimeFrom:)`.
+    /// section to ask beyond the interval/time-mode/end-date questions
+    /// below. No *user-picked* time-of-day question for Specific Time —
+    /// that occurrence still lands at a fixed time on the calendar (see
+    /// `TaskItem.recurringOccurrenceTime`), taken from Start Date rather
+    /// than asked separately here; see `combiningDate(_:withTimeFrom:)`.
     private var recurringSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             if task.isRecurring {
@@ -1626,6 +1695,29 @@ struct TaskReviewCard: View {
                     .pickerStyle(.menu)
                     .labelsHidden()
                     .fixedSize()
+                }
+
+                // Same AM/Midday/PM/Specific Time choice
+                // `HabitEditView`'s own "Times" section offers, reusing
+                // the identical `HabitOccurrenceTimeMode` enum — Specific
+                // Time is what keeps today's exact behavior (placed on the
+                // calendar at Start Date's own time); AM/Midday/PM instead
+                // shows this as a plain check-off item alongside habits in
+                // that part of the day (see `DayTimelineGridView`,
+                // `RecurringTaskLog`), with no calendar block at all.
+                HStack {
+                    Text("Time")
+                    Spacer()
+                    Picker("Time", selection: Binding(
+                        get: { task.recurrenceTimeMode },
+                        set: { task.recurrenceTimeMode = $0 }
+                    )) {
+                        ForEach(HabitOccurrenceTimeMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
                 }
 
                 Toggle("Ends on a date", isOn: Binding(

@@ -459,13 +459,27 @@ final class ScheduleReviewViewModel {
     /// `removeStaleBlocks` itself otherwise: only a not-yet-completed
     /// block, never a past or already-resolved one, so nothing about a
     /// day's actual history changes.
+    ///
+    /// Also covers a recurring `TaskItem` switched away from Specific
+    /// Time (see `TaskItem.recurrenceTimeMode`) — unlike habits, a
+    /// recurring task's time mode has no dedicated editor of its own with
+    /// an equivalent immediate `removeStaleBlocks` call on save (it's
+    /// edited live, on the task card, with no single "Save" moment to
+    /// hook), so this broader sweep is the *only* place a stale recurring
+    /// task block ever gets cleaned up, not just a backstop for it.
     private func removeStaleNonSpecificHabitBlocksAcrossFutureDays() {
         let calendar = Calendar.current
         let startOfToday = calendar.startOfDay(for: .now)
         let allBlocksNow = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
         let stale = allBlocksNow.filter { block in
-            guard block.date >= startOfToday, let habit = block.habit, !block.isCompleted else { return false }
-            return habit.timeMode(for: block.habitOccurrenceIndex) != .specific
+            guard block.date >= startOfToday, !block.isCompleted else { return false }
+            if let habit = block.habit {
+                return habit.timeMode(for: block.habitOccurrenceIndex) != .specific
+            }
+            if let task = block.task, task.isRecurring {
+                return task.recurrenceTimeMode != .specific
+            }
+            return false
         }
         guard !stale.isEmpty else { return }
         let staleIDs = Set(stale.map(\.id))

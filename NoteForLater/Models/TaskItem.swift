@@ -165,10 +165,30 @@ final class TaskItem {
     var recurrenceUnitRaw: String = RecurrenceUnit.days.rawValue
     /// nil means "indefinitely."
     var recurrenceEndDate: Date?
+    /// Reuses `HabitOccurrenceTimeMode` rather than a second, parallel
+    /// enum — `.specific` means exactly today's existing behavior (placed
+    /// on the calendar at `dueDate`'s own time-of-day, via
+    /// `recurringOccurrenceTime`); `.am`/`.midday`/`.pm` means this
+    /// occurrence never gets a `ScheduledBlock` at all (see
+    /// `AISchedulingService.placeHabitsAndRecurringTasks`'s skip, mirrored
+    /// from the habit one) and instead shows as a plain check-off item in
+    /// that part of the day (see `DayTimelineGridView`), completion
+    /// tracked in `RecurringTaskLog` rather than a block's own
+    /// `isCompleted` — a recurring task has no single, one-time
+    /// completion state the way a plain block does, the same reason
+    /// habits needed `HabitLog` instead of reusing `ScheduledBlock` for
+    /// this. Defaults to `.specific` so every recurring task that existed
+    /// before this field did keeps behaving exactly as it always has.
+    var recurrenceTimeModeRaw: String = HabitOccurrenceTimeMode.specific.rawValue
 
     var recurrenceUnit: RecurrenceUnit {
         get { RecurrenceUnit(rawValue: recurrenceUnitRaw) ?? .days }
         set { recurrenceUnitRaw = newValue.rawValue }
+    }
+
+    var recurrenceTimeMode: HabitOccurrenceTimeMode {
+        get { HabitOccurrenceTimeMode(rawValue: recurrenceTimeModeRaw) ?? .specific }
+        set { recurrenceTimeModeRaw = newValue.rawValue }
     }
 
     /// Whether an occurrence of this recurring task lands on `date`'s

@@ -23,6 +23,7 @@ struct ScheduleReviewView: View {
     @Query(sort: \Shelf.sortOrder) private var allShelves: [Shelf]
     @Query(sort: \Habit.sortOrder) private var allHabits: [Habit]
     @Query private var allBlocks: [ScheduledBlock]
+    @Query private var allPushedRecurringOccurrences: [PushedRecurringOccurrence]
     @Query private var calendarSubscriptions: [CalendarSubscription]
     @Query private var eligibleHoursWindows: [EligibleHoursWindow]
 
@@ -152,6 +153,7 @@ struct ScheduleReviewView: View {
                 viewModel: viewModel,
                 isToday: isToday,
                 allTasks: allTasks,
+                allPushedRecurringOccurrences: allPushedRecurringOccurrences,
                 allShelves: allShelves,
                 allHabits: allHabits,
                 onSaveEvent: { updated in viewModel.saveEventEdit(updated) },
