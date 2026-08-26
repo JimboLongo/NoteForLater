@@ -260,6 +260,38 @@ final class TaskItem {
         return nil
     }
 
+    /// The soonest day *after* `date` where at least one of this task's
+    /// own opted-into, fits-it rules actually runs — the non-recurring
+    /// counterpart to `nextRecurringOccurrenceDate`, used by
+    /// `RippleSchedulingService` to guarantee an incomplete task
+    /// genuinely lands somewhere instead of being freed up to maybe get
+    /// picked up by a future general regenerate walk (see
+    /// `ScheduleReviewViewModel.guaranteePlacement`'s own doc comment for
+    /// the "Stirfry recipes never actually lands anywhere" bug this
+    /// exists to fix). Deliberately checks `isEffectivelyEligible`, not
+    /// just `isEligible` — a rule the user opted into but that can never
+    /// actually fit this task's duration isn't a real candidate day.
+    /// `nil` if nothing qualifies within the search horizon (no enabled,
+    /// fitting rule at all, or every one of them is capped at a handful
+    /// of days a year) — capped at 60 days rather than
+    /// `nextRecurringOccurrenceDate`'s full year, since an ordinary
+    /// task's rule is a recurring weekly window, not a once-a-year
+    /// anchor, so 60 days is already many cycles of any realistic
+    /// schedule.
+    func nextEligibleDay(after date: Date, calendar: Calendar = .current) -> Date? {
+        let rules = (shelf?.schedulingRules ?? []).filter { $0.isEnabled && isEffectivelyEligible(for: $0) }
+        guard !rules.isEmpty else { return nil }
+        var cursor = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date)) ?? date
+        for _ in 0..<60 {
+            let weekday = calendar.component(.weekday, from: cursor)
+            if rules.contains(where: { $0.effectiveDaysOfWeek.contains(weekday) }) {
+                return cursor
+            }
+            cursor = calendar.date(byAdding: .day, value: 1, to: cursor) ?? cursor
+        }
+        return nil
+    }
+
     /// Whether the AI Scheduler may split this task across multiple blocks
     /// (different times/slots the same day) if it doesn't fit in one
     /// contiguous window. Each piece is at least `minimumSegmentMinutes`.

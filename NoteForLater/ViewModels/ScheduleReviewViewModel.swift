@@ -2194,6 +2194,51 @@ final class ScheduleReviewViewModel {
         blocks.removeAll { $0.id == block.id }
     }
 
+    /// Routes `block` through `RippleSchedulingService`, then reloads
+    /// `blocks` from `modelContext` wholesale rather than trying to patch
+    /// individual entries — a ripple can move, bump-to-another-day, or
+    /// leave untouched an arbitrary number of other blocks in ways that
+    /// are much simpler to just re-read than to track through
+    /// `registerInsertedBlock`/`deregisterBlock` calls one at a time.
+    /// This only ever runs once per Nightly Review commit or manual
+    /// push, not a hot path, so the full reload's cost is a non-issue.
+    func insertWithRipple(_ block: ScheduledBlock) {
+        RippleSchedulingService.insertWithRipple(block, context: modelContext)
+        blocks = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+    }
+
+    /// Guarantees an incomplete, non-recurring task actually lands
+    /// somewhere on the calendar rather than being freed up
+    /// (`clearIncompletePastBlocks`'s own unschedule-and-hope) to
+    /// compete for a slot in whatever future general regenerate walk
+    /// happens to run next — the concrete bug this fixes: a task like
+    /// "Stirfry recipes" sits with room genuinely free in its own
+    /// eligible window, yet never actually gets placed because nothing
+    /// forces the issue. Rebuilds a block at the task's own missed
+    /// time-of-day on `TaskItem.nextEligibleDay`, then routes it through
+    /// `insertWithRipple` so it displaces (or gets displaced by, if the
+    /// day genuinely has no room) other tasks rather than silently
+    /// failing to place. `missedDate`/`missedStartTime` are the just-
+    /// deleted block's own values, captured by the caller before
+    /// `clearIncompletePastBlocks` removes it — there is nothing left to
+    /// read them from by the time this runs.
+    func guaranteePlacement(for task: TaskItem, missedDate: Date, missedStartTime: Date, durationMinutes: Int) {
+        let calendar = Calendar.current
+        guard let nextDay = task.nextEligibleDay(after: missedDate, calendar: calendar) else {
+            DiagFileLog.write("RIPPLE GAVE UP taskID=\(task.id) title=\(task.title) reason=No eligible day found for a missed Nightly Review task.")
+            modelContext.insert(PushRecursionWarning(taskID: task.id, taskTitle: task.title, message: "No eligible day left to reschedule it on."))
+            try? modelContext.save()
+            return
+        }
+        let timeOfDay = calendar.dateComponents([.hour, .minute], from: missedStartTime)
+        guard let start = calendar.date(bySettingHour: timeOfDay.hour ?? 9, minute: timeOfDay.minute ?? 0, second: 0, of: nextDay) else { return }
+        let end = start.addingTimeInterval(TimeInterval(durationMinutes * 60))
+        let block = ScheduledBlock(date: nextDay, startTime: start, endTime: end, task: task, isEstimatedDuration: task.estimatedMinutes <= 0)
+        modelContext.insert(block)
+        task.isScheduled = true
+        insertWithRipple(block)
+    }
+
     /// §5.1/§8: same `taskOrdering` the auto-scheduler itself sorts
     /// candidates by, not a separate priority→createdAt→dueDate
     /// comparator. Filtered through `replacementCandidates` first — Auto

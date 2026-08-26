@@ -24,12 +24,14 @@ struct ScheduleReviewView: View {
     @Query(sort: \Habit.sortOrder) private var allHabits: [Habit]
     @Query private var allBlocks: [ScheduledBlock]
     @Query private var allPushedRecurringOccurrences: [PushedRecurringOccurrence]
+    @Query(sort: \PushRecursionWarning.createdAt) private var pushRecursionWarnings: [PushRecursionWarning]
     @Query private var calendarSubscriptions: [CalendarSubscription]
     @Query private var eligibleHoursWindows: [EligibleHoursWindow]
 
     @State private var viewModel: ScheduleReviewViewModel?
     @State private var pickerTarget: ScheduledBlock?
     @State private var isShowingWontFitDetail = false
+    @State private var isShowingPushWarningsDetail = false
     @State private var lockedStore = LockedEventsStore.shared
     /// Live horizontal offset of the date header while dragging — follows
     /// your finger during the pull, then springs back to 0 on release
@@ -167,7 +169,53 @@ struct ScheduleReviewView: View {
                 await viewModel.loadCalendarEvents()
             }
             .safeAreaInset(edge: .top) {
-                wontFitBanner(viewModel: viewModel)
+                VStack(spacing: 0) {
+                    pushGaveUpBanner
+                    wontFitBanner(viewModel: viewModel)
+                }
+            }
+        }
+    }
+
+    /// `RippleSchedulingService` gave up placing a task entirely —
+    /// either it hit the recursion cap chasing a chain of tasks bumping
+    /// each other to make room, or the task genuinely has no eligible
+    /// day left. Distinct from `wontFitBanner`: that one names a task
+    /// the *original* general walk never got to; this one names a task
+    /// the *guaranteed*-placement path (Nightly Review's incomplete-task
+    /// push) actively tried and failed to land — the case that matters
+    /// most, since it means a task silently has no home at all right
+    /// now. Red rather than orange for exactly that reason.
+    @ViewBuilder
+    private var pushGaveUpBanner: some View {
+        if !pushRecursionWarnings.isEmpty {
+            Button {
+                isShowingPushWarningsDetail = true
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "exclamationmark.octagon.fill")
+                        .foregroundStyle(.red)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(pushRecursionWarnings.count == 1 ? "1 task couldn't be rescheduled" : "\(pushRecursionWarnings.count) tasks couldn't be rescheduled")
+                            .font(.caption.weight(.semibold))
+                        Text(pushRecursionWarnings.prefix(3).map(\.taskTitle).joined(separator: ", ") + (pushRecursionWarnings.count > 3 ? "…" : ""))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.bar)
+            .sheet(isPresented: $isShowingPushWarningsDetail) {
+                PushGaveUpDetailSheet(warnings: pushRecursionWarnings, modelContext: modelContext)
             }
         }
     }
@@ -735,6 +783,47 @@ private struct WontFitDetailSheet: View {
                 .padding(.vertical, 2)
             }
             .navigationTitle(unplaced.count == 1 ? "1 Task Won't Fit" : "\(unplaced.count) Tasks Won't Fit")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+/// The "couldn't be rescheduled" banner's detail view — each
+/// `PushRecursionWarning` `RippleSchedulingService`/`ScheduleReviewViewModel
+/// .guaranteePlacement` gave up on, with the reason. Swiping one away
+/// deletes the underlying record — an acknowledgment, not a fix; the
+/// task itself is still wherever it was left (see each warning's own
+/// message), so dismissing here doesn't place it anywhere.
+private struct PushGaveUpDetailSheet: View {
+    let warnings: [PushRecursionWarning]
+    let modelContext: ModelContext
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(warnings) { warning in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(warning.taskTitle)
+                            .font(.body.weight(.medium))
+                        Text(warning.message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                }
+                .onDelete { offsets in
+                    for index in offsets {
+                        modelContext.delete(warnings[index])
+                    }
+                }
+            }
+            .navigationTitle(warnings.count == 1 ? "1 Task Couldn't Be Rescheduled" : "\(warnings.count) Tasks Couldn't Be Rescheduled")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

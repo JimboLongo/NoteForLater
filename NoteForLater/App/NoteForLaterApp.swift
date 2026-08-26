@@ -29,7 +29,8 @@ struct NoteForLaterApp: App {
             MealSelection.self,
             UPCBank.self,
             RecurringTaskLog.self,
-            PushedRecurringOccurrence.self
+            PushedRecurringOccurrence.self,
+            PushRecursionWarning.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
@@ -173,19 +174,31 @@ struct NoteForLaterApp: App {
     /// at every day it passed through. No-op for AM/Midday/PM tasks —
     /// those have no `ScheduledBlock` at all; `DayTimelineGridView` reads
     /// `PushedRecurringOccurrence.currentDate` directly instead.
+    ///
+    /// Routed through `RippleSchedulingService` (fresh at depth 0 for
+    /// each hop — a multi-day catch-up walk is a series of independent
+    /// placements, not one long recursion chain) rather than just
+    /// setting the date/time directly, so a recurring task's push gets
+    /// the same lock-respecting, bump-don't-overflow treatment an
+    /// ordinary task's does (see `ScheduleReviewViewModel
+    /// .guaranteePlacement`) instead of silently landing on top of
+    /// whatever else is already on `newDate`.
     private static func relocatePlaceholderBlock(for task: TaskItem, from oldDate: Date, to newDate: Date, calendar: Calendar, context: ModelContext) {
         guard task.recurrenceTimeMode == .specific else { return }
         guard let start = task.recurringOccurrenceTime(on: newDate, calendar: calendar) else { return }
         let minutes = task.estimatedMinutes > 0 ? task.estimatedMinutes : 30
         let end = start.addingTimeInterval(TimeInterval(minutes * 60))
+        let block: ScheduledBlock
         if let existing = (task.scheduledBlocks ?? []).first(where: { calendar.isDate($0.date, inSameDayAs: oldDate) }) {
             existing.date = calendar.startOfDay(for: newDate)
             existing.startTime = start
             existing.endTime = end
+            block = existing
         } else {
-            let block = ScheduledBlock(date: newDate, startTime: start, endTime: end, task: task, isEstimatedDuration: task.estimatedMinutes <= 0)
+            block = ScheduledBlock(date: newDate, startTime: start, endTime: end, task: task, isEstimatedDuration: task.estimatedMinutes <= 0)
             context.insert(block)
         }
+        RippleSchedulingService.insertWithRipple(block, context: context)
     }
 
     /// Deletes the Specific Time placeholder block left at `date` once the

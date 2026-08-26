@@ -393,6 +393,22 @@ struct NightlyReviewView: View {
                 modelContext.insert(PushedRecurringOccurrence(taskID: taskID, originalDate: block.date))
             }
 
+            // A non-recurring task's own incomplete block is about to be
+            // deleted outright by `clearIncompletePastBlocks` below too —
+            // captured here, before it's gone, so `guaranteePlacement`
+            // in the Task below has the original day/time/duration to
+            // rebuild from. Without this, an incomplete task was merely
+            // freed up to maybe get picked up by a future general
+            // regenerate walk — which is exactly how a task with room
+            // genuinely free in its own eligible window could still just
+            // never actually land (see `RippleSchedulingService`'s own
+            // doc comment for the concrete "Stirfry recipes" bug this
+            // fixes).
+            let missedNonRecurringPlacements = reviewedBlocks.compactMap { block -> (task: TaskItem, date: Date, startTime: Date, durationMinutes: Int)? in
+                guard !block.isCompleted, let task = block.task, !task.isRecurring else { return nil }
+                return (task, block.date, block.startTime, block.durationMinutes)
+            }
+
             // Any habit occurrence the Today review showed but never got
             // checked off — timed or not — is done being reviewable the
             // moment Today is left behind, so it's marked missed right
@@ -436,6 +452,15 @@ struct NightlyReviewView: View {
                 await todayViewModel.clearIncompletePastBlocks(allBlocks: frozenAllBlocks, cutoff: frozenCutoff)
                 for task in incompleteTasks {
                     task.isNightlyReviewed = false
+                }
+                // Guaranteed placement, not left to `regenerateFromNow`
+                // below to maybe find room — sets `task.isScheduled =
+                // true` on each one, so the general walk's own
+                // `!$0.isScheduled` filter (`AISchedulingService.swift`)
+                // naturally leaves them alone rather than fighting over
+                // the same slot this just claimed.
+                for placement in missedNonRecurringPlacements {
+                    tomorrowViewModel.guaranteePlacement(for: placement.task, missedDate: placement.date, missedStartTime: placement.startTime, durationMinutes: placement.durationMinutes)
                 }
                 // Unconditional — today's (and any prior day's) unfinished
                 // tasks were just freed up above, and they need an actual

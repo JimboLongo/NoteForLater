@@ -43,6 +43,7 @@ final class SchedulingEngineTests: XCTestCase {
             for: TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self,
                 SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self,
                 Habit.self, HabitLog.self, MealSelection.self, Recipe.self,
+                PushRecursionWarning.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
         context = ModelContext(container)
@@ -1390,6 +1391,166 @@ final class SchedulingEngineTests: XCTestCase {
         viewModel.deregisterBlock(block)
 
         XCTAssertFalse(viewModel.blocks.contains { $0.id == block.id }, "re-picking a meal must not leave the old block's stale entry sitting in blocks")
+    }
+
+    // MARK: - TaskItem.nextEligibleDay
+
+    /// Thursday Jan 1, 2026 -> the rule only runs Mondays -> the next one
+    /// is Jan 5. Constructed with no `namedSchedule` at all, so
+    /// `effectiveDaysOfWeek` falls back to the rule's own `daysOfWeek`.
+    func test_nextEligibleDay_findsSoonestMatchingWeekday() {
+        let shelf = Shelf(name: "S")
+        context.insert(shelf)
+        let rule = SchedulingRule(shelf: shelf, daysOfWeek: [2], fillStrategy: .fillToFit)
+        context.insert(rule)
+        shelf.schedulingRules = [rule]
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 15, isDivisible: false, minimumSegmentMinutes: 0)
+
+        let next = task.nextEligibleDay(after: day(2026, 1, 1), calendar: calendar)
+
+        XCTAssertEqual(next.map { calendar.startOfDay(for: $0) }, day(2026, 1, 5))
+    }
+
+    func test_nextEligibleDay_nilWhenNoEnabledRuleAtAll() {
+        let shelf = Shelf(name: "S")
+        context.insert(shelf)
+        let task = TaskItem(title: "T", shelf: shelf, estimatedMinutes: 15)
+        context.insert(task)
+
+        XCTAssertNil(task.nextEligibleDay(after: day(2026, 1, 1), calendar: calendar))
+    }
+
+    /// Opted into a rule that exists but never actually toggled on
+    /// (`isEligible(for:)` false) doesn't count — `nextEligibleDay`
+    /// checks `isEffectivelyEligible`, the same "opted in AND actually
+    /// fits" gate the scheduler itself uses.
+    func test_nextEligibleDay_nilWhenTaskNotOptedIntoAnyRule() {
+        let shelf = Shelf(name: "S")
+        context.insert(shelf)
+        let rule = SchedulingRule(shelf: shelf, daysOfWeek: [2], fillStrategy: .fillToFit)
+        context.insert(rule)
+        shelf.schedulingRules = [rule]
+        let task = TaskItem(title: "T", shelf: shelf, estimatedMinutes: 15)
+        context.insert(task)
+
+        XCTAssertNil(task.nextEligibleDay(after: day(2026, 1, 1), calendar: calendar))
+    }
+
+    // MARK: - RippleSchedulingService
+
+    private func makeBlock(day targetDay: Date, hour: Int, minutes: Int, task: TaskItem?, isLocked: Bool = false) -> ScheduledBlock {
+        let start = calendar.date(byAdding: .hour, value: hour, to: targetDay)!
+        let end = calendar.date(byAdding: .minute, value: minutes, to: start)!
+        let block = ScheduledBlock(date: targetDay, startTime: start, endTime: end, task: task)
+        block.isLocked = isLocked
+        context.insert(block)
+        return block
+    }
+
+    /// The base case: a new block overlapping an existing unlocked task
+    /// block shifts that block later to close the gap, same idea
+    /// `ScheduleReviewViewModel.moveEntry` already uses for a manual drag.
+    func test_insertWithRipple_shiftsOverlappingUnlockedBlockLater() {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let existingTask = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 30, isDivisible: false, minimumSegmentMinutes: 0)
+        let targetDay = day(2026, 1, 5)
+        let existing = makeBlock(day: targetDay, hour: 10, minutes: 30, task: existingTask)
+
+        let newTask = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 15, isDivisible: false, minimumSegmentMinutes: 0)
+        let incoming = makeBlock(day: targetDay, hour: 10, minutes: 15, task: newTask)
+
+        RippleSchedulingService.insertWithRipple(incoming, context: context)
+
+        XCTAssertEqual(incoming.startTime, calendar.date(byAdding: .hour, value: 10, to: targetDay))
+        XCTAssertEqual(existing.startTime, incoming.endTime, "the overlapping block must ripple to start exactly where the incoming one ends")
+    }
+
+    /// A locked block never moves — the incoming block routes around it
+    /// (slides to just after it ends) instead of displacing it.
+    func test_insertWithRipple_routesAroundLockedObstacle() {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let targetDay = day(2026, 1, 5)
+        let locked = makeBlock(day: targetDay, hour: 10, minutes: 30, task: nil, isLocked: true)
+
+        let newTask = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 15, isDivisible: false, minimumSegmentMinutes: 0)
+        let incoming = makeBlock(day: targetDay, hour: 10, minutes: 15, task: newTask)
+
+        RippleSchedulingService.insertWithRipple(incoming, context: context)
+
+        XCTAssertEqual(incoming.startTime, locked.endTime, "the incoming block must route around the locked obstacle, not overlap or move it")
+        XCTAssertEqual(locked.startTime, calendar.date(byAdding: .hour, value: 10, to: targetDay), "a locked block must never move")
+    }
+
+    /// No room left in the day even after shifting — the displaced block
+    /// is bumped to its own next eligible day (same time-of-day) instead
+    /// of overflowing into tomorrow unannounced, and the block that
+    /// triggered the ripple stays right where it was asked to go.
+    func test_insertWithRipple_bumpsDisplacedBlockToNextEligibleDayWhenDayIsFull() {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let targetDay = day(2026, 1, 5)
+        // 23:50-00:00 — right at the very end of the day, so rippling it
+        // forward by even a few minutes pushes its end past midnight.
+        let displacedTask = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 10, isDivisible: false, minimumSegmentMinutes: 0)
+        let displaced = makeBlock(day: targetDay, hour: 23, minutes: 10, task: displacedTask)
+        displaced.startTime = calendar.date(bySettingHour: 23, minute: 50, second: 0, of: targetDay)!
+        displaced.endTime = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: targetDay))!
+
+        let incomingTask = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 10, isDivisible: false, minimumSegmentMinutes: 0)
+        let incoming = ScheduledBlock(
+            date: targetDay,
+            startTime: calendar.date(bySettingHour: 23, minute: 45, second: 0, of: targetDay)!,
+            endTime: calendar.date(bySettingHour: 23, minute: 55, second: 0, of: targetDay)!,
+            task: incomingTask
+        )
+        context.insert(incoming)
+
+        RippleSchedulingService.insertWithRipple(incoming, context: context)
+
+        XCTAssertEqual(incoming.startTime, calendar.date(bySettingHour: 23, minute: 45, second: 0, of: targetDay), "the block that triggered the ripple keeps its own requested slot")
+        XCTAssertFalse(calendar.isDate(displaced.date, inSameDayAs: targetDay), "with no room left today, the displaced block must move to another day rather than overflow past midnight")
+        let displacedTimeOfDay = calendar.dateComponents([.hour, .minute], from: displaced.startTime)
+        XCTAssertEqual(displacedTimeOfDay.hour, 23)
+        XCTAssertEqual(displacedTimeOfDay.minute, 50, "a bumped block keeps its own original time-of-day on its new day")
+    }
+
+    /// The depth cap itself — verified directly rather than by
+    /// constructing a real 10-level bounce, which would need an
+    /// elaborate fixture to reliably reproduce. Calling in at the cap
+    /// must give up loudly: a `PushRecursionWarning` row, not just a
+    /// silent no-op, since that row is what `ScheduleReviewView`'s
+    /// "couldn't be rescheduled" banner reads.
+    func test_insertWithRipple_atDepthCapRecordsLoudWarning() {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 15, isDivisible: false, minimumSegmentMinutes: 0)
+        let block = makeBlock(day: day(2026, 1, 5), hour: 10, minutes: 15, task: task)
+
+        RippleSchedulingService.insertWithRipple(block, context: context, depth: RippleSchedulingService.maxDepth)
+
+        let warnings = (try? context.fetch(FetchDescriptor<PushRecursionWarning>())) ?? []
+        XCTAssertTrue(warnings.contains { $0.taskID == task.id }, "hitting the depth cap must leave a visible warning behind, not fail silently")
+    }
+
+    // MARK: - ScheduleReviewViewModel.guaranteePlacement
+
+    /// The Nightly Review hook's own entry point: an incomplete task is
+    /// rebuilt on its next eligible day at the same time-of-day it was
+    /// missed at, and marked `isScheduled` so the general regenerate
+    /// walk's own `!$0.isScheduled` filter leaves it alone afterward.
+    func test_guaranteePlacement_rebuildsBlockOnNextEligibleDayAndMarksScheduled() async throws {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 15, isDivisible: false, minimumSegmentMinutes: 0)
+        let missedDay = day(2026, 1, 5)
+        let missedStart = calendar.date(bySettingHour: 14, minute: 0, second: 0, of: missedDay)!
+
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: missedDay)
+        viewModel.guaranteePlacement(for: task, missedDate: missedDay, missedStartTime: missedStart, durationMinutes: 15)
+
+        XCTAssertTrue(task.isScheduled, "a guaranteed placement must mark the task scheduled so the general walk doesn't also try to place it")
+        let newBlock = (task.scheduledBlocks ?? []).first
+        XCTAssertNotNil(newBlock, "guaranteePlacement must actually create a block, not just flag the task")
+        XCTAssertFalse(calendar.isDate(newBlock?.date ?? missedDay, inSameDayAs: missedDay), "the rebuilt block must land on a day after the one it was missed on")
+        let timeOfDay = calendar.dateComponents([.hour, .minute], from: newBlock?.startTime ?? missedStart)
+        XCTAssertEqual(timeOfDay.hour, 14, "the rebuilt block keeps the missed block's own time-of-day")
     }
 
     // MARK: - Unplaced reasons — one coarse explanation per task per walk
