@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import Combine
 
 /// Task Attribute Review's queue, presented as a single persistent modal —
 /// unlike tapping one task (`TaskCardSheet`), advancing here swaps which
@@ -19,6 +20,11 @@ struct TaskReviewQueueSheet: View {
     /// making the very first presentation look empty even though the
     /// passed-in queue was correct by the time it actually appeared.
     let initialQueue: [TaskItem]
+    /// Nightly Review's minimum-engagement floor for this queue — see
+    /// `InboxEngagementTimer`'s own doc comment. Drives the wrap-around in
+    /// `advance()`, the "Skip Remaining" gate, and the countdown shown in
+    /// the toolbar.
+    let engagementTimer: InboxEngagementTimer
     /// Fires when Close is tapped specifically from the "All Caught Up"
     /// screen — not from the toolbar Cancel shown mid-review — so a caller
     /// that wants to keep moving once review is genuinely finished (see
@@ -45,9 +51,10 @@ struct TaskReviewQueueSheet: View {
     @State private var tagQueue: [Tag] = []
     @State private var currentTag: Tag?
 
-    init(shelves: [Shelf], queue: [TaskItem], onAllCaughtUpClose: (() -> Void)? = nil) {
+    init(shelves: [Shelf], queue: [TaskItem], engagementTimer: InboxEngagementTimer, onAllCaughtUpClose: (() -> Void)? = nil) {
         self.shelves = shelves
         self.initialQueue = queue
+        self.engagementTimer = engagementTimer
         self.onAllCaughtUpClose = onAllCaughtUpClose
     }
 
@@ -140,14 +147,34 @@ struct TaskReviewQueueSheet: View {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Cancel", action: cancel)
                     }
+                    ToolbarItem(placement: .principal) {
+                        // Always visible while there's a card up, counting
+                        // down to 0:00 and staying there — not hidden once
+                        // expired, so it's still obvious *why* Skip
+                        // Remaining just became tappable.
+                        Text(Self.formattedRemaining(engagementTimer.remaining))
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(engagementTimer.isExpired ? .secondary : .primary)
+                    }
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button("Skip Remaining", action: skipRemaining)
+                        Button(skipRemainingTitle, action: skipRemaining)
+                            .disabled(!engagementTimer.isExpired)
                     }
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Mark Complete", action: markComplete)
                             .tint(.green)
                     }
                 }
+            }
+            // Ticks the engagement floor once a second — only while this
+            // sheet is actually on screen, since `.onReceive`'s
+            // subscription is torn down the moment the view is (Cancel,
+            // or the sheet otherwise dismissing). That's what gives
+            // "cancel and reopen resumes, doesn't reset" its pause: real
+            // wall-clock time passing while the sheet is closed never
+            // reaches `engagementTimer` at all.
+            .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+                engagementTimer.tick()
             }
             .onAppear {
                 guard !hasStarted else { return }
@@ -162,6 +189,21 @@ struct TaskReviewQueueSheet: View {
                 }
             }
         }
+    }
+
+    /// "1:47", floored at "0:00" — never negative, matching
+    /// `InboxEngagementTimer.tick`'s own clamp.
+    private static func formattedRemaining(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    /// "Skip Remaining" while counting down still names the remaining
+    /// time right on the button — "obvious why it's disabled" — then
+    /// drops the suffix once it's actually tappable.
+    private var skipRemainingTitle: String {
+        guard !engagementTimer.isExpired else { return "Skip Remaining" }
+        return "Skip Remaining (\(Self.formattedRemaining(engagementTimer.remaining)))"
     }
 
     /// Only Cancel rolls the current card back — everything already
@@ -193,11 +235,22 @@ struct TaskReviewQueueSheet: View {
         }
     }
 
+    /// Once `queue` runs dry: pop the next card as usual if there's one
+    /// left, otherwise ask `AttributeReviewSession.nextWrapQueue` whether
+    /// to wrap back to whatever's still unresolved (while the engagement
+    /// floor hasn't expired) or actually finish. See that function's own
+    /// doc comment for the exact rule — this just acts on its answer.
     private func advance() {
         entersFromLeft = true
         guard queue.isEmpty else {
             currentTask = queue.removeFirst()
             snapshot = currentTask.map(TaskEditSnapshot.init)
+            return
+        }
+        if var wrapped = AttributeReviewSession.nextWrapQueue(initialQueue: initialQueue, engagementTimer: engagementTimer) {
+            currentTask = wrapped.removeFirst()
+            snapshot = currentTask.map(TaskEditSnapshot.init)
+            queue = wrapped
             return
         }
         currentTask = nil
@@ -206,13 +259,18 @@ struct TaskReviewQueueSheet: View {
     }
 
     /// Jumps straight past every remaining task card at once — same
-    /// end state `advance()` reaches once the queue empties on its own
-    /// (the tag phase, or "All Caught Up" if there's nothing there
-    /// either), just without stepping through each card one at a time.
-    /// Nothing already reviewed this session is touched — each card's
-    /// edits already committed straight to the model as they were made,
-    /// same as `cancel()`'s own doc comment notes.
+    /// end state `advance()` reaches once the queue empties with the
+    /// engagement floor already expired (the tag phase, or "All Caught
+    /// Up" if there's nothing there either), just without stepping
+    /// through each card one at a time. Nothing already reviewed this
+    /// session is touched — each card's edits already committed straight
+    /// to the model as they were made, same as `cancel()`'s own doc
+    /// comment notes. Guarded here too, not just via the toolbar button's
+    /// `.disabled` — belt and suspenders, since a disabled SwiftUI button
+    /// can't fire its action anyway, but this function shouldn't trust
+    /// that alone.
     private func skipRemaining() {
+        guard engagementTimer.isExpired else { return }
         queue = []
         currentTask = nil
         snapshot = nil
@@ -276,6 +334,6 @@ private struct CompletionBurstView: View {
 
 #Preview {
     let shelf = Shelf(name: "To-Do List", systemImage: "checklist")
-    return TaskReviewQueueSheet(shelves: [shelf], queue: [TaskItem(title: "Sample task", shelf: shelf)])
+    return TaskReviewQueueSheet(shelves: [shelf], queue: [TaskItem(title: "Sample task", shelf: shelf)], engagementTimer: InboxEngagementTimer())
         .modelContainer(for: [TaskItem.self, ScheduledBlock.self, Shelf.self, CalendarSubscription.self, SchedulingRule.self, EligibleHoursWindow.self, Tag.self, NamedSchedule.self, Habit.self, HabitLog.self], inMemory: true)
 }

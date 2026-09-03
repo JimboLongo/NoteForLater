@@ -388,6 +388,12 @@ struct TaskRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
+                if let recurrenceSummary = task.recurrenceSummary {
+                    Label(recurrenceSummary, systemImage: "repeat")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 if !showsPantryAge {
                     HStack(spacing: 12) {
                         Label(addedAgeText, systemImage: "hourglass")

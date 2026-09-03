@@ -12,7 +12,7 @@ enum AppTab: Hashable {
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Shelf.sortOrder) private var shelves: [Shelf]
-    @Query private var tags: [Tag]
+    @Query(sort: \Tag.name) private var tags: [Tag]
     @Query private var allBlocks: [ScheduledBlock]
     @Query(sort: \Habit.sortOrder) private var allHabits: [Habit]
 

@@ -43,6 +43,12 @@ struct NightlyReviewView: View {
     /// launches it instead of landing on a bespoke mini-flow that happens
     /// to do almost the same thing.
     @State private var attributeReviewSession: AttributeReviewSession?
+    /// One instance for the whole Nightly Review session — see
+    /// `InboxEngagementTimer`'s own doc comment for why it has to be a
+    /// single, view-owned instance rather than something
+    /// `startAttributeReviewSession()` creates fresh each time it builds
+    /// `attributeReviewSession`.
+    @State private var inboxEngagementTimer = InboxEngagementTimer()
     /// Snapshotted the moment the 2-Minute Tasks step is entered (see
     /// `advance()`) rather than computed live off `!task.isCompleted` — so
     /// checking a task off leaves it in the list, strikethrough, instead of
@@ -81,11 +87,23 @@ struct NightlyReviewView: View {
     /// touching the task itself.
     @State private var acknowledgedAtRiskTaskIDs: Set<UUID> = []
     @State private var atRiskTaskCardTarget: TaskItem?
+    /// Drives the "X is empty — skipped" auto-skip toast (see
+    /// `advance()`/`presentSkipToast`) — a separate pair from
+    /// `TaskReviewCard`'s own `toastMessage`/`toastVisible` further down
+    /// this file; that's a different view struct entirely.
+    @State private var skipToastMessage: String?
+    @State private var skipToastVisible = false
 
     private let calendarService: CalendarServiceProtocol = GoogleCalendarService()
     private let schedulingService: AISchedulingServiceProtocol = MockAISchedulingService()
 
-    private enum Step: Int, CaseIterable {
+    /// Internal, not `private` — `autoSkipEligible` needs to be directly
+    /// testable (`NightlyReviewViewStepAutoSkipTests`) without constructing
+    /// a live `NightlyReviewView`, which its `@Query` properties make
+    /// impractical from a unit test. Still only ever referenced as
+    /// `NightlyReviewView.Step` from outside this file — nothing about it
+    /// is meant for use elsewhere.
+    enum Step: Int, CaseIterable, Hashable {
         case chooseDay, twoMinuteTasks, today, inbox, atRisk, meals, tomorrow
 
         /// `planDate` is only meaningful for `.meals`/`.tomorrow` — the day
@@ -109,6 +127,29 @@ struct NightlyReviewView: View {
                 return "Plan for \(formatter.string(from: planDate))"
             }
         }
+
+        /// Short, day-independent name for the auto-skip toast — unlike
+        /// `title(planDate:)`, never used as a navigation title, so it
+        /// doesn't need to be unique or descriptive on its own, just
+        /// readable inside "X and Y are empty — skipped."
+        var skipLabel: String {
+            switch self {
+            case .chooseDay: return "Which Day?"
+            case .twoMinuteTasks: return "2-Minute Tasks"
+            case .today: return "Review Schedule"
+            case .inbox: return "Inbox"
+            case .atRisk: return "At Risk"
+            case .meals: return "Meals"
+            case .tomorrow: return "Plan Tomorrow"
+            }
+        }
+
+        /// Steps `advance()`/`back()` are allowed to walk straight past
+        /// when they turn out empty — deliberately excludes `.chooseDay`
+        /// (never reached as a "next" candidate anyway), `.today` (where
+        /// nothing missed gets confirmed — always shown even if sparse),
+        /// and `.tomorrow` (the final approval screen — same reasoning).
+        static let autoSkipEligible: Set<Step> = [.twoMinuteTasks, .inbox, .atRisk, .meals]
     }
 
     private var planDate: Date {
@@ -180,10 +221,27 @@ struct NightlyReviewView: View {
             .safeAreaInset(edge: .bottom) {
                 navBar
             }
+            .overlay(alignment: .top) {
+                if let skipToastMessage {
+                    Text(skipToastMessage)
+                        .font(.subheadline.weight(.medium))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(.thinMaterial, in: Capsule())
+                        .overlay(Capsule().stroke(.quaternary))
+                        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                        .padding(.top, 8)
+                        .opacity(skipToastVisible ? 1 : 0)
+                        .offset(y: skipToastVisible ? 0 : -8)
+                        .allowsHitTesting(false)
+                }
+            }
             .sheet(item: $attributeReviewSession) { session in
                 TaskReviewQueueSheet(
                     shelves: routableInboxShelves,
                     queue: session.queue,
+                    engagementTimer: session.engagementTimer,
                     onAllCaughtUpClose: {
                         // Review actually finished here (not an early
                         // Cancel) — no reason to make the user tap Next
@@ -235,43 +293,69 @@ struct NightlyReviewView: View {
         .background(.bar)
     }
 
+    /// Mirrors `advance()`'s forward auto-skip, in reverse: walks backward
+    /// past any step that's both auto-skip-eligible and *currently* empty,
+    /// so stepping back from a step reached by skipping forward doesn't
+    /// immediately drop you onto the very empty step(s) just skipped —
+    /// re-checked live via `isStepCurrentlyEmpty`, not a stale record of
+    /// what was skipped on the way in, since going back can follow
+    /// arbitrary time later than the forward walk that got here. Runs no
+    /// entry side effects while walking backward (`onEnter` is a no-op)
+    /// — Back has never re-run a step's "entering" work, and re-running
+    /// e.g. the staged-toggle commits here would double-apply them.
+    /// Floored at `.chooseDay`, which is never eligible, so this can never
+    /// loop — same defensive `maxSteps` cap `advance()` uses regardless.
     private func back() {
-        step = Step(rawValue: step.rawValue - 1) ?? .chooseDay
+        let start = Step(rawValue: step.rawValue - 1) ?? .chooseDay
+        let result = StepAutoSkip.walkForward(
+            from: start,
+            next: { Step(rawValue: $0.rawValue - 1) ?? .chooseDay },
+            isEligible: { Step.autoSkipEligible.contains($0) },
+            isEmpty: isStepCurrentlyEmpty,
+            onEnter: { _ in },
+            maxSteps: Step.allCases.count
+        )
+        step = result.landed
     }
 
-    /// Both "Close" and "Done" route through here rather than calling
-    /// `dismiss()` directly — an explicit save first, since neither one
-    /// otherwise flushes anything to disk. Most writes this session makes
-    /// do eventually reach a real `ScheduledBlock`/`TaskItem` write (task
-    /// completions, habit toggles, and so on all mutate live SwiftData
-    /// models), but a straight `dismiss()` was relying entirely on
-    /// SwiftData's own opportunistic autosave to actually persist that —
-    /// which isn't guaranteed to run before the app is later force-quit or
-    /// the device locks. Concretely: swiping to delete a block on the
-    /// Tomorrow step (`ScheduleReviewViewModel.deleteBlock`) does call
-    /// `modelContext.delete(block)` right away, but that deletion was only
-    /// ever actually durable if autosave happened to fire in the window
-    /// between the swipe and whatever came next — otherwise the block was
-    /// still sitting in the store the next time the app launched, exactly
-    /// as if the delete had silently not happened at all.
-    private func finishAndDismiss() {
-        try? modelContext.save()
-        dismiss()
+    /// Whether `step` currently has nothing to show — mirrors exactly the
+    /// condition each step's own view branches on to render its
+    /// `ContentUnavailableView` empty state, so a step this reports as
+    /// empty is never one that would have shown different content had the
+    /// user actually landed on it. Only meaningful for
+    /// `Step.autoSkipEligible` members; every other step reports `false`
+    /// unconditionally so it's never a candidate to skip regardless of
+    /// what it'd otherwise evaluate to.
+    ///
+    /// For `.twoMinuteTasks`/`.inbox`, this reads state
+    /// (`twoMinuteReviewTasks`/`attributeReviewSession`) that's only
+    /// accurate *after* that step's own entry effect has run this pass —
+    /// `runEntryEffects(for:)` always runs before this is consulted (see
+    /// `StepAutoSkip.walkForward`'s doc comment), so it never reads a
+    /// stale snapshot left over from further back in the same walk.
+    private func isStepCurrentlyEmpty(_ step: Step) -> Bool {
+        switch step {
+        case .chooseDay, .today, .tomorrow: return false
+        case .twoMinuteTasks: return twoMinuteReviewTasks.isEmpty
+        case .inbox: return attributeReviewSession == nil
+        case .atRisk: return atRiskTasks.isEmpty
+        case .meals: return allRecipes.isEmpty
+        }
     }
 
-    private func advance() {
-        var next = Step(rawValue: step.rawValue + 1) ?? .tomorrow
-        if step == .chooseDay {
-            setupViewModels()
-        }
-        // §7.1: skipped forward, not dismissed — `.atRisk` is no longer
-        // the last step (Meals/Tomorrow still follow it), so an empty
-        // At-Risk step just advances one further rather than ending the
-        // whole review the way it used to when it was the final step.
-        if next == .atRisk, atRiskTasks.isEmpty {
-            next = Step(rawValue: next.rawValue + 1) ?? .tomorrow
-        }
-        step = next
+    /// Every per-transition side effect `advance()` used to hang off
+    /// `next == <step>` (staged-toggle commits, starting the Inbox review
+    /// session, the recurring-occurrence push and `guaranteePlacement`,
+    /// the Tomorrow regenerate) — now keyed to run for *any* step this
+    /// pass's walk enters, whether it ends up shown or skipped. That's the
+    /// whole point of calling this from `StepAutoSkip.walkForward`'s
+    /// `onEnter` rather than only for the step the walk finally lands on:
+    /// an empty `.inbox` still needs its Today-exit commit batch (staged
+    /// toggles, meal completion + pantry deduction, the recurring push,
+    /// `guaranteePlacement`) to run, exactly as if the user had tapped
+    /// Next onto it and then off again, even though it's never actually
+    /// shown on screen.
+    private func runEntryEffects(for next: Step) {
         if next == .today {
             // Two-Minute-Tasks-step taps are visual-only — commit them
             // here, on the way out, so Today Review (which now runs right
@@ -284,9 +368,6 @@ struct NightlyReviewView: View {
                 ScheduleDirtyState.shared.isDirty = true
             }
             stagedTwoMinuteToggleIDs = []
-        }
-        if next == .inbox {
-            startAttributeReviewSession()
         }
         if next == .twoMinuteTasks {
             let pending = (twoMinuteShelf?.tasks ?? []).filter { !$0.isCompleted && $0.isEligibleToStart(on: reviewDate) }
@@ -304,6 +385,9 @@ struct NightlyReviewView: View {
             let recentlyCompleted = (twoMinuteShelf?.tasks ?? []).filter { completedTaskIDs.contains($0.id) }
             twoMinuteReviewTaskIDs = Set(pending.map(\.id) + recentlyCompleted.map(\.id))
             stagedTwoMinuteToggleIDs = []
+        }
+        if next == .inbox {
+            startAttributeReviewSession()
         }
         if next == .inbox, let todayViewModel, let tomorrowViewModel {
             // Today-step taps are visual-only (see `stagedTodayToggleIDs`)
@@ -374,24 +458,19 @@ struct NightlyReviewView: View {
             // A recurring task's own incomplete block is about to be
             // deleted outright by `clearIncompletePastBlocks` below, same
             // as any other stale block, with nothing else stepping in to
-            // replace it — captured here, before that happens, so the
-            // app-launch catch-up routine
-            // (`NoteForLaterApp.processPushedRecurringOccurrencesIfNeeded`)
-            // has something to push forward instead of the occurrence
-            // just silently vanishing until its next real recurrence day.
-            // Skipped if one's already being pushed (an earlier miss that
-            // hasn't resolved yet) — that record's own `currentDate`
-            // already points at today's block, so there's nothing new to
-            // record.
-            for block in reviewedBlocks where !block.isCompleted {
-                guard let task = block.task, task.isRecurring else { continue }
-                let taskID = task.id
-                let alreadyPushed = (try? modelContext.fetch(FetchDescriptor<PushedRecurringOccurrence>(
-                    predicate: #Predicate { $0.taskID == taskID && !$0.isCompleted }
-                )))?.first != nil
-                guard !alreadyPushed else { continue }
-                modelContext.insert(PushedRecurringOccurrence(taskID: taskID, originalDate: block.date))
-            }
+            // replace it — captured here, before that happens, so there's
+            // something to push forward instead of the occurrence just
+            // silently vanishing until its next real recurrence day. Also
+            // covers AM/Midday/PM recurring tasks, which never have a
+            // block for the state above to capture in the first place (see
+            // `ScheduleReviewViewModel.pushMissedRecurringOccurrences`'s own
+            // doc comment). Skips any task that's already being pushed (an
+            // earlier miss that hasn't resolved yet) — that record's own
+            // `currentDate` already points at today, so there's nothing new
+            // to record.
+            let freshlyPushedRecurringOccurrences = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
+                reviewedBlocks: reviewedBlocks, tasks: allTasks, context: modelContext, cutoff: frozenCutoff
+            )
 
             // A non-recurring task's own incomplete block is about to be
             // deleted outright by `clearIncompletePastBlocks` below too —
@@ -462,6 +541,24 @@ struct NightlyReviewView: View {
                 for placement in missedNonRecurringPlacements {
                     tomorrowViewModel.guaranteePlacement(for: placement.task, missedDate: placement.date, missedStartTime: placement.startTime, durationMinutes: placement.durationMinutes)
                 }
+                // Same guarantee as `guaranteePlacement` above, for a
+                // recurring miss: rather than leaving the record it just
+                // created sitting at today's date until the next app
+                // launch's catch-up walk gets to it
+                // (`NoteForLaterApp.processPushedRecurringOccurrencesIfNeeded`),
+                // hop it forward one day — onto tomorrow — right now, via
+                // the exact function that walk uses per day
+                // (`PushedRecurringOccurrence.advanceOneHop`). Only ever
+                // one hop, for records created by *this* review — a task
+                // whose miss dates further back (the review didn't run for
+                // several nights) is still left for that launch-time walk
+                // to catch all the way up, deliberately: this Task isn't
+                // the place to fast-forward stale backlog.
+                let calendar = Calendar.current
+                for pushed in freshlyPushedRecurringOccurrences {
+                    guard let next = calendar.date(byAdding: .day, value: 1, to: pushed.missedDay) else { continue }
+                    PushedRecurringOccurrence.advanceOneHop(pushed.occurrence, task: pushed.task, from: pushed.missedDay, to: next, calendar: calendar, context: modelContext)
+                }
                 // Unconditional — today's (and any prior day's) unfinished
                 // tasks were just freed up above, and they need an actual
                 // following day to land on. `regenerateFromNow`, not
@@ -495,6 +592,81 @@ struct NightlyReviewView: View {
                 }
             }
         }
+    }
+
+    /// Builds the "X and Y are empty — skipped" toast body for whatever
+    /// `advance()`'s walk actually skipped this pass — one combined
+    /// message regardless of how many steps got skipped, never one per
+    /// step, so a multi-step skip doesn't stack several toasts on top of
+    /// each other.
+    private func skipToastMessage(for skipped: [Step]) -> String? {
+        guard !skipped.isEmpty else { return nil }
+        let names = skipped.map(\.skipLabel)
+        let joined: String
+        switch names.count {
+        case 1: joined = names[0]
+        case 2: joined = "\(names[0]) and \(names[1])"
+        default: joined = names.dropLast().joined(separator: ", ") + ", and " + names[names.count - 1]
+        }
+        let verb = names.count == 1 ? "is" : "are"
+        return "\(joined) \(verb) empty — skipped"
+    }
+
+    /// Non-blocking, self-dismissing — the whole point of auto-skip is
+    /// fewer taps, so this must never require one back. Mirrors
+    /// `TaskReviewCard.showToast`'s timing/animation shape (this view's
+    /// own `skipToastMessage`/`skipToastVisible` are separate state, since
+    /// `TaskReviewCard` is a different view further down this file).
+    private func presentSkipToast(_ message: String) {
+        skipToastVisible = false
+        skipToastMessage = message
+        withAnimation(.easeOut(duration: 0.25)) {
+            skipToastVisible = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
+            withAnimation(.easeOut(duration: 0.3)) {
+                skipToastVisible = false
+            }
+        }
+    }
+
+    private func advance() {
+        if step == .chooseDay {
+            setupViewModels()
+        }
+        let start = Step(rawValue: step.rawValue + 1) ?? .tomorrow
+        let result = StepAutoSkip.walkForward(
+            from: start,
+            next: { Step(rawValue: $0.rawValue + 1) ?? .tomorrow },
+            isEligible: { Step.autoSkipEligible.contains($0) },
+            isEmpty: isStepCurrentlyEmpty,
+            onEnter: runEntryEffects,
+            maxSteps: Step.allCases.count
+        )
+        step = result.landed
+        if let message = skipToastMessage(for: result.skipped) {
+            presentSkipToast(message)
+        }
+    }
+
+    /// Both "Close" and "Done" route through here rather than calling
+    /// `dismiss()` directly — an explicit save first, since neither one
+    /// otherwise flushes anything to disk. Most writes this session makes
+    /// do eventually reach a real `ScheduledBlock`/`TaskItem` write (task
+    /// completions, habit toggles, and so on all mutate live SwiftData
+    /// models), but a straight `dismiss()` was relying entirely on
+    /// SwiftData's own opportunistic autosave to actually persist that —
+    /// which isn't guaranteed to run before the app is later force-quit or
+    /// the device locks. Concretely: swiping to delete a block on the
+    /// Tomorrow step (`ScheduleReviewViewModel.deleteBlock`) does call
+    /// `modelContext.delete(block)` right away, but that deletion was only
+    /// ever actually durable if autosave happened to fire in the window
+    /// between the swipe and whatever came next — otherwise the block was
+    /// still sitting in the store the next time the app launched, exactly
+    /// as if the delete had silently not happened at all.
+    private func finishAndDismiss() {
+        try? modelContext.save()
+        dismiss()
     }
 
     // MARK: - Step 0: Choose Day
@@ -879,20 +1051,16 @@ struct NightlyReviewView: View {
         // Today step above just checked off, moments before this queue
         // gets built (see `advance()`) — so finishing something during
         // Today doesn't turn around and ask you to fill in its attributes
-        // right after.
-        let unsortedTasks = allTasks.filter { $0.shelf == nil && !$0.isCompleted && !$0.isSnoozedFromAttributeReview }
-        // A task also lands here once its own "Remind Me In" timer is up
-        // (see `TaskItem.isDueForFutureReminder`) — independent of
-        // `isMissingAttributes`, since a reminder can be set on an
-        // otherwise fully-filled-out task that just needs a future
-        // second look.
-        let shelfTasks = allTasks.filter {
-            $0.shelf != nil && !($0.shelf!.isKitchen) && !$0.isCompleted && !$0.isSnoozedFromAttributeReview
-                && ($0.isMissingAttributes || $0.isDueForFutureReminder)
-        }
-        let queue = unsortedTasks + shelfTasks
+        // right after. See `AttributeReviewSession.queueCandidates` for
+        // the full predicate.
+        let queue = AttributeReviewSession.queueCandidates(from: allTasks)
         guard !queue.isEmpty else { return }
-        attributeReviewSession = AttributeReviewSession(queue: queue)
+        // `inboxEngagementTimer` is the same instance every time this
+        // runs — an empty inbox never even reaches this line (the guard
+        // above returns first), so a step that auto-skips because there's
+        // nothing to review never starts, or is charged against, the
+        // engagement floor at all.
+        attributeReviewSession = AttributeReviewSession(queue: queue, engagementTimer: inboxEngagementTimer)
     }
 
     // MARK: - Step 1: 2-Minute Tasks

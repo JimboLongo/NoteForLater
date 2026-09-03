@@ -16,6 +16,9 @@
 		9E6F11BB107A4A089B67FD31 /* HabitRollingStatsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3F965C18B2385814DF25BDD /* HabitRollingStatsTests.swift */; };
 		A85A179B079F60FD5A4043E9 /* MealSuggestionServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EEEA0F8829F20DBDC58BF32 /* MealSuggestionServiceTests.swift */; };
 		AC5AC49498EDDFFFE2E161D4 /* ReceiptLineParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99D88D01BE7CD604EA3CD89C /* ReceiptLineParserTests.swift */; };
+		2C80DBC957734506B79F9684 /* RecurringTaskReviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90FF46E7544F4142BA6ABA3C /* RecurringTaskReviewTests.swift */; };
+		C015AEC05C814224B6F0D1B7 /* NightlyReviewAutoSkipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC96AD75D7A2490F81BD3A53 /* NightlyReviewAutoSkipTests.swift */; };
+		97616388B0D04F1F820558EF /* InboxEngagementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74CEE89CD17D4C3CBEEC9EA8 /* InboxEngagementTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -40,6 +43,9 @@
 		A3F965C18B2385814DF25BDD /* HabitRollingStatsTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HabitRollingStatsTests.swift; sourceTree = "<group>"; };
 		DA5013E3FBE3449FA3A0C911 /* SchedulingEngineTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SchedulingEngineTests.swift; sourceTree = "<group>"; };
 		DACE29CB1AB1502A34BCD4F0 /* PantryDeductionServiceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PantryDeductionServiceTests.swift; sourceTree = "<group>"; };
+		90FF46E7544F4142BA6ABA3C /* RecurringTaskReviewTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecurringTaskReviewTests.swift; sourceTree = "<group>"; };
+		CC96AD75D7A2490F81BD3A53 /* NightlyReviewAutoSkipTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NightlyReviewAutoSkipTests.swift; sourceTree = "<group>"; };
+		74CEE89CD17D4C3CBEEC9EA8 /* InboxEngagementTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = InboxEngagementTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -101,6 +107,9 @@
 				1EEEA0F8829F20DBDC58BF32 /* MealSuggestionServiceTests.swift */,
 				8CEFFCE3E6ACC74FC7D7BF6A /* RecipeIngredientParserTests.swift */,
 				DACE29CB1AB1502A34BCD4F0 /* PantryDeductionServiceTests.swift */,
+				90FF46E7544F4142BA6ABA3C /* RecurringTaskReviewTests.swift */,
+				CC96AD75D7A2490F81BD3A53 /* NightlyReviewAutoSkipTests.swift */,
+				74CEE89CD17D4C3CBEEC9EA8 /* InboxEngagementTests.swift */,
 			);
 			path = NoteForLaterTests;
 			sourceTree = "<group>";
@@ -234,6 +243,9 @@
 				A85A179B079F60FD5A4043E9 /* MealSuggestionServiceTests.swift in Sources */,
 				6B282F81F54E6AE9014E0FE8 /* RecipeIngredientParserTests.swift in Sources */,
 				69161A13195235691F23449B /* PantryDeductionServiceTests.swift in Sources */,
+				2C80DBC957734506B79F9684 /* RecurringTaskReviewTests.swift in Sources */,
+				C015AEC05C814224B6F0D1B7 /* NightlyReviewAutoSkipTests.swift in Sources */,
+				97616388B0D04F1F820558EF /* InboxEngagementTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

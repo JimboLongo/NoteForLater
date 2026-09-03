@@ -1513,13 +1513,15 @@ final class ScheduleReviewViewModel {
 
     /// Which window a replacement/insertion candidate is being evaluated
     /// against — §8's eligibility/fit predicate (a rule whose window
-    /// actually covers the target instant, plus — for an occupied block
-    /// specifically — fitting its fixed duration) is identical either
-    /// way. Only the "is this candidate already spoken for" exclusion
-    /// differs: Replace/Swap can still take a candidate that's scheduled
-    /// elsewhere (see `occupiedBlock` below); an empty slot never can —
-    /// there's nothing here yet to trade places with, and `insertBlock`
-    /// just creates a fresh block rather than freeing an old one.
+    /// actually covers the target instant) is identical either way. What
+    /// differs is the "already spoken for" exclusion and whether a fixed
+    /// duration gets fit-checked: both contexts now let a candidate
+    /// that's scheduled elsewhere through, gated the same "one movable
+    /// block" way, but only `occupiedBlock` has a fixed slot size to fit
+    /// against — an empty slot has none, so no candidate (scheduled or
+    /// not) is fit-checked there; picking a task that doesn't fit its new
+    /// spot just ripples the day to make room instead (see
+    /// `moveExistingBlock`/`insertBlock`).
     enum CandidateSlotContext {
         /// Replace/Swap target. A candidate already scheduled elsewhere
         /// may still qualify, but only if it has a single, unlocked,
@@ -1527,14 +1529,16 @@ final class ScheduleReviewViewModel {
         /// need one movable block, not a guess at which piece of a
         /// divisible task's spread, or a user-pinned lock, should move.
         case occupiedBlock(ScheduledBlock)
-        /// An empty slot — no existing occupant, and no fixed duration
-        /// yet (`insertBlock` sizes the new block to whichever task gets
-        /// picked), so only genuinely unscheduled tasks qualify and
-        /// there's no block-duration fit check to run.
-        /// `includingInbox` widens the pool to unsorted (no-shelf) tasks
-        /// too — only the long-press-to-insert popover wants that; the
-        /// auto-scheduler's own candidate pool never includes Inbox
-        /// tasks.
+        /// An empty slot — no existing occupant. A candidate already
+        /// scheduled elsewhere still qualifies, under the identical
+        /// "single, unlocked, incomplete block" gate `occupiedBlock`
+        /// uses — picking one *moves* that block here
+        /// (`moveExistingBlock`) rather than creating a second one;
+        /// picking a genuinely unscheduled one still creates a fresh
+        /// block (`insertBlock`), same as always. `includingInbox`
+        /// widens the pool to unsorted (no-shelf) tasks too — only the
+        /// long-press-to-insert popover wants that; the auto-scheduler's
+        /// own candidate pool never includes Inbox tasks.
         case freeSlot(startTime: Date, includingInbox: Bool)
     }
 
@@ -1574,7 +1578,17 @@ final class ScheduleReviewViewModel {
                     guard activeBlocks.count <= 1, !(activeBlocks.first?.isLocked ?? false) else { return false }
                 }
             case .freeSlot(_, let includingInbox):
-                guard !task.isScheduled else { return false }
+                // A scheduled task may still qualify — picking it *moves*
+                // its existing block here (see `moveExistingBlock`)
+                // instead of creating a second one — but only under the
+                // same "one movable block" gate `.occupiedBlock` already
+                // uses just above: a divisible task spread across several
+                // blocks, or one with a locked block, stays excluded
+                // rather than guessing which piece should move.
+                if task.isScheduled {
+                    let activeBlocks = (task.scheduledBlocks ?? []).filter { !$0.isCompleted }
+                    guard activeBlocks.count <= 1, !(activeBlocks.first?.isLocked ?? false) else { return false }
+                }
                 if task.shelf == nil, !includingInbox { return false }
             }
 
@@ -1953,6 +1967,109 @@ final class ScheduleReviewViewModel {
         !openHabitOccurrencesForReview(habits: habits, context: context, upTo: cutoff).isEmpty
     }
 
+    /// One recurring `TaskItem` occurrence, on a day it was due, still open
+    /// — the task counterpart to `HabitReviewOccurrence`.
+    struct RecurringTaskReviewOccurrence: Identifiable {
+        let id: String
+        let task: TaskItem
+        let missedDate: Date
+    }
+
+    /// AM/Midday/PM recurring-`TaskItem` occurrences genuinely still open
+    /// as of `cutoff` — the task counterpart to `openHabitOccurrencesForReview`,
+    /// needed for the same reason: an occurrence in this mode never gets a
+    /// `ScheduledBlock` of its own (see `TaskItem.recurrenceTimeMode`'s own
+    /// doc comment), so `reviewableBlocks` can never surface a missed one,
+    /// and — unlike habits — nothing else in Nightly Review ever checked
+    /// `RecurringTaskLog` either. That's the whole bug: a miss here
+    /// evaporated with no trace at all.
+    ///
+    /// Walks **forward** from each task's own bounded floor to `cutoff`
+    /// (the habit version walks backward) so results come back
+    /// oldest-occurrence-first per task — callers collapse this to at most
+    /// one `PushedRecurringOccurrence` per task (see
+    /// `pushMissedRecurringOccurrences`), and that record's `originalDate`
+    /// should be the *earliest* unresolved miss, not whichever day this
+    /// happened to check last.
+    ///
+    /// Completion is read through `RecurringTaskLog.log(taskID:on:context:)`
+    /// — the fetch-based reader that sees a pending, unsaved log — never a
+    /// relationship traversal, for the same reason `Habit.occurrenceStatus`
+    /// requires `context:` instead of reading `habit.logs` (see that
+    /// function's own doc comment): this list feeds a **write** decision
+    /// (`pushMissedRecurringOccurrences` inserts a `PushedRecurringOccurrence`
+    /// from it), and `RecurringTaskLog.taskID` isn't even a relationship —
+    /// there's no relationship-based reader to reach for by mistake here in
+    /// the first place.
+    static func openRecurringTaskOccurrencesForReview(tasks: [TaskItem], context: ModelContext, upTo cutoff: Date = .now, calendar: Calendar = .current) -> [RecurringTaskReviewOccurrence] {
+        let cutoffDay = calendar.startOfDay(for: cutoff)
+        var result: [RecurringTaskReviewOccurrence] = []
+        for task in tasks where task.isRecurring && task.recurrenceTimeMode != .specific {
+            guard let anchor = task.dueDate else { continue }
+            let anchorDay = calendar.startOfDay(for: anchor)
+            guard anchorDay <= cutoffDay else { continue }
+            // Same 400-day safety cap as the habit version, for the same
+            // reason: bounds a very old task's scan without changing
+            // behavior for anything realistic.
+            let scanFloorDay = calendar.date(byAdding: .day, value: -400, to: cutoffDay) ?? anchorDay
+            var cursor = max(anchorDay, scanFloorDay)
+            while cursor <= cutoffDay {
+                if task.hasRecurringOccurrence(on: cursor, calendar: calendar) {
+                    let targetTime = calendar.date(byAdding: .minute, value: targetMinutes(for: task.recurrenceTimeMode), to: cursor) ?? cursor
+                    if targetTime < cutoff {
+                        let isCompleted = RecurringTaskLog.log(taskID: task.id, on: cursor, context: context, calendar: calendar)?.isCompleted ?? false
+                        if !isCompleted {
+                            result.append(RecurringTaskReviewOccurrence(id: "\(task.id)-\(Int(cursor.timeIntervalSince1970))", task: task, missedDate: cursor))
+                        }
+                    }
+                }
+                guard let nextDay = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
+                cursor = nextDay
+            }
+        }
+        return result
+    }
+
+    /// Creates a `PushedRecurringOccurrence` for every recurring task left
+    /// incomplete by tonight's review that doesn't already have one
+    /// pending — both the block-scoped case (Specific Time, sourced from
+    /// `reviewedBlocks`) and the `RecurringTaskLog`-scoped case
+    /// (AM/Midday/PM, sourced from `openRecurringTaskOccurrencesForReview`
+    /// since those tasks have no block for the first loop to ever see).
+    /// Same "skip if already pushed" guard for both — a fetch, not a
+    /// relationship read, so a record inserted earlier in this same call is
+    /// visible to a later check within it (matters when a task shows up in
+    /// more than one day's worth of backlog at once).
+    ///
+    /// Returns each freshly-created record alongside its task and the day
+    /// it was missed, so the caller can hop it forward once immediately
+    /// (`PushedRecurringOccurrence.advanceOneHop`) instead of leaving it to
+    /// sit unresolved until the next app launch's catch-up walk.
+    @discardableResult
+    static func pushMissedRecurringOccurrences(reviewedBlocks: [ScheduledBlock], tasks: [TaskItem], context: ModelContext, cutoff: Date) -> [(occurrence: PushedRecurringOccurrence, task: TaskItem, missedDay: Date)] {
+        var created: [(occurrence: PushedRecurringOccurrence, task: TaskItem, missedDay: Date)] = []
+
+        func pushIfNeeded(task: TaskItem, missedDay: Date) {
+            let taskID = task.id
+            let alreadyPushed = (try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>(
+                predicate: #Predicate { $0.taskID == taskID && !$0.isCompleted }
+            )))?.first != nil
+            guard !alreadyPushed else { return }
+            let occurrence = PushedRecurringOccurrence(taskID: taskID, originalDate: missedDay)
+            context.insert(occurrence)
+            created.append((occurrence, task, missedDay))
+        }
+
+        for block in reviewedBlocks where !block.isCompleted {
+            guard let task = block.task, task.isRecurring else { continue }
+            pushIfNeeded(task: task, missedDay: block.date)
+        }
+        for occurrence in openRecurringTaskOccurrencesForReview(tasks: tasks, context: context, upTo: cutoff) {
+            pushIfNeeded(task: occurrence.task, missedDay: occurrence.missedDate)
+        }
+        return created
+    }
+
     /// Toggles an untimed (AM/Midday/PM) habit occurrence's completion —
     /// the habit counterpart to `toggleComplete`, for a
     /// `HabitReviewOccurrence` that (unlike a habit-linked block) has no
@@ -2152,6 +2269,38 @@ final class ScheduleReviewViewModel {
         // objects; leaving this batch of deletes unsaved going into that
         // has been the difference between a clean regenerate and a crash.
         try? modelContext.save()
+    }
+
+    /// Relocates `task`'s existing block to `startTime` on `targetDate`,
+    /// rather than `insertBlock` creating a second one — reached the same
+    /// way `insertBlock` is (long-press an open slot, pick a candidate
+    /// from `EmptySlotPickerSheet`), for a candidate `replacementCandidates`
+    /// already gated to exactly one active, unlocked block (see
+    /// `.freeSlot`'s own doc comment) — nothing here needs to disambiguate
+    /// which block moves. The block's own duration is preserved exactly,
+    /// never truncated to fit whatever room happens to be at `startTime`;
+    /// `insertWithRipple` is what actually finds room there, bumping
+    /// anything in the way forward (or, if the day's genuinely full,
+    /// pushing it to *its own* next eligible day) — the same
+    /// lock-respecting, bump-don't-overflow treatment `guaranteePlacement`
+    /// and the recurring-occurrence push already get, rather than the
+    /// moved block silently landing on top of something else. No upfront
+    /// "does it fit" filter in the candidate list either, deliberately
+    /// consistent with how `insertBlock` already treats an unscheduled
+    /// candidate — ripple is what reconciles size against room, not a
+    /// filter that would hide a candidate from a gap it doesn't fit
+    /// verbatim but could still be rippled into.
+    /// No-op (guard, not a crash) if the gate above somehow let through a
+    /// task with no actual movable block — defensive only; every real
+    /// caller already guarantees one exists.
+    func moveExistingBlock(for task: TaskItem, to startTime: Date) {
+        guard let block = (task.scheduledBlocks ?? []).first(where: { !$0.isCompleted && !$0.isLocked }) else { return }
+        let duration = block.endTime.timeIntervalSince(block.startTime)
+        block.date = targetDate
+        block.startTime = startTime
+        block.endTime = startTime.addingTimeInterval(duration)
+        needsReapproval(block)
+        insertWithRipple(block)
     }
 
     /// Creates a brand-new block for `task` at `startTime` — reached by

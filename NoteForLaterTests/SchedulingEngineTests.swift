@@ -2367,11 +2367,14 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertTrue(candidates.contains { $0.id == divisibleFits.id }, "divisible with a 30-min floor fits a 60-min block one segment at a time")
     }
 
-    /// The `.freeSlot` context differs from `.occupiedBlock` in its
-    /// exclusions only — no duration check (insertBlock sizes the block
-    /// to the task), and already-scheduled tasks never qualify since
-    /// there's nothing here to trade places with.
-    func test_replacementCandidates_freeSlot_excludesScheduled_andHonorsInboxFlag() async {
+    /// The `.freeSlot` context differs from `.occupiedBlock` in having no
+    /// duration check (`insertBlock`/`moveExistingBlock` both just take
+    /// whatever room `insertWithRipple` finds), not in whether a
+    /// scheduled task can qualify — it can, under the identical
+    /// single-unlocked-block gate `.occupiedBlock` uses, so it can be
+    /// *moved* here (`moveExistingBlock`) instead of creating a second
+    /// block. `includingInbox` is orthogonal, tested here too.
+    func test_replacementCandidates_freeSlot_allowsSingleUnlockedScheduledTask_andHonorsInboxFlag() async {
         let testDay = day(2026, 1, 5)
         let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
         let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: testDay)
@@ -2380,6 +2383,9 @@ final class SchedulingEngineTests: XCTestCase {
         let unscheduled = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 30, isDivisible: false, minimumSegmentMinutes: 0)
         let alreadyScheduled = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 30, isDivisible: false, minimumSegmentMinutes: 0)
         alreadyScheduled.isScheduled = true
+        let existingStart = calendar.date(byAdding: .hour, value: 9, to: testDay)!
+        let existingBlock = ScheduledBlock(date: testDay, startTime: existingStart, endTime: calendar.date(byAdding: .minute, value: 30, to: existingStart)!, task: alreadyScheduled)
+        context.insert(existingBlock)
         // No shelf at all — an unsorted Inbox task.
         let inboxTask = TaskItem(title: "Unsorted", estimatedMinutes: 30)
         context.insert(inboxTask)
@@ -2389,9 +2395,71 @@ final class SchedulingEngineTests: XCTestCase {
         let withoutInbox = viewModel.replacementCandidates(from: pool, for: .freeSlot(startTime: slotStart, includingInbox: false))
 
         XCTAssertTrue(withInbox.contains { $0.id == unscheduled.id })
-        XCTAssertFalse(withInbox.contains { $0.id == alreadyScheduled.id }, "an empty slot has nothing to swap with, so a scheduled task never qualifies")
+        XCTAssertTrue(withInbox.contains { $0.id == alreadyScheduled.id }, "a scheduled task with one movable block qualifies — picking it moves that block here")
         XCTAssertTrue(withInbox.contains { $0.id == inboxTask.id }, "includingInbox: true is what the long-press insert popover needs")
         XCTAssertFalse(withoutInbox.contains { $0.id == inboxTask.id }, "includingInbox: false must exclude unsorted tasks")
+    }
+
+    /// A scheduled task with more than one active block, or a locked
+    /// block, has nothing unambiguous to move — same gate `.occupiedBlock`
+    /// already enforces, reused verbatim for `.freeSlot`.
+    func test_replacementCandidates_freeSlot_excludesMultiBlockOrLockedScheduledTask() async {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: testDay)
+        let slotStart = calendar.date(byAdding: .hour, value: 10, to: testDay)!
+
+        let multiBlock = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: true, minimumSegmentMinutes: 30)
+        multiBlock.isScheduled = true
+        let firstStart = calendar.date(byAdding: .hour, value: 8, to: testDay)!
+        let secondStart = calendar.date(byAdding: .hour, value: 14, to: testDay)!
+        context.insert(ScheduledBlock(date: testDay, startTime: firstStart, endTime: calendar.date(byAdding: .minute, value: 30, to: firstStart)!, task: multiBlock))
+        context.insert(ScheduledBlock(date: testDay, startTime: secondStart, endTime: calendar.date(byAdding: .minute, value: 30, to: secondStart)!, task: multiBlock))
+
+        let locked = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 30, isDivisible: false, minimumSegmentMinutes: 0)
+        locked.isScheduled = true
+        let lockedStart = calendar.date(byAdding: .hour, value: 9, to: testDay)!
+        let lockedBlock = ScheduledBlock(date: testDay, startTime: lockedStart, endTime: calendar.date(byAdding: .minute, value: 30, to: lockedStart)!, task: locked)
+        lockedBlock.isLocked = true
+        context.insert(lockedBlock)
+
+        let candidates = viewModel.replacementCandidates(from: [multiBlock, locked], for: .freeSlot(startTime: slotStart, includingInbox: true))
+
+        XCTAssertFalse(candidates.contains { $0.id == multiBlock.id }, "a divisible task spread across two blocks has no single piece to move")
+        XCTAssertFalse(candidates.contains { $0.id == locked.id }, "a locked block never moves, so its task isn't offered here")
+    }
+
+    /// Picking an already-scheduled candidate from the empty-slot picker
+    /// must *move* its existing block, not create a second one for the
+    /// same task.
+    ///
+    /// Verified fail-then-pass: with `DayTimelineGridView`'s `onPick`
+    /// temporarily reverted to always call `insertBlock` (the pre-fix
+    /// behavior for every candidate, scheduled or not) — mirrored here by
+    /// calling `viewModel.insertBlock` instead of `moveExistingBlock` —
+    /// this test failed: block count for the task came back `2`, and the
+    /// original 9am block was still present unmoved. Restoring the real
+    /// `moveExistingBlock` call and rerunning: green, count stayed `1` and
+    /// the same block relocated. Both via `xcodebuild test`.
+    func test_moveExistingBlock_relocatesRatherThanDuplicating() async throws {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: testDay)
+
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 30, isDivisible: false, minimumSegmentMinutes: 0)
+        task.isScheduled = true
+        let originalStart = calendar.date(byAdding: .hour, value: 9, to: testDay)!
+        let originalBlock = ScheduledBlock(date: testDay, startTime: originalStart, endTime: calendar.date(byAdding: .minute, value: 30, to: originalStart)!, task: task)
+        context.insert(originalBlock)
+
+        let newStart = calendar.date(byAdding: .hour, value: 14, to: testDay)!
+        viewModel.moveExistingBlock(for: task, to: newStart)
+
+        let allBlocksForTask = (try context.fetch(FetchDescriptor<ScheduledBlock>())).filter { $0.task?.id == task.id }
+        XCTAssertEqual(allBlocksForTask.count, 1, "must still be exactly one block for this task, not two")
+        XCTAssertEqual(allBlocksForTask.first?.id, originalBlock.id, "the original block itself should be the one that moved")
+        XCTAssertEqual(allBlocksForTask.first?.startTime, newStart)
+        XCTAssertEqual(allBlocksForTask.first.map { calendar.isDate($0.date, inSameDayAs: newStart) }, true)
     }
 
     // MARK: - TaskEditSnapshot — startDate
@@ -2419,6 +2487,51 @@ final class SchedulingEngineTests: XCTestCase {
 
         original.restore(into: task)
         XCTAssertEqual(task.startDate, originalStart, "Cancel must put the old startDate back")
+    }
+
+    // MARK: - TaskItem.recurrenceSummary
+
+    func test_recurrenceSummary_nilForNonRecurringTask() {
+        let task = TaskItem(title: "T")
+        XCTAssertFalse(task.isRecurring)
+        XCTAssertNil(task.recurrenceSummary)
+    }
+
+    /// A 1x interval drops the numeral entirely — "Every day", never
+    /// "Every 1 day".
+    func test_recurrenceSummary_dropsNumeralForIntervalOne() {
+        let task = TaskItem(title: "T")
+        task.isRecurring = true
+        task.recurrenceUnit = .days
+        task.recurrenceIntervalCount = 1
+        XCTAssertEqual(task.recurrenceSummary, "Every day")
+    }
+
+    /// Interval > 1 keeps the numeral and pluralizes via
+    /// `RecurrenceUnit.label(for:)`.
+    func test_recurrenceSummary_pluralizesForIntervalGreaterThanOne() {
+        let task = TaskItem(title: "T")
+        task.isRecurring = true
+        task.recurrenceUnit = .months
+        task.recurrenceIntervalCount = 2
+        XCTAssertEqual(task.recurrenceSummary, "Every 2 months")
+    }
+
+    /// `recurrenceEndDate` appends " until <short date>" — formatted with
+    /// the exact same pattern the production code uses, rather than a
+    /// hardcoded string, so this doesn't depend on the test runner's own
+    /// locale/timezone matching whatever machine originally wrote it.
+    func test_recurrenceSummary_appendsEndDateWhenSet() {
+        let task = TaskItem(title: "T")
+        task.isRecurring = true
+        task.recurrenceUnit = .weeks
+        task.recurrenceIntervalCount = 1
+        let endDate = Calendar.current.date(from: DateComponents(year: 2026, month: 10, day: 14))!
+        task.recurrenceEndDate = endDate
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        XCTAssertEqual(task.recurrenceSummary, "Every week until \(formatter.string(from: endDate))")
     }
 
     // MARK: - openHabitOccurrencesForReview — completedSince

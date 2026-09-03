@@ -1394,7 +1394,11 @@ private struct DayTimelineSegment: View {
                     time: emptySlotTime,
                     candidates: viewModel.replacementCandidates(from: allTasks, for: .freeSlot(startTime: emptySlotTime, includingInbox: true)),
                     onPick: { task in
-                        viewModel.insertBlock(for: task, startTime: emptySlotTime)
+                        if task.isScheduled {
+                            viewModel.moveExistingBlock(for: task, to: emptySlotTime)
+                        } else {
+                            viewModel.insertBlock(for: task, startTime: emptySlotTime)
+                        }
                         self.emptySlotTime = nil
                     }
                 )
@@ -2450,14 +2454,24 @@ private struct EmptySlotPickerSheet: View {
         let color: Color
     }
 
-    /// One group per shelf (sorted by the shelf's own `sortOrder`, tasks
-    /// within it due-date-first then no-due-date), with a final "Inbox"
-    /// group for tasks that aren't on any shelf. Each group carries its
-    /// shelf's color, same as the blocks on the grid itself use to tint
-    /// their background — Inbox gets a neutral gray since it has none.
+    /// One group per shelf (sorted by the shelf's own `sortOrder`; within
+    /// it, unscheduled tasks first — the common case, and the one that
+    /// doesn't need a second glance to understand — then already-
+    /// scheduled ones (see `currentTimeLabel`), each bucket due-date-first
+    /// then no-due-date), with a final "Inbox" group for tasks that
+    /// aren't on any shelf. Deliberately just a sort within the existing
+    /// per-shelf sections rather than a whole second grouping axis
+    /// crossed with shelf — scheduled candidates are visually set apart
+    /// by their time label alone (`taskRow`), not a separate section, so
+    /// the shelf color-coding this list already relies on doesn't have to
+    /// compete with a second hierarchy for the same real estate. Each
+    /// group carries its shelf's color, same as the blocks on the grid
+    /// itself use to tint their background — Inbox gets a neutral gray
+    /// since it has none.
     private var groups: [ShelfGroup] {
         let byShelf = Dictionary(grouping: candidates) { $0.shelf?.id }
-        func dueDateFirst(_ lhs: TaskItem, _ rhs: TaskItem) -> Bool {
+        func ordered(_ lhs: TaskItem, _ rhs: TaskItem) -> Bool {
+            if lhs.isScheduled != rhs.isScheduled { return !lhs.isScheduled }
             switch (lhs.dueDate, rhs.dueDate) {
             case let (l?, r?): return l < r
             case (_?, nil): return true
@@ -2468,24 +2482,40 @@ private struct EmptySlotPickerSheet: View {
         let shelfGroups = byShelf.values
             .compactMap { tasks -> ShelfGroup? in
                 guard let shelf = tasks.first?.shelf else { return nil }
-                return ShelfGroup(id: shelf.id.uuidString, title: shelf.name, tasks: tasks.sorted(by: dueDateFirst), color: shelf.color)
+                return ShelfGroup(id: shelf.id.uuidString, title: shelf.name, tasks: tasks.sorted(by: ordered), color: shelf.color)
             }
             .sorted { ($0.tasks.first?.shelf?.sortOrder ?? 0) < ($1.tasks.first?.shelf?.sortOrder ?? 0) }
-        let inboxTasks = (byShelf[nil] ?? []).sorted(by: dueDateFirst)
+        let inboxTasks = (byShelf[nil] ?? []).sorted(by: ordered)
         return inboxTasks.isEmpty ? shelfGroups : shelfGroups + [ShelfGroup(id: "inbox", title: "Inbox", tasks: inboxTasks, color: .secondary)]
     }
 
     private var timeText: String {
+        Self.timeFormatter.string(from: time)
+    }
+
+    private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "h:mm a"
-        return formatter.string(from: time)
+        return formatter
+    }()
+
+    /// "Currently 9:00 AM" for a candidate that's already scheduled
+    /// elsewhere (or elsewhen — could be a different day entirely), `nil`
+    /// for a genuinely unscheduled one, which shows no time at all. Reads
+    /// straight off the task's own single active block —
+    /// `replacementCandidates`'s `.freeSlot` gate already guarantees at
+    /// most one, unlocked and incomplete, exists whenever `isScheduled`
+    /// let it through.
+    private func currentTimeLabel(for task: TaskItem) -> String? {
+        guard task.isScheduled, let block = (task.scheduledBlocks ?? []).first(where: { !$0.isCompleted }) else { return nil }
+        return "Currently \(Self.timeFormatter.string(from: block.startTime))"
     }
 
     var body: some View {
         NavigationStack {
             Group {
                 if candidates.isEmpty {
-                    ContentUnavailableView("Nothing to Schedule", systemImage: "tray", description: Text("No unscheduled to-dos available."))
+                    ContentUnavailableView("Nothing to Schedule", systemImage: "tray", description: Text("No to-dos available to schedule here."))
                 } else {
                     List {
                         ForEach(groups) { group in
@@ -2501,6 +2531,11 @@ private struct EmptySlotPickerSheet: View {
                                             Text("\(task.durationLabel) \u{00B7} \(task.priority.label)")
                                                 .font(.caption)
                                                 .foregroundStyle(.secondary)
+                                            if let currentTimeLabel = currentTimeLabel(for: task) {
+                                                Text(currentTimeLabel)
+                                                    .font(.caption.weight(.medium))
+                                                    .foregroundStyle(.orange)
+                                            }
                                         }
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                         .padding(.vertical, 2)

@@ -260,6 +260,35 @@ final class TaskItem {
         return nil
     }
 
+    /// "Oct 14" — short enough to sit as supporting detail alongside
+    /// `recurrenceSummary`. Same "MMM d" pattern
+    /// `ShelfListView.TaskRow.pantryAgeText` already uses for a short
+    /// date, kept consistent rather than inventing a second one.
+    private static let recurrenceEndDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter
+    }()
+
+    /// "Every day" / "Every 3 days" / "Every week" / "Every 2 months",
+    /// optionally "... until Oct 14" once `recurrenceEndDate` is set —
+    /// `nil` for a non-recurring task. Lives here rather than inline in
+    /// whichever view first wanted it (`ShelfListView.TaskRow`) since it's
+    /// exactly the kind of plain-string derivation other screens will
+    /// want too, and there's no shared helper for it anywhere yet. Drops
+    /// the "1" for a 1x interval ("Every day", not "Every 1 day") —
+    /// `RecurrenceUnit.label(for:)` already handles the singular/plural
+    /// noun; this only decides whether the count itself is worth saying.
+    var recurrenceSummary: String? {
+        guard isRecurring else { return nil }
+        let countPrefix = recurrenceIntervalCount == 1 ? "" : "\(recurrenceIntervalCount) "
+        var summary = "Every \(countPrefix)\(recurrenceUnit.label(for: recurrenceIntervalCount))"
+        if let recurrenceEndDate {
+            summary += " until \(Self.recurrenceEndDateFormatter.string(from: recurrenceEndDate))"
+        }
+        return summary
+    }
+
     /// The soonest day *after* `date` where at least one of this task's
     /// own opted-into, fits-it rules actually runs — the non-recurring
     /// counterpart to `nextRecurringOccurrenceDate`, used by

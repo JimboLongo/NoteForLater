@@ -18,6 +18,13 @@ final class LocationMonitoringService: NSObject {
     /// can look up which tasks/inbox items carry the triggered tag.
     var modelContainer: ModelContainer?
 
+    /// Last time each tag (by region identifier) actually fired a
+    /// notification. `syncRegions` re-runs on every tag edit and re-checks
+    /// state for every monitored region via `requestState`, so without this
+    /// sitting inside a region would re-notify on every resync.
+    private var lastNotified: [String: Date] = [:]
+    private let renotifyInterval: TimeInterval = 60 * 60
+
     private override init() {
         super.init()
         locationManager.delegate = self
@@ -46,6 +53,12 @@ final class LocationMonitoringService: NSObject {
             region.notifyOnEntry = true
             region.notifyOnExit = false
             locationManager.startMonitoring(for: region)
+            // CoreLocation only calls didEnterRegion on a *new* boundary
+            // crossing — if we're already inside when monitoring starts
+            // (app launch, tag edit while nearby), didEnterRegion never
+            // fires. requestState's didDetermineState callback catches
+            // that "already inside" case.
+            locationManager.requestState(for: region)
         }
     }
 }
@@ -59,13 +72,22 @@ extension LocationMonitoringService: CLLocationManagerDelegate {
         notifyForTag(named: region.identifier)
     }
 
+    func locationManager(_ manager: CLLocationManager, didDetermineState state: CLRegionState, for region: CLRegion) {
+        guard state == .inside else { return }
+        notifyForTag(named: region.identifier)
+    }
+
     private func notifyForTag(named tagName: String) {
+        if let last = lastNotified[tagName], Date().timeIntervalSince(last) < renotifyInterval { return }
+
         guard let modelContainer else { return }
         let context = ModelContext(modelContainer)
         guard let tasks = try? context.fetch(FetchDescriptor<TaskItem>()) else { return }
 
-        let matching = tasks.filter { !$0.isScheduled && $0.tags.contains(tagName) }
+        let matching = tasks.filter { !$0.isCompleted && $0.tags.contains(tagName) }
         guard !matching.isEmpty else { return }
+
+        lastNotified[tagName] = Date()
 
         let content = UNMutableNotificationContent()
         content.title = "Near \(tagName)"

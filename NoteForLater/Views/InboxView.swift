@@ -413,9 +413,59 @@ struct InboxView: View {
 /// atomic value instead of two separately-written `@State` properties.
 /// Shared with `NightlyReviewView`, which launches the same review
 /// automatically after Today is reviewed.
+///
+/// `engagementTimer` is `NightlyReviewView`'s one-per-session
+/// `InboxEngagementTimer` — see that type's own doc comment for why the
+/// *same* instance has to survive across a session being rebuilt more
+/// than once (Cancel, then "Review Again").
 struct AttributeReviewSession: Identifiable {
     let id = UUID()
     let queue: [TaskItem]
+    let engagementTimer: InboxEngagementTimer
+}
+
+extension AttributeReviewSession {
+    /// Every task that currently belongs in a Task Attribute Review
+    /// queue — unsorted (no-shelf) tasks first, then shelf tasks (outside
+    /// the Kitchen) still missing details or due for another look ("Remind
+    /// Me In" — independent of `isMissingAttributes`, since a reminder can
+    /// be set on an otherwise fully-filled-out task that just needs a
+    /// future second look), each not completed and not currently snoozed.
+    ///
+    /// Shared between the initial queue build
+    /// (`NightlyReviewView.startAttributeReviewSession`) and
+    /// `TaskReviewQueueSheet`'s wrap-around re-check
+    /// (`nextWrapQueue(initialQueue:engagementTimer:)`) — both have to
+    /// agree on exactly what "still needs review" means, or an item
+    /// resolved one way could come back around the other. Passing this a
+    /// *subset* (the sheet passes its own `initialQueue`, not every task
+    /// in the app) is what scopes the wrap-around re-check to "which of
+    /// my original items are still unresolved" rather than pulling in
+    /// something new that happened to become eligible mid-review.
+    static func queueCandidates(from tasks: [TaskItem]) -> [TaskItem] {
+        let unsortedTasks = tasks.filter { $0.shelf == nil && !$0.isCompleted && !$0.isSnoozedFromAttributeReview }
+        let shelfTasks = tasks.filter {
+            $0.shelf != nil && !($0.shelf!.isKitchen) && !$0.isCompleted && !$0.isSnoozedFromAttributeReview
+                && ($0.isMissingAttributes || $0.isDueForFutureReminder)
+        }
+        return unsortedTasks + shelfTasks
+    }
+
+    /// What `TaskReviewQueueSheet.advance()` should do once its own queue
+    /// runs dry: wrap back to whatever in `initialQueue` is still
+    /// unresolved (re-checked live via `queueCandidates`, never a
+    /// separately-tracked skip-set — so a fixed item never comes back
+    /// around), but only while `engagementTimer` hasn't expired. `nil`
+    /// means "finish" — either nothing's unresolved any more (the timer
+    /// is a floor on engagement, not a punishment for finishing early —
+    /// an empty result proceeds immediately regardless of remaining time)
+    /// or the timer's run out (normal end-of-queue behavior returns, no
+    /// more wrap-around).
+    static func nextWrapQueue(initialQueue: [TaskItem], engagementTimer: InboxEngagementTimer) -> [TaskItem]? {
+        let stillUnresolved = queueCandidates(from: initialQueue)
+        guard !stillUnresolved.isEmpty, !engagementTimer.isExpired else { return nil }
+        return stillUnresolved
+    }
 }
 
 #Preview {
