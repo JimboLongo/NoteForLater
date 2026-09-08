@@ -22,7 +22,7 @@ struct HabitDetailView: View {
     // Remaining follow the exact same rule — see `cachedRollingStats`.
     @State private var cachedStats: HabitStats?
     @State private var cachedRollingStats: HabitRollingStats?
-    /// Same idle debounce `HabitsTodayView.displayedHabits` uses — a day
+    /// Same idle debounce `HabitsTodayView.cachedStats` uses — a day
     /// cell's own color still updates the instant you tap it (`setDay`
     /// mutates the model directly), but this stats grid stays frozen
     /// until 3 seconds pass with no further edit anywhere, instead of

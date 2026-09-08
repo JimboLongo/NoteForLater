@@ -19,6 +19,8 @@
 		2C80DBC957734506B79F9684 /* RecurringTaskReviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90FF46E7544F4142BA6ABA3C /* RecurringTaskReviewTests.swift */; };
 		C015AEC05C814224B6F0D1B7 /* NightlyReviewAutoSkipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC96AD75D7A2490F81BD3A53 /* NightlyReviewAutoSkipTests.swift */; };
 		97616388B0D04F1F820558EF /* InboxEngagementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74CEE89CD17D4C3CBEEC9EA8 /* InboxEngagementTests.swift */; };
+		21A6348626E74C2DBE208EFC /* ChooseDayPlanningTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D00339745CB41E8AB169300 /* ChooseDayPlanningTests.swift */; };
+		330C51A8F9EF478DA3022CEA /* HabitTodayViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A93FBB4BEAD84B04BB7A2523 /* HabitTodayViewTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -46,6 +48,8 @@
 		90FF46E7544F4142BA6ABA3C /* RecurringTaskReviewTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecurringTaskReviewTests.swift; sourceTree = "<group>"; };
 		CC96AD75D7A2490F81BD3A53 /* NightlyReviewAutoSkipTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NightlyReviewAutoSkipTests.swift; sourceTree = "<group>"; };
 		74CEE89CD17D4C3CBEEC9EA8 /* InboxEngagementTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = InboxEngagementTests.swift; sourceTree = "<group>"; };
+		8D00339745CB41E8AB169300 /* ChooseDayPlanningTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ChooseDayPlanningTests.swift; sourceTree = "<group>"; };
+		A93FBB4BEAD84B04BB7A2523 /* HabitTodayViewTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HabitTodayViewTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -110,6 +114,8 @@
 				90FF46E7544F4142BA6ABA3C /* RecurringTaskReviewTests.swift */,
 				CC96AD75D7A2490F81BD3A53 /* NightlyReviewAutoSkipTests.swift */,
 				74CEE89CD17D4C3CBEEC9EA8 /* InboxEngagementTests.swift */,
+				8D00339745CB41E8AB169300 /* ChooseDayPlanningTests.swift */,
+				A93FBB4BEAD84B04BB7A2523 /* HabitTodayViewTests.swift */,
 			);
 			path = NoteForLaterTests;
 			sourceTree = "<group>";
@@ -246,6 +252,8 @@
 				2C80DBC957734506B79F9684 /* RecurringTaskReviewTests.swift in Sources */,
 				C015AEC05C814224B6F0D1B7 /* NightlyReviewAutoSkipTests.swift in Sources */,
 				97616388B0D04F1F820558EF /* InboxEngagementTests.swift in Sources */,
+				21A6348626E74C2DBE208EFC /* ChooseDayPlanningTests.swift in Sources */,
+				330C51A8F9EF478DA3022CEA /* HabitTodayViewTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

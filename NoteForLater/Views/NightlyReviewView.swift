@@ -181,13 +181,8 @@ struct NightlyReviewView: View {
         return allMealSelections.filter { $0.isCompleted || $0.date <= cutoffDay }
     }
 
-    /// `planDate` is always either real-today or real-tomorrow — it's
-    /// `reviewDate` (never later than today) plus one day — so this never
-    /// needs the fuller "In N Days"/"N Days Ago" cases another relative-day
-    /// label in this app handles.
     private var planRelativeDayLabel: String {
-        if Calendar.current.isDateInToday(planDate) { return "Today" }
-        return "Tomorrow"
+        ChooseDayPlanning.planRelativeDayLabel(planDate: planDate, now: .now, calendar: Calendar.current)
     }
 
     var body: some View {
@@ -672,9 +667,10 @@ struct NightlyReviewView: View {
     // MARK: - Step 0: Choose Day
 
     /// Any incomplete task block or open habit occurrence dated strictly
-    /// before today — what decides whether Yesterday is even worth
-    /// offering as a choice (see `hasAppliedDefaultReviewDate`'s use of
-    /// this) and whether its button is enabled at all.
+    /// before today. No longer gates the "Today" button in `chooseDayStep`
+    /// — see `ChooseDayPlanning.isPlanTodayOptionDisabled`'s own doc
+    /// comment for why disabling it on this used to be backwards. Kept in
+    /// case something else still wants a plain "is there backlog" read.
     private var hasAnythingToReviewBeforeToday: Bool {
         let startOfToday = Calendar.current.startOfDay(for: .now)
         let hasBlocks = allBlocks.contains { !$0.isCompleted && $0.startTime < startOfToday }
@@ -686,24 +682,23 @@ struct NightlyReviewView: View {
         Form {
             Section {
                 Button {
-                    let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: .now) ?? .now
-                    reviewDate = Calendar.current.startOfDay(for: yesterday)
+                    reviewDate = ChooseDayPlanning.reviewDate(forPlanning: .today, now: .now, calendar: Calendar.current)
                 } label: {
                     HStack {
-                        Text("Yesterday")
-                            .foregroundStyle(hasAnythingToReviewBeforeToday ? .white : .secondary)
+                        Text("Today")
+                            .foregroundStyle(.white)
                         Spacer()
                         if Calendar.current.isDateInYesterday(reviewDate) {
                             Image(systemName: "checkmark").foregroundStyle(.tint)
                         }
                     }
                 }
-                .disabled(!hasAnythingToReviewBeforeToday)
+                .disabled(ChooseDayPlanning.isPlanTodayOptionDisabled(hasAnythingToReviewBeforeToday: hasAnythingToReviewBeforeToday))
                 Button {
-                    reviewDate = Calendar.current.startOfDay(for: .now)
+                    reviewDate = ChooseDayPlanning.reviewDate(forPlanning: .tomorrow, now: .now, calendar: Calendar.current)
                 } label: {
                     HStack {
-                        Text("Today")
+                        Text("Tomorrow")
                             .foregroundStyle(.white)
                         Spacer()
                         if Calendar.current.isDateInToday(reviewDate) {
@@ -712,25 +707,21 @@ struct NightlyReviewView: View {
                     }
                 }
             } header: {
-                Text("Which day are you reviewing?")
-            } footer: {
-                if !hasAnythingToReviewBeforeToday {
-                    Text("Nothing left to review from before today.")
-                }
+                Text("Which day are you planning?")
             }
 
             Section {
                 DatePicker(
-                    "Other day",
+                    "Plan a different day",
                     selection: Binding(
-                        get: { reviewDate },
-                        set: { reviewDate = Calendar.current.startOfDay(for: $0) }
+                        get: { planDate },
+                        set: { reviewDate = Calendar.current.startOfDay(for: Calendar.current.date(byAdding: .day, value: -1, to: $0) ?? $0) }
                     ),
-                    in: ...Date(),
+                    in: ...(Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: .now)) ?? Date()),
                     displayedComponents: .date
                 )
             } footer: {
-                Text("Doing this in the morning for a day that already ended? Pick that day here — \"Plan Tomorrow\" will still mean the day right after it.")
+                Text("Catching up on an earlier day? Pick the day you're planning here — it closes out the day right before it, same as Today and Tomorrow above.")
             }
         }
         .onChange(of: reviewDate) { _, _ in
@@ -739,13 +730,12 @@ struct NightlyReviewView: View {
         }
         .onAppear {
             // Only ever applied once — after this, whatever the user
-            // picked (including manually re-selecting Today) sticks, even
-            // if they navigate back to this step later.
+            // picked (including manually re-selecting Tomorrow) sticks,
+            // even if they navigate back to this step later.
             guard !hasAppliedDefaultReviewDate else { return }
             hasAppliedDefaultReviewDate = true
-            guard hasAnythingToReviewBeforeToday else { return }
-            let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: .now) ?? .now
-            reviewDate = Calendar.current.startOfDay(for: yesterday)
+            let choice = ChooseDayPlanning.defaultPlanningChoice(now: .now, calendar: Calendar.current)
+            reviewDate = ChooseDayPlanning.reviewDate(forPlanning: choice, now: .now, calendar: Calendar.current)
         }
     }
 
@@ -1106,7 +1096,7 @@ struct NightlyReviewView: View {
                         twoMinuteTaskRow(task)
                     }
                 } footer: {
-                    Text("Knock these out right now and check them off. Anything still unchecked goes to the very top of tomorrow's schedule — ahead of everything else, habits included.")
+                    Text("Knock these out right now and check them off. Anything still unchecked goes to the very top of \(planRelativeDayLabel.lowercased())'s schedule — ahead of everything else, habits included.")
                 }
             }
         }
@@ -1209,7 +1199,7 @@ struct NightlyReviewView: View {
                 } header: {
                     Text("Pick a Meal")
                 } footer: {
-                    Text("Ranked by fewest missing ingredients, same as the Kitchen's own Meals tab. Placed on tomorrow's calendar at 5pm, locked.")
+                    Text("Ranked by fewest missing ingredients, same as the Kitchen's own Meals tab. Placed on \(planRelativeDayLabel.lowercased())'s calendar at 5pm, locked.")
                 }
                 Section {
                     ForEach(kitchenPantryItems) { task in

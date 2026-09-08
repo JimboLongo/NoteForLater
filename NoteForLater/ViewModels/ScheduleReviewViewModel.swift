@@ -564,7 +564,7 @@ final class ScheduleReviewViewModel {
             else { continue }
 
             let trimmable = dayBlocks.filter {
-                $0.task != nil && !$0.isLocked && !$0.isCompleted && $0.approvalStatus != .approved
+                $0.task != nil && !$0.isLocked && !$0.isCompleted && !$0.manuallyPlaced && $0.approvalStatus != .approved
                     && $0.startTime >= windowStart && $0.startTime < windowEnd
             }
             guard !trimmable.isEmpty else { continue }
@@ -712,9 +712,13 @@ final class ScheduleReviewViewModel {
 
         // A locked block is left alone entirely — same protection an
         // already-*approved* block gets, just for a reason the user chose
-        // rather than the calendar push having already happened.
+        // rather than the calendar push having already happened. A
+        // manually placed block (see `ScheduledBlock.manuallyPlaced`)
+        // gets the identical treatment — the empty-slot picker is itself
+        // a deliberate user choice, same as locking, even when it lands
+        // on a slot the task isn't rule-eligible for.
         var survivingBlocks = allBlocks
-        for block in allBlocks where block.approvalStatus != .approved && !block.isLocked && !block.isCompleted && block.startTime >= cutoff {
+        for block in allBlocks where block.approvalStatus != .approved && !block.isLocked && !block.isCompleted && !block.manuallyPlaced && block.startTime >= cutoff {
             block.task?.isScheduled = false
             removeBlock(block)
             survivingBlocks.removeAll { $0.id == block.id }
@@ -784,12 +788,13 @@ final class ScheduleReviewViewModel {
                 }
                 // An approved surviving block is already reflected in the
                 // calendar's own free/busy above (it's really been
-                // pushed), but a locked-while-still-proposed or
-                // completed-while-still-proposed one hasn't — carve its
-                // time back out manually so regeneration doesn't schedule
-                // something new right on top of it.
+                // pushed), but a locked-while-still-proposed,
+                // completed-while-still-proposed, or manually-placed one
+                // hasn't — carve its time back out manually so
+                // regeneration doesn't schedule something new right on
+                // top of it.
                 let protectedSurviving = survivingBlocks.filter {
-                    ($0.isLocked || $0.isCompleted) && $0.approvalStatus != .approved && calendar.isDate($0.date, inSameDayAs: cursorDay)
+                    ($0.isLocked || $0.isCompleted || $0.manuallyPlaced) && $0.approvalStatus != .approved && calendar.isDate($0.date, inSameDayAs: cursorDay)
                 }
                 for protected in protectedSurviving {
                     freeSlots = subtracting(protected.startTime..<protected.endTime, from: freeSlots)
@@ -1542,7 +1547,46 @@ final class ScheduleReviewViewModel {
         case freeSlot(startTime: Date, includingInbox: Bool)
     }
 
-    /// The single filter behind every "what can go here" picker. The
+    /// One task, evaluated against a `CandidateSlotContext` — `isEligible
+    /// == false` only ever happens for `.freeSlot` (see
+    /// `evaluateCandidates`'s own doc comment for why `.occupiedBlock`
+    /// never produces one), and only for one of the three *soft*
+    /// exclusions: no enabled scheduling rules on the shelf, the task's
+    /// own `startDate` not reached yet, or no rule covering this slot's
+    /// weekday/window that the task is actually eligible for.
+    /// `ineligibleReason` names which, for `EmptySlotPickerSheet`'s
+    /// caption — `nil` exactly when `isEligible` is `true`.
+    struct CandidateEvaluation {
+        let task: TaskItem
+        let isEligible: Bool
+        let ineligibleReason: String?
+    }
+
+    /// "MMM d" — same short-date pattern `TaskItem.recurrenceSummary`/
+    /// `ShelfListView.TaskRow.pantryAgeText` already use, kept consistent
+    /// for the "Starts Sep 12" ineligibility caption.
+    private static let startDateReasonFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter
+    }()
+
+    /// "Outside Work – Afternoons" (names whichever of the task's own
+    /// eligible rules exist, joined, since none of them cover this slot)
+    /// or "Not eligible for any schedule" (the task isn't opted into
+    /// anything on this shelf at all) — `EmptySlotPickerSheet`'s caption
+    /// when the only failure is rule coverage. Same rule-name fallback
+    /// (`displayName` unless empty, then `summary`) `ShelfListView
+    /// .TaskRow.eligibleScheduleNames` already uses.
+    private static func coverageReason(task: TaskItem, shelf: Shelf) -> String {
+        let eligibleRuleNames = (shelf.schedulingRules ?? [])
+            .filter { task.isEffectivelyEligible(for: $0) }
+            .map { $0.displayName.isEmpty ? $0.summary : $0.displayName }
+        guard !eligibleRuleNames.isEmpty else { return "Not eligible for any schedule" }
+        return "Outside \(eligibleRuleNames.joined(separator: ", "))"
+    }
+
+    /// The single evaluation behind every "what can go here" picker. The
     /// Replace/Swap sheet, the empty-slot sheet, and Auto-Replace's own
     /// candidate pool used to each carry a separate, drifting copy of
     /// roughly this same predicate — one of them (the plain
@@ -1551,31 +1595,54 @@ final class ScheduleReviewViewModel {
     /// picker) had quietly ended up narrower than the other two Replace
     /// call sites. See `CandidateSlotContext` for what actually varies by
     /// caller.
-    func replacementCandidates(from allTasks: [TaskItem], for context: CandidateSlotContext) -> [TaskItem] {
+    ///
+    /// Every exclusion below is hard (the task is skipped outright, never
+    /// appearing in the result) for `.occupiedBlock` — Replace/Swap and
+    /// Auto-Replace have no UI for "included but grayed out" and don't
+    /// want one. For `.freeSlot`, three specifically-marked checks are
+    /// *soft* instead: the task still appears, `isEligible: false`, with
+    /// a reason — placing something on the calendar by hand is a
+    /// deliberate override of its own eligible-schedule constraint, per
+    /// the empty-slot picker's own design. `replacementCandidates` below
+    /// is just this, filtered to `isEligible` — the historical,
+    /// eligible-only shape every other caller still wants, so there's
+    /// exactly one evaluation, not a second copy that could drift from
+    /// this one the way the pre-§8 versions did.
+    func evaluateCandidates(from allTasks: [TaskItem], for context: CandidateSlotContext) -> [CandidateEvaluation] {
         let calendar = Calendar.current
         let startTime: Date
         let excludingTaskID: UUID?
         let blockDuration: Int?
+        let allowsSoftIneligibility: Bool
         switch context {
         case .occupiedBlock(let block):
             startTime = block.startTime
             excludingTaskID = block.task?.id
             blockDuration = block.durationMinutes
+            allowsSoftIneligibility = false
         case .freeSlot(let slotStart, _):
             startTime = slotStart
             excludingTaskID = nil
             blockDuration = nil
+            allowsSoftIneligibility = true
         }
         let weekday = calendar.component(.weekday, from: startTime)
 
-        return allTasks.filter { task in
-            guard task.id != excludingTaskID, !task.isCompleted else { return false }
+        var results: [CandidateEvaluation] = []
+        for task in allTasks {
+            // Hard, both contexts: already spoken for, completed, or a
+            // Kitchen/Pantry task — never schedulable at all, regardless
+            // of what its shelf's rules say (a kitchen shelf normally has
+            // none, which is what excluded these before the "no enabled
+            // rules" check below became soft; this keeps them out
+            // explicitly instead of relying on that side effect).
+            guard task.id != excludingTaskID, !task.isCompleted, !(task.shelf?.isKitchen ?? false) else { continue }
 
             switch context {
             case .occupiedBlock:
                 if task.isScheduled {
                     let activeBlocks = (task.scheduledBlocks ?? []).filter { !$0.isCompleted }
-                    guard activeBlocks.count <= 1, !(activeBlocks.first?.isLocked ?? false) else { return false }
+                    guard activeBlocks.count <= 1, !(activeBlocks.first?.isLocked ?? false) else { continue }
                 }
             case .freeSlot(_, let includingInbox):
                 // A scheduled task may still qualify — picking it *moves*
@@ -1584,29 +1651,67 @@ final class ScheduleReviewViewModel {
                 // same "one movable block" gate `.occupiedBlock` already
                 // uses just above: a divisible task spread across several
                 // blocks, or one with a locked block, stays excluded
-                // rather than guessing which piece should move.
+                // (hard — there's no single piece to gray out and let
+                // through) rather than guessing which piece should move.
                 if task.isScheduled {
                     let activeBlocks = (task.scheduledBlocks ?? []).filter { !$0.isCompleted }
-                    guard activeBlocks.count <= 1, !(activeBlocks.first?.isLocked ?? false) else { return false }
+                    guard activeBlocks.count <= 1, !(activeBlocks.first?.isLocked ?? false) else { continue }
                 }
-                if task.shelf == nil, !includingInbox { return false }
+                if task.shelf == nil, !includingInbox { continue }
             }
 
-            guard let shelf = task.shelf else { return true } // unsorted Inbox task — nothing further to check
-            guard shelf.hasEnabledSchedulingRules, task.isEligibleToStart(on: startTime, calendar: calendar) else { return false }
+            guard let shelf = task.shelf else {
+                results.append(CandidateEvaluation(task: task, isEligible: true, ineligibleReason: nil)) // unsorted Inbox task — nothing further to check
+                continue
+            }
 
+            // Soft (freeSlot only): no enabled rules on this shelf at all.
+            guard shelf.hasEnabledSchedulingRules else {
+                if allowsSoftIneligibility {
+                    results.append(CandidateEvaluation(task: task, isEligible: false, ineligibleReason: "No scheduling rules"))
+                }
+                continue
+            }
+            // Soft (freeSlot only): this task's own start date hasn't
+            // arrived yet.
+            guard task.isEligibleToStart(on: startTime, calendar: calendar) else {
+                if allowsSoftIneligibility {
+                    let reason = task.startDate.map { "Starts \(Self.startDateReasonFormatter.string(from: $0))" } ?? "Not eligible to start yet"
+                    results.append(CandidateEvaluation(task: task, isEligible: false, ineligibleReason: reason))
+                }
+                continue
+            }
+
+            // Soft (freeSlot only): no rule covering this slot's
+            // weekday/window that the task is actually eligible for.
             let coveringRules = (shelf.schedulingRules ?? []).filter { rule in
                 rule.isEnabled && rule.effectiveDaysOfWeek.contains(weekday) && Self.ruleWindow(rule, contains: startTime, calendar: calendar)
             }
-            guard coveringRules.contains(where: { task.isEffectivelyEligible(for: $0) }) else { return false }
+            guard coveringRules.contains(where: { task.isEffectivelyEligible(for: $0) }) else {
+                if allowsSoftIneligibility {
+                    results.append(CandidateEvaluation(task: task, isEligible: false, ineligibleReason: Self.coverageReason(task: task, shelf: shelf)))
+                }
+                continue
+            }
 
+            // Hard, both contexts: a fixed slot size (occupiedBlock only
+            // — freeSlot's blockDuration is always nil, so this never
+            // trips there) the task's own duration can't fit into.
             if let blockDuration {
                 let fitsWhole = task.estimatedMinutes > 0 && task.estimatedMinutes <= blockDuration
                 let fitsDivisible = task.isDivisible && task.minimumSegmentMinutes > 0 && task.minimumSegmentMinutes <= blockDuration
-                guard fitsWhole || fitsDivisible else { return false }
+                guard fitsWhole || fitsDivisible else { continue }
             }
-            return true
+            results.append(CandidateEvaluation(task: task, isEligible: true, ineligibleReason: nil))
         }
+        return results
+    }
+
+    /// The historical, eligible-only shape — every caller except the
+    /// empty-slot picker still wants exactly this. See
+    /// `evaluateCandidates`'s own doc comment.
+    func replacementCandidates(from allTasks: [TaskItem], for context: CandidateSlotContext) -> [TaskItem] {
+        evaluateCandidates(from: allTasks, for: context).filter(\.isEligible).map(\.task)
     }
 
     private static func ruleWindow(_ rule: SchedulingRule, contains instant: Date, calendar: Calendar) -> Bool {
@@ -2299,6 +2404,7 @@ final class ScheduleReviewViewModel {
         block.date = targetDate
         block.startTime = startTime
         block.endTime = startTime.addingTimeInterval(duration)
+        block.manuallyPlaced = true
         needsReapproval(block)
         insertWithRipple(block)
     }
@@ -2312,6 +2418,7 @@ final class ScheduleReviewViewModel {
         let minutes = isEstimated ? 30 : task.estimatedMinutes
         let endTime = startTime.addingTimeInterval(TimeInterval(minutes * 60))
         let block = ScheduledBlock(date: targetDate, startTime: startTime, endTime: endTime, task: task, isEstimatedDuration: isEstimated)
+        block.manuallyPlaced = true
         modelContext.insert(block)
         task.isScheduled = true
         blocks.append(block)

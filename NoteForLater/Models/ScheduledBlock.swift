@@ -28,6 +28,28 @@ final class ScheduledBlock {
     /// the duration on the timeline so it reads as an estimate, not a
     /// commitment the user actually made.
     var isEstimatedDuration: Bool = false
+    /// Set by `ScheduleReviewViewModel.insertBlock`/`moveExistingBlock` —
+    /// the empty-slot picker's own placement paths — never by the
+    /// scheduler. Exists specifically so a task placed by hand into a
+    /// slot it isn't rule-eligible for ("an intentional override of its
+    /// eligible-schedule constraint" — see the empty-slot picker's own
+    /// design doc) actually survives: without it, the very next
+    /// `autoPlaceEligibleTasks` pass (which runs on essentially every
+    /// Calendar appear) sweeps an unlocked/unapproved/incomplete block
+    /// whose task isn't eligible for whichever rule covers its slot,
+    /// exactly what a deliberately-ineligible manual placement looks
+    /// like. Every such sweep must check this flag — see
+    /// `ScheduleReviewViewModel.trimOverflowingRuleBlocks`,
+    /// `.clearIncompletePastBlocks`, and the locked/completed carry-over
+    /// check inside `performAutoPlaceEligibleTasks`'s own day walk for
+    /// the three that currently do. Deliberately not reused for an
+    /// eligible manual placement's own protection — one was never at risk
+    /// from these sweeps in the first place, so this only ever matters
+    /// for the ineligible case, but is set unconditionally by both
+    /// placement paths rather than threading an extra "was this
+    /// eligible" bit through them just to skip setting it in the case
+    /// where it wouldn't have mattered anyway.
+    var manuallyPlaced: Bool = false
 
     var task: TaskItem?
     /// The habit this block was generated for, if it came from the Habit

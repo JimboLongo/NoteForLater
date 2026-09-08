@@ -1392,7 +1392,7 @@ private struct DayTimelineSegment: View {
             if let emptySlotTime {
                 EmptySlotPickerSheet(
                     time: emptySlotTime,
-                    candidates: viewModel.replacementCandidates(from: allTasks, for: .freeSlot(startTime: emptySlotTime, includingInbox: true)),
+                    candidates: viewModel.evaluateCandidates(from: allTasks, for: .freeSlot(startTime: emptySlotTime, includingInbox: true)),
                     onPick: { task in
                         if task.isScheduled {
                             viewModel.moveExistingBlock(for: task, to: emptySlotTime)
@@ -2438,7 +2438,7 @@ private struct EventEditSheet: View {
 /// first within each) with Inbox last.
 private struct EmptySlotPickerSheet: View {
     let time: Date
-    let candidates: [TaskItem]
+    let candidates: [ScheduleReviewViewModel.CandidateEvaluation]
     let onPick: (TaskItem) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -2450,29 +2450,32 @@ private struct EmptySlotPickerSheet: View {
     private struct ShelfGroup: Identifiable {
         let id: String
         let title: String
-        let tasks: [TaskItem]
+        let evaluations: [ScheduleReviewViewModel.CandidateEvaluation]
         let color: Color
     }
 
     /// One group per shelf (sorted by the shelf's own `sortOrder`; within
-    /// it, unscheduled tasks first — the common case, and the one that
-    /// doesn't need a second glance to understand — then already-
-    /// scheduled ones (see `currentTimeLabel`), each bucket due-date-first
-    /// then no-due-date), with a final "Inbox" group for tasks that
-    /// aren't on any shelf. Deliberately just a sort within the existing
-    /// per-shelf sections rather than a whole second grouping axis
-    /// crossed with shelf — scheduled candidates are visually set apart
-    /// by their time label alone (`taskRow`), not a separate section, so
-    /// the shelf color-coding this list already relies on doesn't have to
-    /// compete with a second hierarchy for the same real estate. Each
-    /// group carries its shelf's color, same as the blocks on the grid
-    /// itself use to tint their background — Inbox gets a neutral gray
-    /// since it has none.
+    /// it, eligible candidates first — grayed-out ineligible ones are
+    /// still schedulable (an intentional override), but shouldn't crowd
+    /// out the normal case at the top of the list — then, within each of
+    /// those two buckets, unscheduled tasks before already-scheduled ones
+    /// (see `currentTimeLabel`), each due-date-first then no-due-date),
+    /// with a final "Inbox" group for tasks that aren't on any shelf.
+    /// Deliberately just a sort within the existing per-shelf sections
+    /// rather than a whole second grouping axis crossed with shelf —
+    /// ineligible candidates are visually set apart by graying + a reason
+    /// caption alone (`taskRow`), not a separate section, so the shelf
+    /// color-coding this list already relies on doesn't have to compete
+    /// with a second hierarchy for the same real estate. Each group
+    /// carries its shelf's color, same as the blocks on the grid itself
+    /// use to tint their background — Inbox gets a neutral gray since it
+    /// has none.
     private var groups: [ShelfGroup] {
-        let byShelf = Dictionary(grouping: candidates) { $0.shelf?.id }
-        func ordered(_ lhs: TaskItem, _ rhs: TaskItem) -> Bool {
-            if lhs.isScheduled != rhs.isScheduled { return !lhs.isScheduled }
-            switch (lhs.dueDate, rhs.dueDate) {
+        let byShelf = Dictionary(grouping: candidates) { $0.task.shelf?.id }
+        func ordered(_ lhs: ScheduleReviewViewModel.CandidateEvaluation, _ rhs: ScheduleReviewViewModel.CandidateEvaluation) -> Bool {
+            if lhs.isEligible != rhs.isEligible { return lhs.isEligible }
+            if lhs.task.isScheduled != rhs.task.isScheduled { return !lhs.task.isScheduled }
+            switch (lhs.task.dueDate, rhs.task.dueDate) {
             case let (l?, r?): return l < r
             case (_?, nil): return true
             case (nil, _?): return false
@@ -2480,13 +2483,13 @@ private struct EmptySlotPickerSheet: View {
             }
         }
         let shelfGroups = byShelf.values
-            .compactMap { tasks -> ShelfGroup? in
-                guard let shelf = tasks.first?.shelf else { return nil }
-                return ShelfGroup(id: shelf.id.uuidString, title: shelf.name, tasks: tasks.sorted(by: ordered), color: shelf.color)
+            .compactMap { evaluations -> ShelfGroup? in
+                guard let shelf = evaluations.first?.task.shelf else { return nil }
+                return ShelfGroup(id: shelf.id.uuidString, title: shelf.name, evaluations: evaluations.sorted(by: ordered), color: shelf.color)
             }
-            .sorted { ($0.tasks.first?.shelf?.sortOrder ?? 0) < ($1.tasks.first?.shelf?.sortOrder ?? 0) }
-        let inboxTasks = (byShelf[nil] ?? []).sorted(by: ordered)
-        return inboxTasks.isEmpty ? shelfGroups : shelfGroups + [ShelfGroup(id: "inbox", title: "Inbox", tasks: inboxTasks, color: .secondary)]
+            .sorted { ($0.evaluations.first?.task.shelf?.sortOrder ?? 0) < ($1.evaluations.first?.task.shelf?.sortOrder ?? 0) }
+        let inboxEvaluations = (byShelf[nil] ?? []).sorted(by: ordered)
+        return inboxEvaluations.isEmpty ? shelfGroups : shelfGroups + [ShelfGroup(id: "inbox", title: "Inbox", evaluations: inboxEvaluations, color: .secondary)]
     }
 
     private var timeText: String {
@@ -2520,14 +2523,15 @@ private struct EmptySlotPickerSheet: View {
                     List {
                         ForEach(groups) { group in
                             Section {
-                                ForEach(group.tasks) { task in
+                                ForEach(group.evaluations, id: \.task.id) { evaluation in
+                                    let task = evaluation.task
                                     Button {
                                         onPick(task)
                                     } label: {
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(task.title)
                                                 .font(.body.weight(.medium))
-                                                .foregroundStyle(.primary)
+                                                .foregroundStyle(evaluation.isEligible ? .primary : .secondary)
                                             Text("\(task.durationLabel) \u{00B7} \(task.priority.label)")
                                                 .font(.caption)
                                                 .foregroundStyle(.secondary)
@@ -2536,12 +2540,22 @@ private struct EmptySlotPickerSheet: View {
                                                     .font(.caption.weight(.medium))
                                                     .foregroundStyle(.orange)
                                             }
+                                            // Placing this by hand overrides the
+                                            // constraint the reason names — it
+                                            // stays fully tappable, just marked.
+                                            if let ineligibleReason = evaluation.ineligibleReason {
+                                                Text(ineligibleReason)
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                                    .italic()
+                                            }
                                         }
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                         .padding(.vertical, 2)
                                         .contentShape(Rectangle())
                                     }
                                     .buttonStyle(.plain)
+                                    .opacity(evaluation.isEligible ? 1 : 0.55)
                                     .listRowBackground(
                                         RoundedRectangle(cornerRadius: 10)
                                             .fill(group.color.opacity(0.15))

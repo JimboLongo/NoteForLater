@@ -75,138 +75,115 @@ struct HabitsView: View {
     }
 }
 
-/// Page 1: every habit, with one tappable circle per occurrence for today
-/// — a habit only counts as complete once every circle is filled — plus a
-/// menu for the day-level Excused/Missed overrides. Ordered like a queue of
-/// what's coming up next: each habit's nearest still-unresolved reminder,
-/// today first (skipping reminders already resolved for the day) then
-/// rolling forward to its next applicable day. That order (`displayedHabits`)
-/// is debounced via `HabitStatsRefreshCoordinator` — it only re-shuffles 3
-/// seconds after the last habit-log edit anywhere in the app (this screen,
-/// the Calendar tab, or a habit's own detail calendar), so the list doesn't
-/// jump around mid-interaction — while the circles themselves still update
-/// immediately, straight off the live `todayLogs` query. Dragging to
-/// manually reorder wouldn't survive an algorithmic order, so it's not
-/// offered here.
+/// Page 1: every habit, with one tappable circle per occurrence for the
+/// currently selected day (defaults to today; navigate with the chevrons)
+/// — a habit only counts as complete once every circle is filled. Tapping
+/// a circle cycles that occurrence through all four states: none →
+/// complete → missed → excused → none (`OccurrenceStatus.next`) — the
+/// Habits tab used to only offer complete/unselected here, leaving
+/// missed/excused reachable solely from a habit's own detail calendar;
+/// now every state is reachable from either place, through the same
+/// `logOrCreate` write funnel.
+///
+/// Ordered by each habit's own fixed `Habit.todayOrderKey` (frequency,
+/// then occurrence-0 time of day, then a stable tiebreak) — deliberately
+/// static, unlike the old "what's coming up next" queue this replaced:
+/// nothing about a habit's *configuration* changes when a circle gets
+/// tapped, so the order never needs to debounce against that the way the
+/// old `displayedHabits` snapshot did. `cachedStats`/`cachedRolling`
+/// still debounce via `HabitStatsRefreshCoordinator` — recomputing every
+/// habit's full history walk on every tap is the actual expensive part,
+/// unrelated to ordering.
+///
+/// The day-specific list (`HabitsTodayDayList`, below) is a child view
+/// re-created via `.id(selectedDate)` whenever the selected day changes —
+/// see that type's own doc comment for why (`@Query` predicates can't be
+/// mutated after `init`).
 struct HabitsTodayView: View {
     let habits: [Habit]
     @Environment(\.modelContext) private var modelContext
     private let calendar = Calendar.current
 
-    /// Queried directly (rather than read off `habit.logs`) so a
-    /// completion made elsewhere — most notably tapping a block's complete
-    /// circle on the Schedule tab — shows up on this screen the instant it
-    /// happens. SwiftData's `@Query` reliably observes changes to the
-    /// fetched type itself; it does not reliably re-fire just because a
-    /// *related* model (a `HabitLog` reached only via `Habit.logs`)
-    /// changed, which is what made the checkmark here lag behind a
-    /// same-day edit made on another screen.
-    @Query private var todayLogs: [HabitLog]
-
+    @State private var selectedDate = Calendar.current.startOfDay(for: .now)
     /// Each habit's streak/max-streak, cached instead of recomputed (a full
     /// history walk) on every render — refreshed on appear, and again by
-    /// `refreshCoordinator`'s idle tick (see `displayedHabits`).
+    /// `refreshCoordinator`'s idle tick. Owned here, not by the per-day
+    /// child, and passed straight through to it: these are relative to
+    /// real "now" (a streak as of right now), not to whichever day
+    /// happens to be selected, so navigating days must not recompute them.
     @State private var cachedStats: [UUID: HabitStats] = [:]
     /// Same caching as `cachedStats`, for the Rolling 30 figure shown
     /// alongside streak on each habit's title card.
     @State private var cachedRolling: [UUID: HabitRollingStats] = [:]
-    /// What's actually rendered — a frozen snapshot of `liveSortedHabits`,
-    /// only re-taken on appear or once `refreshCoordinator.idleRefreshTick`
-    /// bumps (3 seconds after the last habit-log edit anywhere in the
-    /// app), so checking a circle off doesn't immediately jump that row
-    /// somewhere else in the list mid-tap. The circles themselves still
-    /// read live status straight off `todayLogsByHabit`, independent of
-    /// this — only the row *order* (and `cachedStats`/`cachedRolling`,
-    /// above) waits for the debounce.
-    @State private var displayedHabits: [Habit] = []
     @State private var refreshCoordinator = HabitStatsRefreshCoordinator.shared
 
-    init(habits: [Habit]) {
-        self.habits = habits
-        let today = Calendar.current.startOfDay(for: .now)
-        _todayLogs = Query(filter: #Predicate<HabitLog> { $0.date == today })
+    /// A future day can be viewed (so you can see what's coming, or what
+    /// a habit's schedule looks like ahead) but not edited — there's
+    /// nothing to mark complete/missed/excused about a day that hasn't
+    /// happened yet.
+    private var canEditSelectedDate: Bool {
+        selectedDate <= calendar.startOfDay(for: .now)
     }
 
-    private var liveSortedHabits: [Habit] {
-        habits.sorted { lhs, rhs in
-            let l = lhs.nextTargetDate(calendar: calendar)
-            let r = rhs.nextTargetDate(calendar: calendar)
-            switch (l, r) {
-            case let (l?, r?): return l < r
-            case (nil, _): return false
-            case (_, nil): return true
-            }
-        }
+    private var sortedHabits: [Habit] {
+        habits.sorted { $0.todayOrderKey < $1.todayOrderKey }
     }
 
     var body: some View {
-        // Built once per render and handed down to every row's circles,
-        // instead of each circle independently re-scanning that habit's
-        // entire log history to find today's entry.
-        let todayLogsByHabit = todayLogsByHabit()
-        List {
-            if habits.isEmpty {
-                Text("No habits yet. Tap + to add one.")
-                    .foregroundStyle(.secondary)
-            }
-            ForEach(displayedHabits) { habit in
-                HStack {
-                    NavigationLink {
-                        HabitDetailView(habit: habit)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(habit.name)
-                                .fixedSize(horizontal: false, vertical: true)
-                            streakLine(for: habit)
-                                .font(.caption2)
-                                .lineLimit(1)
-                            rollingLine(for: habit)
-                                .font(.caption2)
-                                .lineLimit(1)
-                        }
-                    }
-                    .frame(maxWidth: 198, alignment: .leading)
-                    Spacer(minLength: 8)
-                    if habit.isApplicable(on: .now, calendar: calendar) {
-                        todayControls(for: habit, todayLog: todayLogsByHabit[habit.id])
-                    } else {
-                        Text("Not today")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .onDelete(perform: deleteHabits)
+        VStack(spacing: 0) {
+            dateNavigationHeader
+            HabitsTodayDayList(
+                habits: sortedHabits,
+                selectedDate: selectedDate,
+                canEdit: canEditSelectedDate,
+                cachedStats: cachedStats,
+                cachedRolling: cachedRolling
+            )
+            .id(selectedDate)
         }
-        .onAppear {
-            refreshStats()
-            displayedHabits = liveSortedHabits
-        }
+        .onAppear { refreshStats() }
         // A habit added/deleted/reordered elsewhere should reflect right
         // away — the idle debounce below is specifically about not
-        // letting a same-day *completion* toggle jump the list around
-        // mid-tap, not about hiding a structural change like this.
-        .onChange(of: habits) { _, _ in
-            refreshStats()
-            displayedHabits = liveSortedHabits
-        }
-        .onChange(of: refreshCoordinator.idleRefreshTick) { _, _ in
-            refreshStats()
-            displayedHabits = liveSortedHabits
-        }
+        // paying for a full history recompute on every single tap, not
+        // about hiding a structural change like this.
+        .onChange(of: habits) { _, _ in refreshStats() }
+        .onChange(of: refreshCoordinator.idleRefreshTick) { _, _ in refreshStats() }
     }
 
-    /// Today's log for every habit, keyed off the directly-queried
-    /// `todayLogs` (see its declaration) rather than each habit's `logs`
-    /// relationship, so this stays live with edits made elsewhere.
-    private func todayLogsByHabit() -> [UUID: HabitLog] {
-        var result: [UUID: HabitLog] = [:]
-        for log in todayLogs {
-            if let habitID = log.habit?.id {
-                result[habitID] = log
+    private var dateNavigationHeader: some View {
+        HStack {
+            Button {
+                selectedDate = calendar.date(byAdding: .day, value: -1, to: selectedDate) ?? selectedDate
+            } label: {
+                Image(systemName: "chevron.left")
+                    .frame(width: 44, height: 32)
+            }
+            Spacer()
+            Text(dateHeaderLabel)
+                .font(.headline)
+            Spacer()
+            Button {
+                selectedDate = calendar.date(byAdding: .day, value: 1, to: selectedDate) ?? selectedDate
+            } label: {
+                Image(systemName: "chevron.right")
+                    .frame(width: 44, height: 32)
             }
         }
-        return result
+        .padding(.horizontal, 8)
+        .padding(.top, 4)
+    }
+
+    private static let dateHeaderFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE, MMM d"
+        return formatter
+    }()
+
+    private var dateHeaderLabel: String {
+        if calendar.isDateInToday(selectedDate) { return "Today" }
+        if calendar.isDateInYesterday(selectedDate) { return "Yesterday" }
+        if calendar.isDateInTomorrow(selectedDate) { return "Tomorrow" }
+        return Self.dateHeaderFormatter.string(from: selectedDate)
     }
 
     private func refreshStats() {
@@ -234,6 +211,107 @@ struct HabitsTodayView: View {
             calendar: calendar
         )
     }
+}
+
+/// The actual per-day row list. A child view rather than part of
+/// `HabitsTodayView` itself specifically so `.id(selectedDate)` on the
+/// parent can force a fresh `init` — and therefore a freshly-baked
+/// `@Query` predicate — every time the selected day changes: SwiftData
+/// `@Query` predicates are fixed at `init` and can't be mutated
+/// afterward, so a plain `@State selectedDate` on its own can't drive
+/// which day's logs get fetched. Tearing down and rebuilding this whole
+/// list on every day change costs a fresh fetch and resets scroll
+/// position — an accepted tradeoff for keeping `@Query`'s live
+/// cross-screen observation (a completion made on the Calendar tab or a
+/// habit's own detail calendar still shows up here the instant it
+/// happens, same as the original single-day `todayLogs` query did — a
+/// manual `context.fetch` driven by `.task(id:)` would only pick that up
+/// once `HabitStatsRefreshCoordinator`'s 3-second idle tick fired,
+/// regressing exactly the cross-screen immediacy the original query
+/// existed for).
+private struct HabitsTodayDayList: View {
+    let habits: [Habit]
+    let selectedDate: Date
+    let canEdit: Bool
+    let cachedStats: [UUID: HabitStats]
+    let cachedRolling: [UUID: HabitRollingStats]
+
+    @Environment(\.modelContext) private var modelContext
+    private let calendar = Calendar.current
+
+    /// Queried directly (rather than read off `habit.logs`) so a
+    /// completion made elsewhere — most notably tapping a block's complete
+    /// circle on the Schedule tab — shows up on this screen the instant it
+    /// happens. SwiftData's `@Query` reliably observes changes to the
+    /// fetched type itself; it does not reliably re-fire just because a
+    /// *related* model (a `HabitLog` reached only via `Habit.logs`)
+    /// changed, which is what made the checkmark here lag behind a
+    /// same-day edit made on another screen.
+    @Query private var selectedDateLogs: [HabitLog]
+
+    init(habits: [Habit], selectedDate: Date, canEdit: Bool, cachedStats: [UUID: HabitStats], cachedRolling: [UUID: HabitRollingStats]) {
+        self.habits = habits
+        self.selectedDate = selectedDate
+        self.canEdit = canEdit
+        self.cachedStats = cachedStats
+        self.cachedRolling = cachedRolling
+        let day = selectedDate
+        _selectedDateLogs = Query(filter: #Predicate<HabitLog> { $0.date == day })
+    }
+
+    var body: some View {
+        // Built once per render and handed down to every row's circles,
+        // instead of each circle independently re-scanning that habit's
+        // entire log history to find this day's entry.
+        let logsByHabit = logsByHabit()
+        List {
+            if habits.isEmpty {
+                Text("No habits yet. Tap + to add one.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(habits) { habit in
+                HStack {
+                    NavigationLink {
+                        HabitDetailView(habit: habit)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(habit.name)
+                                .fixedSize(horizontal: false, vertical: true)
+                            streakLine(for: habit)
+                                .font(.caption2)
+                                .lineLimit(1)
+                            rollingLine(for: habit)
+                                .font(.caption2)
+                                .lineLimit(1)
+                        }
+                    }
+                    .frame(maxWidth: 198, alignment: .leading)
+                    Spacer(minLength: 8)
+                    if habit.isApplicable(on: selectedDate, calendar: calendar) {
+                        dayControls(for: habit, log: logsByHabit[habit.id])
+                    } else {
+                        Text("Not this day")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .onDelete(perform: deleteHabits)
+        }
+    }
+
+    /// This day's log for every habit, keyed off the directly-queried
+    /// `selectedDateLogs` (see its declaration) rather than each habit's
+    /// `logs` relationship, so this stays live with edits made elsewhere.
+    private func logsByHabit() -> [UUID: HabitLog] {
+        var result: [UUID: HabitLog] = [:]
+        for log in selectedDateLogs {
+            if let habitID = log.habit?.id {
+                result[habitID] = log
+            }
+        }
+        return result
+    }
 
     private func streakLine(for habit: Habit) -> Text {
         let stats = cachedStats[habit.id] ?? HabitStats(currentStreak: 0, maxStreak: 0, mtdPercent: nil, ltdPercent: nil)
@@ -256,25 +334,27 @@ struct HabitsTodayView: View {
     }
 
     @ViewBuilder
-    private func todayControls(for habit: Habit, todayLog: HabitLog?) -> some View {
+    private func dayControls(for habit: Habit, log: HabitLog?) -> some View {
         HStack(spacing: 6) {
             ForEach(0..<habit.timesPerDay, id: \.self) { index in
-                occurrenceCircle(habit: habit, index: index, todayLog: todayLog)
+                occurrenceCircle(habit: habit, index: index, log: log)
             }
         }
     }
 
     /// A checkbox for this one occurrence (index 0 = BrushTeeth.1, index 1
-    /// = BrushTeeth.2, ...) — tapping toggles just that circle between
-    /// complete and unselected, exactly mirroring what the matching
-    /// scheduled block's own complete circle does from the Schedule tab
-    /// (see `toggleOccurrence`), so the two stay in sync no matter which
-    /// side you check it off from. Missed/excused overrides still only
-    /// live on the habit's own calendar (`HabitDetailView`).
-    private func occurrenceCircle(habit: Habit, index: Int, todayLog: HabitLog?) -> some View {
-        let status = todayLog?.occurrenceStatus(index) ?? .none
+    /// = BrushTeeth.2, ...) — tapping cycles it through all four states
+    /// (`OccurrenceStatus.next`: none → complete → missed → excused →
+    /// none), mirroring what a habit's own detail calendar already lets
+    /// you do per-day, just per-occurrence and reachable without leaving
+    /// this screen. The matching scheduled block's own complete circle
+    /// (Schedule tab) only ever shows complete-or-not, but stays in sync
+    /// either way — see `toggleOccurrence`. Disabled (and dimmed) for a
+    /// future day — see `canEdit`.
+    private func occurrenceCircle(habit: Habit, index: Int, log: HabitLog?) -> some View {
+        let status = log?.occurrenceStatus(index) ?? .none
         return Button {
-            toggleOccurrence(habit: habit, index: index, todayLog: todayLog)
+            toggleOccurrence(habit: habit, index: index)
         } label: {
             Circle()
                 .fill(fillColor(for: status))
@@ -284,30 +364,23 @@ struct HabitsTodayView: View {
                 }
         }
         .buttonStyle(.plain)
+        .disabled(!canEdit)
+        .opacity(canEdit ? 1 : 0.5)
     }
 
-    /// Toggles one occurrence between complete and unselected, keeping its
-    /// matching `ScheduledBlock.isCompleted` (if that occurrence made it
-    /// onto today's calendar) in sync — the same effect
-    /// `ScheduleReviewViewModel.toggleComplete` produces from the
-    /// calendar side, just triggered from this circle instead.
-    private func toggleOccurrence(habit: Habit, index: Int, todayLog: HabitLog?) {
-        let today = calendar.startOfDay(for: .now)
-        // `todayLog` is deliberately ignored for the create decision. It
-        // came from this view's own list rendering, which is a third
-        // opinion about whether a log exists — and a caller believing
-        // "nil" when one is actually pending is exactly how duplicates
-        // were created. `logOrCreate` is the single source of truth.
-        let log = habit.logOrCreate(on: today, context: modelContext, calendar: calendar)
-        let isNowComplete = log.occurrenceStatus(index) != .complete
-        log.setOccurrence(index, to: isNowComplete ? .complete : .none)
-
-        if let block = (habit.scheduledBlocks ?? []).first(where: {
-            $0.habitOccurrenceIndex == index && calendar.isDate($0.date, inSameDayAs: today)
-        }) {
-            block.isCompleted = isNowComplete
-        }
-        refreshCoordinator.habitLogsChanged()
+    /// Cycles one occurrence to its next state, keeping its matching
+    /// `ScheduledBlock.isCompleted` (if that occurrence made it onto that
+    /// day's calendar) in sync — `true` only for `.complete`, `false` for
+    /// every other state including `.missed`/`.excused`, same rule
+    /// `HabitDetailView.setDay` already uses (a block's own `isCompleted`
+    /// is a single boolean; it was never able to distinguish missed from
+    /// excused, and nothing downstream reads it expecting to — the
+    /// `HabitLog` occurrence arrays are what's authoritative for which of
+    /// the two it actually is).
+    private func toggleOccurrence(habit: Habit, index: Int) {
+        guard canEdit else { return }
+        habit.cycleOccurrence(index, on: selectedDate, context: modelContext, calendar: calendar)
+        HabitStatsRefreshCoordinator.shared.habitLogsChanged()
     }
 
     private func fillColor(for status: OccurrenceStatus) -> Color {
@@ -343,13 +416,10 @@ struct HabitsTodayView: View {
     }
 
     private func deleteHabits(at offsets: IndexSet) {
-        let ordered = displayedHabits
         for index in offsets {
-            let habit = ordered[index]
-            modelContext.delete(habit)
+            modelContext.delete(habits[index])
         }
     }
-
 }
 
 /// Page 2: every habit's Current Streak, Max Streak, MTD %, and LTD % in one

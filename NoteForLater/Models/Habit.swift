@@ -177,6 +177,33 @@ final class Habit {
         return newLog
     }
 
+    /// Cycles occurrence `index`'s status forward one step
+    /// (`OccurrenceStatus.next` — none → complete → missed → excused →
+    /// none) on `date`, keeping any matching same-day `ScheduledBlock
+    /// .isCompleted` in sync (`true` only for `.complete`; a block's own
+    /// completion flag was never able to distinguish missed from excused,
+    /// and nothing downstream reads it expecting to — the `HabitLog`
+    /// occurrence arrays this writes are what's authoritative for which
+    /// of the two it actually is). The single write path both
+    /// `HabitsTodayView`'s per-day list and `HabitDetailView`'s calendar
+    /// ultimately build on, pulled out onto the model specifically so
+    /// it's directly testable without a live view. Uses `logOrCreate`,
+    /// never a passed-in log reference — see that method's own doc
+    /// comment for why trusting anything else is how duplicates got
+    /// created.
+    @discardableResult
+    func cycleOccurrence(_ index: Int, on date: Date, context: ModelContext, calendar: Calendar = .current) -> OccurrenceStatus {
+        let log = logOrCreate(on: date, context: context, calendar: calendar)
+        let nextStatus = log.occurrenceStatus(index).next
+        log.setOccurrence(index, to: nextStatus)
+        if let block = (scheduledBlocks ?? []).first(where: {
+            $0.habitOccurrenceIndex == index && calendar.isDate($0.date, inSameDayAs: date)
+        }) {
+            block.isCompleted = nextStatus == .complete
+        }
+        return nextStatus
+    }
+
     /// Every `HabitLog` this habit has for `day`, found by **fetch** rather
     /// than by traversing `logs` — see `logOrCreate` for why that
     /// distinction is load-bearing.
@@ -243,46 +270,53 @@ final class Habit {
         return (logs ?? []).first(where: { calendar.isDate($0.date, inSameDayAs: day) })
     }
 
-    /// The next target time still ahead of this habit, used to order the
-    /// Today list like a queue of "what's coming up next" rather than a
-    /// fixed list. Scans forward from today (up to a week) for the
-    /// earliest applicable day that still has an unresolved occurrence —
-    /// one nobody has marked complete/missed/excused — and returns that
-    /// occurrence's own target time: its real `idealTimesOfDay` slot for
-    /// a Specific-Time occurrence, or a fixed stand-in time for an AM
-    /// (7am), Midday (noon), or PM (9pm) one — those don't have a real
-    /// time of their own (see `HabitOccurrenceTimeMode`), but still need
-    /// *something* to sort by here. A day with nothing left unresolved
-    /// (today, once every occurrence is settled) rolls forward to the
-    /// next applicable day, whose occurrences are all unresolved by
-    /// definition. Returns nil only if every applicable day in the window
-    /// is already fully resolved.
-    func nextTargetDate(asOf referenceDate: Date = .now, calendar: Calendar = .current) -> Date? {
-        guard timesPerDay > 0 else { return nil }
-        var cursor = calendar.startOfDay(for: referenceDate)
-        for _ in 0..<7 {
-            if isApplicable(on: cursor, calendar: calendar) {
-                // Escape hatch is correct here: this only orders the Today
-                // list, feeds no write decision, and is debounced 3s by
-                // `HabitStatsRefreshCoordinator` regardless — a read stale
-                // by one unsaved insert cannot affect anything.
-                let dayLog = logIgnoringPendingInserts(on: cursor, calendar: calendar)
-                for index in 0..<max(timesPerDay, 1) {
-                    let status = dayLog?.occurrenceStatus(index) ?? .none
-                    guard status == .none else { continue }
-                    let minutes: Int
-                    switch timeMode(for: index) {
-                    case .am: minutes = 7 * 60
-                    case .midday: minutes = 12 * 60
-                    case .pm: minutes = 21 * 60
-                    case .specific: minutes = index < idealTimesOfDay.count ? idealTimesOfDay[index] : (idealTimesOfDay.last ?? 0)
-                    }
-                    return calendar.date(byAdding: .minute, value: minutes, to: cursor)
-                }
-            }
-            cursor = calendar.date(byAdding: .day, value: 1, to: cursor) ?? cursor
+    /// The Habits tab's Today list order — frequency first (more days a
+    /// week sorts earlier), then occurrence 0's time of day, then a
+    /// stable tiebreak (`sortOrder`, then `name`). Deliberately static:
+    /// nothing about it depends on any log's completion state, so
+    /// (unlike the old `nextTargetDate`-based "what's coming up next"
+    /// queue this replaced) it never changes when a circle gets tapped —
+    /// no debounce needed to stop rows jumping mid-tap, since they simply
+    /// don't move.
+    struct TodayOrderKey: Comparable {
+        /// Negated `daysOfWeek.count`, so a 7-day habit (more frequent)
+        /// sorts *before* a 1-day one — plain ascending comparison on the
+        /// count alone would put the least frequent first.
+        let frequencyRank: Int
+        let occurrenceZeroMinutes: Int
+        let sortOrder: Int
+        let name: String
+
+        static func < (lhs: TodayOrderKey, rhs: TodayOrderKey) -> Bool {
+            if lhs.frequencyRank != rhs.frequencyRank { return lhs.frequencyRank < rhs.frequencyRank }
+            if lhs.occurrenceZeroMinutes != rhs.occurrenceZeroMinutes { return lhs.occurrenceZeroMinutes < rhs.occurrenceZeroMinutes }
+            if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
+            return lhs.name < rhs.name
         }
-        return nil
+    }
+
+    var todayOrderKey: TodayOrderKey {
+        TodayOrderKey(
+            frequencyRank: -daysOfWeek.count,
+            occurrenceZeroMinutes: Self.representativeMinutes(mode: timeMode(for: 0), idealTimesOfDay: idealTimesOfDay),
+            sortOrder: sortOrder,
+            name: name
+        )
+    }
+
+    /// One comparable minute-of-day for either side of `HabitOccurrenceTimeMode`
+    /// — a Specific-Time occurrence's real `idealTimesOfDay` slot, or the
+    /// same fixed AM (7am) / Midday (noon) / PM (9pm) stand-ins
+    /// `nextTargetDate` used to use, so e.g. a 7am Specific-Time habit
+    /// and an AM-mode habit land at the same key and fall through to the
+    /// stable tiebreak instead of one arbitrarily outranking the other.
+    private static func representativeMinutes(mode: HabitOccurrenceTimeMode, idealTimesOfDay: [Int]) -> Int {
+        switch mode {
+        case .am: return 7 * 60
+        case .midday: return 12 * 60
+        case .pm: return 21 * 60
+        case .specific: return idealTimesOfDay.first ?? 0
+        }
     }
 
     /// Every log keyed by its (start-of-day) date, built once so a full

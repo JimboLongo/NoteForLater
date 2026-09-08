@@ -1198,6 +1198,48 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertEqual(fixture.task.remainingMinutes, 120, "the trim sweep must give back the time it reclaims — this is the leak that ran on every Calendar appear")
     }
 
+    /// The empty-slot picker's whole "pick an ineligible task on purpose"
+    /// feature is a no-op unless a hand-placed block actually survives —
+    /// confirmed empirically (not just read) that it didn't, before
+    /// `ScheduledBlock.manuallyPlaced` existed: a task never toggled
+    /// eligible for the rule covering its slot, given a block exactly the
+    /// way `insertBlock` builds one (unlocked, unapproved, incomplete),
+    /// was swept by the very next `autoPlaceEligibleTasks` pass — 0 of 1
+    /// blocks survived. `manuallyPlaced` is what `trimOverflowingRuleBlocks`
+    /// now checks to leave it alone.
+    ///
+    /// Verified fail-then-pass: with `manuallyPlaced` temporarily left
+    /// `false` here (simulating a caller that builds the block directly
+    /// rather than through `insertBlock`/`moveExistingBlock`), this test
+    /// failed exactly as the pre-fix investigation did — 0 blocks
+    /// survived. Setting it back to `true` and rerunning: green. Both via
+    /// `xcodebuild test`.
+    func test_manuallyPlacedIneligibleBlock_survivesAutoPlacePass() async throws {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        // Deliberately NOT setEligible(true, for: rule) — this is the
+        // "picked an ineligible task on purpose" case.
+        let task = TaskItem(title: "Manually Placed Ineligible", shelf: shelf, estimatedMinutes: 30)
+        context.insert(task)
+        shelf.tasks = [task]
+
+        let futureDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+        let start = calendar.date(byAdding: .hour, value: 10, to: futureDay)!
+        let block = ScheduledBlock(date: futureDay, startTime: start, endTime: calendar.date(byAdding: .minute, value: 30, to: start)!, task: task)
+        block.manuallyPlaced = true
+        context.insert(block)
+        task.scheduledBlocks = [block]
+        task.isScheduled = true
+
+        let calendarService = FakeCalendarService()
+        calendarService.freeSlotsProvider = { [self.businessHoursSlot(on: $0)] }
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: futureDay)
+
+        await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+
+        let survivingBlocks = try context.fetch(FetchDescriptor<ScheduledBlock>()).filter { $0.task?.id == task.id }
+        XCTAssertEqual(survivingBlocks.count, 1, "a manually placed ineligible block must survive the very next autoPlaceEligibleTasks pass")
+    }
+
     /// `trimOverflowingRuleBlocksAcrossFutureDays` loaded its pre-trim
     /// `allBlocksNow` snapshot back into `blocks` after deleting the excess
     /// groups — reinserting the very objects `removeBlock` had just nil'd
@@ -2427,6 +2469,102 @@ final class SchedulingEngineTests: XCTestCase {
 
         XCTAssertFalse(candidates.contains { $0.id == multiBlock.id }, "a divisible task spread across two blocks has no single piece to move")
         XCTAssertFalse(candidates.contains { $0.id == locked.id }, "a locked block never moves, so its task isn't offered here")
+    }
+
+    // MARK: - evaluateCandidates — soft (freeSlot-only) ineligibility
+
+    /// A task never toggled eligible for any rule on its shelf still
+    /// appears in the free-slot picker's list — grayed out
+    /// (`isEligible: false`) with a reason — rather than being hidden the
+    /// way `.occupiedBlock` would hide it. This is the whole feature:
+    /// placing it by hand is an intentional override, not blocked.
+    ///
+    /// Verified fail-then-pass: with `evaluateCandidates`'s `.freeSlot`
+    /// case temporarily forced to `allowsSoftIneligibility = false`
+    /// (reproducing pre-fix behavior — every soft check becomes hard,
+    /// same as `.occupiedBlock`), this test failed: `result` came back
+    /// `nil` instead of a grayed-out entry. Restored and reran: green.
+    /// Both via `xcodebuild test`.
+    func test_evaluateCandidates_freeSlot_ineligibleTask_appearsFlaggedNotHidden() async {
+        let testDay = day(2026, 1, 5)
+        let (shelf, _) = makeShelf(fillStrategy: .fillToFit)
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: testDay)
+        let slotStart = calendar.date(byAdding: .hour, value: 10, to: testDay)!
+
+        // Deliberately not toggled eligible for the shelf's rule.
+        let task = TaskItem(title: "Never Toggled In", shelf: shelf, estimatedMinutes: 30)
+        context.insert(task)
+        shelf.tasks = [task]
+
+        let results = viewModel.evaluateCandidates(from: [task], for: .freeSlot(startTime: slotStart, includingInbox: true))
+
+        let result = results.first { $0.task.id == task.id }
+        XCTAssertNotNil(result, "an ineligible task must still appear in the list")
+        XCTAssertEqual(result?.isEligible, false)
+        XCTAssertNotNil(result?.ineligibleReason)
+    }
+
+    /// The same shape at the `.occupiedBlock` context Auto-Replace uses
+    /// (`autoReplace` -> `nextCandidate` -> `replacementCandidates(...,
+    /// for: .occupiedBlock)`) — an ineligible task must not be pulled in
+    /// as a replacement. Exercised through the real public `autoReplace`
+    /// API, not `replacementCandidates` directly, so this actually proves
+    /// the caller Auto-Replace uses keeps eligible-only behavior.
+    func test_autoReplace_excludesIneligibleTaskFromItsPool() async {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let occupant = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 30, isDivisible: false, minimumSegmentMinutes: 0)
+        let start = calendar.date(byAdding: .hour, value: 10, to: testDay)!
+        let block = ScheduledBlock(date: testDay, startTime: start, endTime: calendar.date(byAdding: .minute, value: 30, to: start)!, task: occupant)
+        context.insert(block)
+        occupant.isScheduled = true
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: testDay)
+
+        // Same "never toggled eligible" shape as the freeSlot test above —
+        // the only difference is the context this pool is evaluated in.
+        let ineligible = TaskItem(title: "Never Toggled In", shelf: shelf, estimatedMinutes: 30)
+        context.insert(ineligible)
+        shelf.tasks = [occupant, ineligible]
+
+        viewModel.autoReplace(block, candidatePool: [ineligible])
+
+        XCTAssertNil(block.task, "the only candidate offered was ineligible for this slot — Auto-Replace must not pick it")
+    }
+
+    /// The three hard exclusions stay hard in both contexts: a completed
+    /// task, and a Kitchen/Pantry-shelf task (never schedulable at all,
+    /// regardless of its shelf's rules — see `evaluateCandidates`'s own
+    /// doc comment on why this needed to become an explicit check once
+    /// "no enabled rules" turned soft). Neither should appear even as a
+    /// grayed-out `.freeSlot` entry, and neither should appear for
+    /// `.occupiedBlock` either.
+    func test_evaluateCandidates_hardExclusions_neverAppearInEitherContext() async {
+        let testDay = day(2026, 1, 5)
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: testDay)
+        let slotStart = calendar.date(byAdding: .hour, value: 10, to: testDay)!
+
+        let completed = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 30, isDivisible: false, minimumSegmentMinutes: 0)
+        completed.isCompleted = true
+
+        let kitchenShelf = Shelf(name: "Pantry")
+        kitchenShelf.isKitchen = true
+        context.insert(kitchenShelf)
+        let kitchenTask = TaskItem(title: "Buy milk", shelf: kitchenShelf, estimatedMinutes: 10)
+        context.insert(kitchenTask)
+        kitchenShelf.tasks = [kitchenTask]
+
+        let occupiedBlock = ScheduledBlock(date: testDay, startTime: slotStart, endTime: calendar.date(byAdding: .minute, value: 30, to: slotStart)!, task: nil)
+        context.insert(occupiedBlock)
+
+        for slotContext in [
+            ScheduleReviewViewModel.CandidateSlotContext.freeSlot(startTime: slotStart, includingInbox: true),
+            .occupiedBlock(occupiedBlock),
+        ] {
+            let results = viewModel.evaluateCandidates(from: [completed, kitchenTask], for: slotContext)
+            XCTAssertFalse(results.contains { $0.task.id == completed.id }, "a completed task must never appear, eligible or not")
+            XCTAssertFalse(results.contains { $0.task.id == kitchenTask.id }, "a Kitchen/Pantry task must never appear, eligible or not")
+        }
     }
 
     /// Picking an already-scheduled candidate from the empty-slot picker
