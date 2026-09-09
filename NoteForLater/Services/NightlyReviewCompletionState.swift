@@ -43,4 +43,32 @@ final class NightlyReviewCompletionState {
         guard let lastClosedReviewDay else { return false }
         return Calendar.current.isDate(lastClosedReviewDay, inSameDayAs: day)
     }
+
+    /// The bound for "completed strictly after the last closed review
+    /// day" — callers comparing a full timestamp (`TaskCompletionRecord
+    /// .completedAt`) need `>=` *this*, not `>= closedDay` itself, or
+    /// every record from the day just closed re-qualifies for the next
+    /// review. That's the identical off-by-one already fixed once in
+    /// `ScheduleReviewViewModel.openHabitOccurrencesForReview`'s `cursor >
+    /// completedSinceDay` — this centralizes the fix so a new call site
+    /// can't get it wrong the same way `NightlyReviewView
+    /// .completedTasksWithNoBlock` and its Two-Minute-Tasks step did.
+    /// Static (rather than only the instance property below) so it's
+    /// testable without touching the shared singleton's UserDefaults-
+    /// backed state. Adding a day to `closedDay` (re-truncated to be
+    /// safe, though `markReviewed` already stores a day boundary) keeps
+    /// the comparison at day granularity while staying a plain `Date` —
+    /// `#Predicate` doesn't support calling into `Calendar` inside the
+    /// predicate itself (see `RecurringTaskLog.sameDayLogs` for the same
+    /// precomputed-bound pattern). `nil` maps to `.distantPast`, same as
+    /// every existing `?? .distantPast` call site.
+    static func completedSinceBound(closedDay: Date?, calendar: Calendar = .current) -> Date {
+        guard let closedDay else { return .distantPast }
+        let closedDayStart = calendar.startOfDay(for: closedDay)
+        return calendar.date(byAdding: .day, value: 1, to: closedDayStart) ?? closedDayStart
+    }
+
+    var completedSinceBound: Date {
+        Self.completedSinceBound(closedDay: lastClosedReviewDay)
+    }
 }

@@ -2068,6 +2068,74 @@ final class ScheduleReviewViewModel {
         return result
     }
 
+    /// `NightlyReviewView.completedTasksWithNoBlock`'s core logic,
+    /// extracted so the day-granularity bound (via `NightlyReviewCompletionState
+    /// .completedSinceBound`) is unit-testable without constructing a live
+    /// view. Same completion-record source, same has-no-live-block filter
+    /// as before extraction — see that property's own doc comment for why
+    /// `TaskCompletionRecord` rather than `allTasks` directly.
+    static func completedTasksWithNoBlock(tasks: [TaskItem], context: ModelContext, completedSince: Date?) -> [TaskCompletionRecord] {
+        let since = NightlyReviewCompletionState.completedSinceBound(closedDay: completedSince)
+        let records = (try? context.fetch(FetchDescriptor<TaskCompletionRecord>(
+            predicate: #Predicate { $0.completedAt >= since }
+        ))) ?? []
+        let liveTasksByID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
+        return records.filter { record in
+            guard let task = liveTasksByID[record.taskID] else { return true }
+            return (task.scheduledBlocks ?? []).isEmpty
+        }
+    }
+
+    /// `NightlyReviewView.reviewableBlocks`'s core logic, extracted for
+    /// the same reason as `completedTasksWithNoBlock` above.
+    ///
+    /// A complete and an incomplete block are bounded in opposite
+    /// directions, deliberately: an *incomplete* block shows regardless
+    /// of age (`startTime < reviewDisplayCutoff`, no lower bound) — a
+    /// backlog left over from a busy week shouldn't quietly disappear,
+    /// see this property's non-extracted doc comment for the original
+    /// reasoning. A *complete* block instead needs `startTime >=
+    /// completedSinceBound` — no upper bound, so one knocked out ahead of
+    /// its scheduled day still shows without waiting for that future
+    /// day's own review — but WITH a lower bound, unlike the old
+    /// `startTime < reviewDisplayCutoff || $0.isCompleted` this replaces.
+    /// That unconditional `isCompleted` was structurally the same
+    /// unbounded-OR as the old MealSelection bug (`$0.isCompleted ||
+    /// $0.date <= cutoffDay`, still live and unfixed in
+    /// `NightlyReviewView.todayMealSelections` as of this writing): masked
+    /// today by `purgeCompletedBlocks` deleting every completed block the
+    /// moment a review's Today step commits, but a completed block from
+    /// any day, however long ago, would show forever the instant that
+    /// purge is ever skipped. Splitting into "isCompleted ? boundA :
+    /// boundB" rather than "boundB || isCompleted" is what actually closes
+    /// that — the old OR shape meant adding *any* bound to the isCompleted
+    /// side changed nothing, since `boundB` already covered every date
+    /// isCompleted could otherwise reach (a plain Boolean identity: `A ||
+    /// (B && ¬A) ≡ A || B`, for any A/B).
+    static func reviewableBlocks(allBlocks: [ScheduledBlock], reviewDisplayCutoff: Date, completedSinceBound: Date) -> [ScheduledBlock] {
+        allBlocks
+            .filter {
+                $0.mealSelection == nil
+                    && ($0.isCompleted ? $0.startTime >= completedSinceBound : $0.startTime < reviewDisplayCutoff)
+            }
+            .sorted { $0.startTime < $1.startTime }
+    }
+
+    /// `NightlyReviewView.todayMealSelections`'s core logic, extracted for
+    /// the same reason as `reviewableBlocks` above — this was in fact the
+    /// exact shape that property's own doc comment already named as
+    /// precedent (`$0.isCompleted || $0.date <= cutoffDay`), still live
+    /// and unfixed here until now. Same completed/incomplete split, same
+    /// reasoning: an incomplete selection shows regardless of age (no
+    /// lower bound), a completed one needs `date >= completedSinceBound`
+    /// so one from a day already closed out doesn't resurface the instant
+    /// `purgeCompletedMealSelections` is ever skipped.
+    static func todayMealSelections(allMealSelections: [MealSelection], cutoffDay: Date, completedSinceBound: Date) -> [MealSelection] {
+        allMealSelections.filter {
+            $0.isCompleted ? $0.date >= completedSinceBound : $0.date <= cutoffDay
+        }
+    }
+
     static func hasOpenHabitOccurrences(habits: [Habit], context: ModelContext, upTo cutoff: Date = .now) -> Bool {
         !openHabitOccurrencesForReview(habits: habits, context: context, upTo: cutoff).isEmpty
     }

@@ -172,13 +172,17 @@ struct NightlyReviewView: View {
     /// whichever day is being reviewed right now — at most one per day.
     /// Every meal that either belongs to today's review or is still
     /// unresolved from an earlier one — same shape as `reviewableBlocks`'s
-    /// own filter (`isCompleted || date <= cutoff`), not just an
-    /// exact-day match: a `MealSelection` picked two nights ago and never
-    /// checked off shouldn't have to wait for that day's own review to
-    /// surface, the same way an overdue block doesn't.
+    /// own filter, not just an exact-day match: a `MealSelection` picked
+    /// two nights ago and never checked off shouldn't have to wait for
+    /// that day's own review to surface, the same way an overdue block
+    /// doesn't. See `ScheduleReviewViewModel.todayMealSelections` for the
+    /// completed-vs-incomplete date bounding.
     private var todayMealSelections: [MealSelection] {
-        let cutoffDay = Calendar.current.startOfDay(for: reviewDate)
-        return allMealSelections.filter { $0.isCompleted || $0.date <= cutoffDay }
+        ScheduleReviewViewModel.todayMealSelections(
+            allMealSelections: allMealSelections,
+            cutoffDay: Calendar.current.startOfDay(for: reviewDate),
+            completedSinceBound: NightlyReviewCompletionState.shared.completedSinceBound
+        )
     }
 
     private var planRelativeDayLabel: String {
@@ -372,7 +376,11 @@ struct NightlyReviewView: View {
             // there's no later chance to see them, since a completed
             // 2-minute task never gets a block `reviewableBlocks` could
             // have shown it through instead.
-            let since = NightlyReviewCompletionState.shared.lastClosedReviewDay ?? .distantPast
+            // Same day-granularity bound as `completedTasksWithNoBlock` —
+            // see `NightlyReviewCompletionState.completedSinceBound`'s doc
+            // comment for the off-by-one a plain `lastClosedReviewDay`
+            // comparison here used to re-introduce.
+            let since = NightlyReviewCompletionState.shared.completedSinceBound
             let completedRecords = (try? modelContext.fetch(FetchDescriptor<TaskCompletionRecord>(
                 predicate: #Predicate { $0.completedAt >= since }
             ))) ?? []
@@ -781,16 +789,19 @@ struct NightlyReviewView: View {
     /// actually scoped to `todayViewModel`'s own `targetDate` internally,
     /// so reusing it here for a block from any earlier or later day is safe.
     private var reviewableBlocks: [ScheduledBlock] {
-        allBlocks
-            // `mealSelection != nil` blocks are excluded here — a meal
-            // gets its own `.meal` `ReviewItem` (see `reviewItems`)
-            // instead, sorted into the same list by that same block's
-            // own `startTime`. Without this exclusion the same meal
-            // would show up twice: once correctly, once as a bare
-            // "Dinner: X" block row with no pantry-deduction wiring
-            // behind its tap at all.
-            .filter { ($0.startTime < reviewDisplayCutoff || $0.isCompleted) && $0.mealSelection == nil }
-            .sorted { $0.startTime < $1.startTime }
+        // `mealSelection != nil` blocks are excluded here — a meal gets
+        // its own `.meal` `ReviewItem` (see `reviewItems`) instead, sorted
+        // into the same list by that same block's own `startTime`.
+        // Without this exclusion the same meal would show up twice: once
+        // correctly, once as a bare "Dinner: X" block row with no pantry-
+        // deduction wiring behind its tap at all. See
+        // `ScheduleReviewViewModel.reviewableBlocks` for the completed-
+        // vs-incomplete date bounding.
+        ScheduleReviewViewModel.reviewableBlocks(
+            allBlocks: allBlocks,
+            reviewDisplayCutoff: reviewDisplayCutoff,
+            completedSinceBound: NightlyReviewCompletionState.shared.completedSinceBound
+        )
     }
 
     /// Blocks, open habit occurrences, completed-with-no-block tasks, and
@@ -840,15 +851,10 @@ struct NightlyReviewView: View {
     /// to the front regardless, via `twoMinuteReviewTaskIDs` rather than
     /// this task's own, possibly-already-gone `shelf`).
     private var completedTasksWithNoBlock: [TaskCompletionRecord] {
-        let since = NightlyReviewCompletionState.shared.lastClosedReviewDay ?? .distantPast
-        let records = (try? modelContext.fetch(FetchDescriptor<TaskCompletionRecord>(
-            predicate: #Predicate { $0.completedAt >= since }
-        ))) ?? []
-        let liveTasksByID = Dictionary(uniqueKeysWithValues: allTasks.map { ($0.id, $0) })
-        return records.filter { record in
-            guard let task = liveTasksByID[record.taskID] else { return true }
-            return (task.scheduledBlocks ?? []).isEmpty
-        }
+        ScheduleReviewViewModel.completedTasksWithNoBlock(
+            tasks: allTasks, context: modelContext,
+            completedSince: NightlyReviewCompletionState.shared.lastClosedReviewDay
+        )
     }
 
     /// A tap here only flips membership in `stagedTodayToggleIDs` (or, for
