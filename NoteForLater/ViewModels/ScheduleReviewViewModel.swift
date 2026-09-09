@@ -2136,6 +2136,63 @@ final class ScheduleReviewViewModel {
         }
     }
 
+    /// `DayTimelineGridView.projectedRecurringTaskOccurrences`'s core
+    /// logic, extracted so it's unit-testable without constructing a live
+    /// view. A Specific-Time recurring task's occurrence only shows up on
+    /// the calendar via a real `ScheduledBlock` — block generation
+    /// (`regenerateFromNow`) only reaches as far ahead as its own walk has
+    /// actually run (in practice this is *not* a fixed "today/tomorrow"
+    /// horizon — it's whatever that walk last reached, which can be as
+    /// close as tomorrow if it hasn't run recently or 44 days out
+    /// (`habitPopulationDays` + `taskStallThresholdDays`) if it has), so a
+    /// day past that point would otherwise show nothing at all for it.
+    /// This produces a *projection* instead: pure `TaskItem
+    /// .hasRecurringOccurrence(on:)` date math plus that day's own
+    /// `RecurringTaskLog`, skipped entirely for a task that already has a
+    /// real block on `targetDate` (checked against `materializedRows`, the
+    /// real-only list — never the merged list this feeds into, which would
+    /// make a projection indistinguishable from an already-projected one).
+    ///
+    /// A completed occurrence on a *future* day (strictly after `today`) is
+    /// dropped entirely rather than shown faded — a deliberate divergence
+    /// from every other completed row/block in this app, which stays
+    /// visible as a record of what was actually done. A future day hasn't
+    /// happened yet, so there's nothing to keep a record of — a pre-
+    /// completed occurrence sitting there is just noise. Do not "fix" this
+    /// to match the general convention; it's intentional. `today` is a
+    /// parameter (defaulting to `.now`) rather than reading `Date.now`
+    /// inline purely for testability — production callers never override it.
+    static func projectedRecurringTaskOccurrences(tasks: [TaskItem], materializedRows: [DayTimelineRow], targetDate: Date, context: ModelContext, calendar: Calendar = .current, today: Date = .now) -> [ProjectedRecurringTaskOccurrence] {
+        let tasksWithRealBlockToday = Set(materializedRows.compactMap { row -> UUID? in
+            guard case .proposed(let block) = row, let task = block.task, task.isRecurring else { return nil }
+            return task.id
+        })
+        let isFutureDay = calendar.startOfDay(for: targetDate) > calendar.startOfDay(for: today)
+        var result: [ProjectedRecurringTaskOccurrence] = []
+        for task in tasks where task.isRecurring && task.recurrenceTimeMode == .specific {
+            guard !tasksWithRealBlockToday.contains(task.id) else { continue }
+            guard task.hasRecurringOccurrence(on: targetDate, calendar: calendar),
+                  let startTime = task.recurringOccurrenceTime(on: targetDate, calendar: calendar)
+            else { continue }
+            let isCompleted = RecurringTaskLog.log(taskID: task.id, on: targetDate, context: context, calendar: calendar)?.isCompleted ?? false
+            guard !(isFutureDay && isCompleted) else { continue }
+            let endTime = calendar.date(byAdding: .minute, value: max(task.estimatedMinutes, 15), to: startTime) ?? startTime
+            result.append(ProjectedRecurringTaskOccurrence(id: "projectedRecurringTask.\(task.id)", task: task, startTime: startTime, endTime: endTime, isCompleted: isCompleted))
+        }
+        return result
+    }
+
+    /// `DayTimelineGridView.refreshHabitStreaks`'s core logic, extracted
+    /// for the same reason as `projectedRecurringTaskOccurrences` above —
+    /// deliberately *not* new streak math, just `Habit.currentStreak(asOf:)`
+    /// (already signed, via `HabitStats.currentStreakDisplay`) called once
+    /// per habit and collected, so a test can confirm the cache a calendar
+    /// screen shows genuinely tracks `asOf` rather than silently drifting
+    /// to always mean "today."
+    static func habitStreaks(for habits: [Habit], asOf date: Date, calendar: Calendar = .current) -> [UUID: Int] {
+        Dictionary(uniqueKeysWithValues: habits.map { ($0.id, $0.currentStreak(asOf: date, calendar: calendar)) })
+    }
+
     static func hasOpenHabitOccurrences(habits: [Habit], context: ModelContext, upTo cutoff: Date = .now) -> Bool {
         !openHabitOccurrencesForReview(habits: habits, context: context, upTo: cutoff).isEmpty
     }

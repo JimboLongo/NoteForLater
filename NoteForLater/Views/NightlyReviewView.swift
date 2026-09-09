@@ -1307,7 +1307,7 @@ struct NightlyReviewView: View {
                 }
             } else {
                 DayTimelineGridView(
-                    rows: ScheduleReviewViewModel.timelineRows(blocks: tomorrowViewModel.blocks, calendarEvents: tomorrowViewModel.calendarEvents),
+                    materializedRows: ScheduleReviewViewModel.timelineRows(blocks: tomorrowViewModel.blocks, calendarEvents: tomorrowViewModel.calendarEvents),
                     eligibleHoursWindows: eligibleHoursWindows,
                     targetDate: tomorrowViewModel.targetDate,
                     lockedStore: lockedStore,

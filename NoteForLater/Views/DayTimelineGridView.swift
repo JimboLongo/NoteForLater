@@ -62,8 +62,52 @@ final class ScrollGeometryBox {
     var viewportHeight: CGFloat = 0
 }
 
+/// A Specific-Time recurring task occurrence shown on `targetDate` with no
+/// real `ScheduledBlock` behind it — a *projection*, not a materialized
+/// block. Exists because block generation
+/// (`ScheduleReviewViewModel.regenerateFromNow`) only reaches as far ahead
+/// as its own walk has actually run; navigating past that point must not
+/// make the occurrence disappear, and the fix must not be "generate
+/// further ahead" — that changes scheduling cost/behavior for every task,
+/// not just what one calendar screen shows (see the perf lesson in
+/// `docs/session-handoff.md` about this exact file's invalidation cost
+/// before adding anything else to its `body`).
+///
+/// Computed the same way `DayTimelineGridView.openRecurringTaskOccurrences`
+/// already computes AM/Midday/PM occurrences: `TaskItem
+/// .hasRecurringOccurrence(on:)` is pure date math with no block
+/// dependency, and completion is read from *that day's own*
+/// `RecurringTaskLog`, never a block's `isCompleted` — so a projected day
+/// is exactly as day-independent as the untimed modes already are.
+/// Completing today's occurrence writes today's log only; a future day's
+/// projection reads its own (so far nonexistent) log and stays open.
+///
+/// Deliberately **not** a `ScheduledBlock` stand-in beyond sharing its
+/// time/title for display: `DayTimelineRow.projectedRecurringTask`'s own
+/// case (see below) is what actually keeps it from being confused with a
+/// real block everywhere that matters — `isLockedRow` reports it locked
+/// (same mechanism a habit-linked block already uses to mean "tap to
+/// complete only, never drag/replace/ripple"), so drag, swipe-to-delete,
+/// and the tap-to-act replacement menu are all disabled on it for free,
+/// through the exact same guard every other locked row already goes
+/// through, rather than needing their own special case.
+struct ProjectedRecurringTaskOccurrence: Identifiable {
+    let id: String
+    let task: TaskItem
+    let startTime: Date
+    let endTime: Date
+    let isCompleted: Bool
+}
+
 struct DayTimelineGridView: View {
-    let rows: [DayTimelineRow]
+    /// The day's real blocks and calendar events — `rows` (see below) is
+    /// what `body` actually renders, adding a projection for any
+    /// Specific-Time recurring task that isn't materialized here yet. Named
+    /// distinctly so `projectedRecurringTaskOccurrences()` has something
+    /// unambiguous to check "does this task already have a real block
+    /// today" against, without risking a projection mistaking itself (or
+    /// an earlier call's projection) for one.
+    let materializedRows: [DayTimelineRow]
     let eligibleHoursWindows: [EligibleHoursWindow]
     let targetDate: Date
     let lockedStore: LockedEventsStore
@@ -160,6 +204,37 @@ struct DayTimelineGridView: View {
     @State private var habitOccurrenceRefreshTick = 0
     @Environment(\.modelContext) private var modelContext
 
+    /// Each habit's current streak *as of `targetDate`* — cached rather
+    /// than recomputed per row or per body pass. `Habit.currentStreak(asOf:)`
+    /// is an O(logs) full-history walk (`Habit.stats(asOf:)`) —
+    /// `HabitsTodayView` deliberately caches this behind a debounce for
+    /// exactly that reason rather than calling it inline, and this view's
+    /// `body` already re-evaluates heavily on a single tap (measured: 55
+    /// fetches across 2 body passes for one habit toggle — see the perf
+    /// investigation in `docs/session-handoff.md`), so calling this per
+    /// habit per body pass would be a real regression stacked on a screen
+    /// that already has an open, unexplained lag report against it.
+    ///
+    /// Unlike `HabitsTodayView.cachedStats` — deliberately "as of right
+    /// now" regardless of which day its own date nav is showing — this one
+    /// IS keyed to `targetDate`: a calendar screen showing a past or future
+    /// day should show what the streak actually was (or would project to
+    /// be) as of *that* day, not today's, per the explicit ask. That means
+    /// it genuinely does recompute on every `targetDate` change (`.task(id:)`
+    /// below) — there's no way around that and still show the right
+    /// number, but it's a recompute triggered by day navigation, not by
+    /// every body pass, and navigation is inherently much rarer than a tap.
+    /// A tap on the *current* day updates through the same 3-second
+    /// idle-tick debounce `HabitStatsRefreshCoordinator` already provides
+    /// everywhere else habit stats are shown, not immediately — same
+    /// tradeoff `HabitsTodayView` already makes, for the same reason.
+    @State private var cachedHabitStreaks: [UUID: Int] = [:]
+    @State private var streakRefreshCoordinator = HabitStatsRefreshCoordinator.shared
+
+    private func refreshHabitStreaks() {
+        cachedHabitStreaks = ScheduleReviewViewModel.habitStreaks(for: allHabits, asOf: targetDate)
+    }
+
     // PERFINVESTIGATION — kept deliberately, not leftover: the ~3s
     // recurring-task tap lag (see docs/session-handoff.md) never
     // reproduced under this instrumentation, so removing it now would
@@ -193,7 +268,15 @@ struct DayTimelineGridView: View {
     /// either side; this only ever raises the floor, never lowers it.
     /// Falls back to the full day when there's nothing — no rows, no
     /// enabled windows or rules — to derive a range from.
-    private var visibleHourRange: (start: Int, end: Int) {
+    /// `rows`-only convenience for `scrollToRoughlyNow`'s `.onAppear`-only
+    /// use — real blocks/events are enough to derive an initial scroll
+    /// position, so it isn't worth also computing projections just for
+    /// this. `body` itself always calls the parameterized overload below
+    /// with the merged row list computed once at its own top, same
+    /// reasoning as `computeOpenHabitOccurrenceLists`.
+    private var visibleHourRange: (start: Int, end: Int) { visibleHourRange(rows: materializedRows) }
+
+    private func visibleHourRange(rows: [DayTimelineRow]) -> (start: Int, end: Int) {
         var startHour = 24
         var endHour = 0
         var hasBound = false
@@ -351,6 +434,24 @@ struct DayTimelineGridView: View {
         return result
     }
 
+    /// Specific-Time recurring task occurrences that need a *projection*
+    /// (see `ProjectedRecurringTaskOccurrence`) — only for a task with no
+    /// real `ScheduledBlock` already on `targetDate`. A real block,
+    /// whenever generation has already reached that far, is still the
+    /// actual row shown (drag/replace/lock all keep working on it exactly
+    /// as before) — this is purely the fallback for a day generation
+    /// hasn't reached yet, never a duplicate of a block that already
+    /// exists. `materializedRows` (not the merged `rows` `body` actually
+    /// renders) is what's checked here deliberately — checking the merged
+    /// list would make "already has a block" and "already has a
+    /// projection from an earlier call" indistinguishable, risking a
+    /// projection re-projecting itself.
+    private func projectedRecurringTaskOccurrences() -> [ProjectedRecurringTaskOccurrence] {
+        ScheduleReviewViewModel.projectedRecurringTaskOccurrences(
+            tasks: allTasks, materializedRows: materializedRows, targetDate: targetDate, context: modelContext
+        )
+    }
+
     private var amOccurrences: [OpenHabitOccurrence] { openHabitOccurrences(mode: .am) }
     private var middayOccurrences: [OpenHabitOccurrence] { openHabitOccurrences(mode: .midday) }
     private var pmOccurrences: [OpenHabitOccurrence] { openHabitOccurrences(mode: .pm) }
@@ -412,7 +513,7 @@ struct DayTimelineGridView: View {
         var changed = true
         while changed {
             changed = false
-            for row in rows {
+            for row in materializedRows {
                 let start = minutesSinceMidnight(row.startTime)
                 let end = start + row.durationMinutes
                 if start < split, end > split {
@@ -488,12 +589,12 @@ struct DayTimelineGridView: View {
     /// out split rather than noon itself is what keeps a *later* row
     /// (one starting between noon and the pushed-out split) out of the
     /// morning segment it'd otherwise wrongly qualify for.
-    private var morningRows: [DayTimelineRow] {
-        rows.filter { minutesSinceMidnight($0.startTime) < middaySplitMinutes }
+    private func morningRows(from source: [DayTimelineRow]) -> [DayTimelineRow] {
+        source.filter { minutesSinceMidnight($0.startTime) < middaySplitMinutes }
     }
 
-    private var afternoonRows: [DayTimelineRow] {
-        rows.filter { minutesSinceMidnight($0.startTime) >= middaySplitMinutes }
+    private func afternoonRows(from source: [DayTimelineRow]) -> [DayTimelineRow] {
+        source.filter { minutesSinceMidnight($0.startTime) >= middaySplitMinutes }
     }
 
     @ViewBuilder
@@ -506,7 +607,15 @@ struct DayTimelineGridView: View {
         let _ = DiagFileLog.write("PERF body#\(perfBodyEvalN) ENTER tick=\(habitOccurrenceRefreshTick)")
         let occurrenceLists = computeOpenHabitOccurrenceLists()
         let _ = DiagFileLog.write("PERF body#\(perfBodyEvalN) occurrenceLists dt=\(Date().timeIntervalSince(perfBodyStart))")
-        let hourRange = visibleHourRange
+        // Computed once here, same reasoning as `occurrenceLists` above —
+        // every other use of the day's rows below (the hour bounds, the
+        // AM/PM split, and each `DayTimelineSegment` itself) reads this
+        // one local rather than re-deriving it, so a projected occurrence
+        // never costs more than one `projectedRecurringTaskOccurrences()`
+        // call per body pass no matter how many times its result is
+        // consulted.
+        let displayRows = materializedRows + projectedRecurringTaskOccurrences().map(DayTimelineRow.projectedRecurringTask)
+        let hourRange = visibleHourRange(rows: displayRows)
         let morningQuarterRange = morningRange(hourRange: hourRange)
         let afternoonQuarterRange = afternoonRange(hourRange: hourRange)
         ScrollView {
@@ -526,7 +635,7 @@ struct DayTimelineGridView: View {
 
                 if occurrenceLists.isSplitAtNoon {
                     DayTimelineSegment(
-                        rows: morningRows,
+                        rows: morningRows(from: displayRows),
                         quarterRange: morningQuarterRange,
                         eligibleHoursWindows: eligibleHoursWindows,
                         targetDate: targetDate,
@@ -538,6 +647,10 @@ struct DayTimelineGridView: View {
                         onSaveEvent: onSaveEvent,
                         onDeleteBlock: onDeleteBlock,
                         onPickReplacement: onPickReplacement,
+                        onToggleProjectedRecurringTaskOccurrence: { task, isCompleted in
+                            toggleRecurringTaskOccurrence(task: task, isCompleted: isCompleted)
+                        },
+                        habitStreaks: cachedHabitStreaks,
                         precedingContentHeight: twoMinuteSectionHeight + amSectionHeight,
                         scrollPosition: $scrollPosition,
                         scrollGeometry: scrollGeometry,
@@ -561,7 +674,7 @@ struct DayTimelineGridView: View {
                         }
 
                     DayTimelineSegment(
-                        rows: afternoonRows,
+                        rows: afternoonRows(from: displayRows),
                         quarterRange: afternoonQuarterRange,
                         eligibleHoursWindows: eligibleHoursWindows,
                         targetDate: targetDate,
@@ -573,6 +686,10 @@ struct DayTimelineGridView: View {
                         onSaveEvent: onSaveEvent,
                         onDeleteBlock: onDeleteBlock,
                         onPickReplacement: onPickReplacement,
+                        onToggleProjectedRecurringTaskOccurrence: { task, isCompleted in
+                            toggleRecurringTaskOccurrence(task: task, isCompleted: isCompleted)
+                        },
+                        habitStreaks: cachedHabitStreaks,
                         precedingContentHeight: twoMinuteSectionHeight + amSectionHeight + dayHeight(for: morningQuarterRange) + middaySectionHeight,
                         scrollPosition: $scrollPosition,
                         scrollGeometry: scrollGeometry,
@@ -583,7 +700,7 @@ struct DayTimelineGridView: View {
                     )
                 } else {
                     DayTimelineSegment(
-                        rows: rows,
+                        rows: displayRows,
                         quarterRange: (start: hourRange.start * 4, end: hourRange.end * 4),
                         eligibleHoursWindows: eligibleHoursWindows,
                         targetDate: targetDate,
@@ -595,6 +712,10 @@ struct DayTimelineGridView: View {
                         onSaveEvent: onSaveEvent,
                         onDeleteBlock: onDeleteBlock,
                         onPickReplacement: onPickReplacement,
+                        onToggleProjectedRecurringTaskOccurrence: { task, isCompleted in
+                            toggleRecurringTaskOccurrence(task: task, isCompleted: isCompleted)
+                        },
+                        habitStreaks: cachedHabitStreaks,
                         precedingContentHeight: twoMinuteSectionHeight + amSectionHeight,
                         scrollPosition: $scrollPosition,
                         scrollGeometry: scrollGeometry,
@@ -637,6 +758,14 @@ struct DayTimelineGridView: View {
         .onAppear {
             scrollToRoughlyNow()
         }
+        // Recomputes once per `targetDate` change (day navigation), not
+        // per body pass — see `cachedHabitStreaks`'s own doc comment.
+        .task(id: targetDate) {
+            refreshHabitStreaks()
+        }
+        .onChange(of: streakRefreshCoordinator.idleRefreshTick) { _, _ in
+            refreshHabitStreaks()
+        }
     }
 
     /// Scrolls to roughly an hour before the earliest thing on the
@@ -646,7 +775,7 @@ struct DayTimelineGridView: View {
     /// for Midday habits (see `middaySplitQuarter`).
     private func scrollToRoughlyNow() {
         let calendar = Calendar.current
-        let earliestHour = rows.map { calendar.component(.hour, from: $0.startTime) }.min() ?? 7
+        let earliestHour = materializedRows.map { calendar.component(.hour, from: $0.startTime) }.min() ?? 7
         let whole = visibleHourRange
         let targetHour = max(whole.start, earliestHour - 1)
         let targetQuarter = targetHour * 4
@@ -834,7 +963,7 @@ struct DayTimelineGridView: View {
                 ForEach(rows) { row in
                     switch row {
                     case .habit(let occurrence):
-                        occurrenceRow(name: occurrence.habit.name, isCompleted: occurrence.isCompleted) {
+                        occurrenceRow(name: occurrence.habit.name, isCompleted: occurrence.isCompleted, streak: cachedHabitStreaks[occurrence.habit.id]) {
                             toggleHabitOccurrence(habit: occurrence.habit, index: occurrence.index, isCompleted: occurrence.isCompleted)
                         }
                     case .recurringTask(let occurrence):
@@ -864,7 +993,7 @@ struct DayTimelineGridView: View {
     /// ever sets it) shows a small "Pushed" tag, so it's clear this row is
     /// here because of an earlier miss rather than today being one of
     /// this task's own recurrence days.
-    private func occurrenceRow(name: String, isCompleted: Bool, isPushed: Bool = false, onToggle: @escaping () -> Void) -> some View {
+    private func occurrenceRow(name: String, isCompleted: Bool, isPushed: Bool = false, streak: Int? = nil, onToggle: @escaping () -> Void) -> some View {
         Button(action: onToggle) {
             HStack(spacing: 10) {
                 // Same checkmark-circle look
@@ -890,6 +1019,11 @@ struct DayTimelineGridView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.primary)
                     .strikethrough(isCompleted)
+                if let streak {
+                    Text(Habit.signedText(streak))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(streakColor(streak))
+                }
                 if isPushed {
                     Text("Pushed")
                         .font(.caption2.weight(.semibold))
@@ -904,6 +1038,15 @@ struct DayTimelineGridView: View {
         }
         .buttonStyle(.plain)
         .opacity(isCompleted ? 0.5 : 1)
+    }
+
+    /// Same sign-to-color mapping `HabitsView` already uses for its own
+    /// streak display — kept consistent rather than reusing that view's
+    /// own private helper, which isn't visible from here.
+    private func streakColor(_ value: Int) -> Color {
+        if value > 0 { return .green }
+        if value < 0 { return .red }
+        return .secondary
     }
 
     /// Mirrors `HabitsView.toggleOccurrence`'s completion side (both
@@ -979,6 +1122,18 @@ private struct DayTimelineSegment: View {
     let onSaveEvent: (CalendarEventSummary) -> Void
     let onDeleteBlock: (ScheduledBlock) -> Void
     let onPickReplacement: (ScheduledBlock) -> Void
+    /// Toggles a `.projectedRecurringTask` row's completion — routed back
+    /// up to `DayTimelineGridView.toggleRecurringTaskOccurrence` (the same
+    /// function the AM/Midday/PM rows already use) rather than duplicating
+    /// `RecurringTaskLog` write logic here, since this struct has no
+    /// `modelContext` of its own. Same shape as `onSaveEvent`/
+    /// `onDeleteBlock`/`onPickReplacement` above.
+    let onToggleProjectedRecurringTaskOccurrence: (TaskItem, Bool) -> Void
+    /// `DayTimelineGridView.cachedHabitStreaks`, handed down so a
+    /// Specific-Time habit's own calendar block can show its streak too —
+    /// see that property's own doc comment for why this is a cache rather
+    /// than a live `Habit.currentStreak(asOf:)` call per row.
+    let habitStreaks: [UUID: Int]
     /// How much content sits above this segment's own ZStack inside the
     /// shared ScrollView — the parent's running total of every section
     /// (and, for the second segment of a split day, the first segment's
@@ -1778,6 +1933,11 @@ private struct DayTimelineSegment: View {
             } else {
                 actionsTargetBlock = block
             }
+        case .projectedRecurringTask(let occurrence):
+            // No real block to open an actions sheet for — the whole row
+            // just toggles completion, same as tapping the AM/Midday/PM
+            // occurrence rows above the grid already does.
+            onToggleProjectedRecurringTaskOccurrence(occurrence.task, occurrence.isCompleted)
         }
     }
 
@@ -2025,27 +2185,42 @@ private struct DayTimelineSegment: View {
             excluding: draggedRow.id
         )
 
-        let draggedRef: ScheduleReviewViewModel.TimelineEntryRef
+        // A projection is never draggable (`isLockedRow` reports it
+        // locked, which is what keeps `dragGesture` from ever starting one
+        // in the first place) — this `nil`/`guard` is defensive, not a
+        // real code path, since `draggedRow` structurally can't be one.
+        let draggedRef: ScheduleReviewViewModel.TimelineEntryRef?
         switch draggedRow {
         case .event(let event): draggedRef = .event(event.id)
         case .proposed(let block): draggedRef = .block(block.id)
+        case .projectedRecurringTask: draggedRef = nil
         }
+        guard let draggedRef else { return }
         var unlockedOrder: [ScheduleReviewViewModel.TimelineEntryRef] = rows.compactMap { entry in
             switch entry {
             case .event(let event):
                 return lockedStore.isLocked(event.id) ? nil : .event(event.id)
             case .proposed(let block):
                 return block.isLocked ? nil : .block(block.id)
+            case .projectedRecurringTask:
+                // No real block to reorder or ripple against.
+                return nil
             }
         }
         if preferSideBySide,
            let target = conflictingRow(for: draggedRow, at: adjustedStart) {
-            let targetRef: ScheduleReviewViewModel.TimelineEntryRef
+            // Same defensive note as `draggedRef` above — `conflictingRow`
+            // only ever returns an unlocked row, and a projection always
+            // reports locked, so `target` structurally can't be one either.
+            let targetRef: ScheduleReviewViewModel.TimelineEntryRef?
             switch target {
             case .event(let event): targetRef = .event(event.id)
             case .proposed(let block): targetRef = .block(block.id)
+            case .projectedRecurringTask: targetRef = nil
             }
-            unlockedOrder.removeAll { $0 == targetRef }
+            if let targetRef {
+                unlockedOrder.removeAll { $0 == targetRef }
+            }
         }
         withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
             viewModel.moveEntry(draggedRef, to: adjustedStart, among: unlockedOrder)
@@ -2138,6 +2313,15 @@ private struct DayTimelineSegment: View {
             // comment) — checked here too regardless, same defense-in-depth
             // the habit case already has, in case that ever changes.
             return block.isLocked || block.habit != nil || block.mealSelection != nil
+        case .projectedRecurringTask:
+            // Same reasoning as the habit case above, and for the same
+            // reason: there's no real block here to drag, ripple, swipe-
+            // delete, or replace — the only thing a projection can do is
+            // report its own day's completion. Reusing "locked" rather
+            // than adding a parallel concept is what makes every one of
+            // those gestures (all keyed off this same flag) disable
+            // themselves for free instead of needing their own case.
+            return true
         }
     }
 
@@ -2201,6 +2385,11 @@ private struct DayTimelineSegment: View {
                             .font(.caption.weight(.semibold))
                             .lineLimit(1)
                             .strikethrough(block.isCompleted)
+                        if let habit = block.habit, let streak = habitStreaks[habit.id] {
+                            Text(Habit.signedText(streak))
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(streakColor(streak))
+                        }
                         Text(timeRangeText(block.startTime, block.endTime))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
@@ -2208,10 +2397,17 @@ private struct DayTimelineSegment: View {
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(block.displayTitle)
-                            .font(.caption.weight(.semibold))
-                            .lineLimit(2)
-                            .strikethrough(block.isCompleted)
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(block.displayTitle)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(2)
+                                .strikethrough(block.isCompleted)
+                            if let habit = block.habit, let streak = habitStreaks[habit.id] {
+                                Text(Habit.signedText(streak))
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(streakColor(streak))
+                            }
+                        }
                         (Text(timeRangeText(block.startTime, block.endTime))
                             + Text(block.isEstimatedDuration ? " (Est Duration)" : "").italic())
                             .font(.caption2)
@@ -2268,19 +2464,82 @@ private struct DayTimelineSegment: View {
                 }
                 .padding(2)
             }
+        case .projectedRecurringTask(let occurrence):
+            // Dashed outline and no fill — deliberately the opposite
+            // visual weight of a real block's solid, shelf-colored card,
+            // so this never reads as "a task that's actually scheduled."
+            // The recurring-arrow icon reinforces the same thing at a
+            // glance: this is a standing pattern showing through on a day
+            // nothing has actually been placed on yet, not a commitment.
+            Group {
+                if isCompact {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(occurrence.task.title)
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
+                            .strikethrough(occurrence.isCompleted)
+                        Text(timeRangeText(occurrence.startTime, occurrence.endTime))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.caption2)
+                            Text(occurrence.task.title)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(2)
+                                .strikethrough(occurrence.isCompleted)
+                        }
+                        .foregroundStyle(occurrence.isCompleted ? .secondary : .primary)
+                        Text(timeRangeText(occurrence.startTime, occurrence.endTime))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(6)
+            .frame(maxWidth: .infinity, alignment: isCompact ? .leading : .topLeading)
+            .frame(height: height, alignment: isCompact ? .center : .top)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.4), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+            .opacity(occurrence.isCompleted ? 0.5 : 1)
+            .overlay(alignment: .topTrailing) {
+                completeCircle(isCompleted: occurrence.isCompleted) {
+                    onToggleProjectedRecurringTaskOccurrence(occurrence.task, occurrence.isCompleted)
+                }
+                .padding(2)
+            }
+        }
+    }
+
+    private func completeCircle(for block: ScheduledBlock) -> some View {
+        completeCircle(isCompleted: block.isCompleted) {
+            // Routed through the view model rather than toggling
+            // `isCompleted` directly — a habit-backed block needs its
+            // Habit Tracker log kept in sync too (see
+            // `ScheduleReviewViewModel.toggleComplete`).
+            viewModel.toggleComplete(block)
         }
     }
 
     /// Empty outline when incomplete, green fill + white checkmark when
     /// complete — same look as `OverdueBlocksReviewList`'s selection
-    /// circle, just sized for the card and wired straight to `isCompleted`
-    /// instead of a batch selection.
-    private func completeCircle(for block: ScheduledBlock) -> some View {
+    /// circle, just sized for the card. Generic over `isCompleted`/
+    /// `onToggle` (rather than taking a `ScheduledBlock` directly) so a
+    /// `.projectedRecurringTask` row — which has no block to read or
+    /// write — gets the exact same look and tap behavior as a real one.
+    private func completeCircle(isCompleted: Bool, onToggle: @escaping () -> Void) -> some View {
         ZStack {
             Circle()
-                .fill(block.isCompleted ? Color.green : Color.clear)
-                .overlay(Circle().strokeBorder(block.isCompleted ? Color.green : Color.secondary.opacity(0.7), lineWidth: 1.5))
-            if block.isCompleted {
+                .fill(isCompleted ? Color.green : Color.clear)
+                .overlay(Circle().strokeBorder(isCompleted ? Color.green : Color.secondary.opacity(0.7), lineWidth: 1.5))
+            if isCompleted {
                 Image(systemName: "checkmark")
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(.white)
@@ -2301,16 +2560,22 @@ private struct DayTimelineSegment: View {
         // genuine long-press-and-drag still works exactly as before: it
         // never satisfies a `TapGesture`'s own release-within-a-beat
         // criteria in the first place, so there's nothing for this to
-        // preempt.
+        // preempt. Still relevant for a projected row even though it's
+        // never draggable itself (`isLockedRow` disables that gesture
+        // outright) — the row's own `.onTapGesture { handleTap }` is the
+        // ancestor being preempted here, same as any other row.
         .highPriorityGesture(
-            TapGesture().onEnded {
-                // Routed through the view model rather than toggling
-                // `isCompleted` directly — a habit-backed block needs its
-                // Habit Tracker log kept in sync too (see
-                // `ScheduleReviewViewModel.toggleComplete`).
-                viewModel.toggleComplete(block)
-            }
+            TapGesture().onEnded(onToggle)
         )
+    }
+
+    /// Same sign-to-color mapping `HabitsView`/`DayTimelineGridView.occurrenceRow`
+    /// already use — duplicated rather than shared since this is a
+    /// separate, private type.
+    private func streakColor(_ value: Int) -> Color {
+        if value > 0 { return .green }
+        if value < 0 { return .red }
+        return .secondary
     }
 
     private func minutesSinceMidnight(_ date: Date) -> Int {

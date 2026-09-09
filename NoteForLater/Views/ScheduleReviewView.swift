@@ -148,7 +148,7 @@ struct ScheduleReviewView: View {
             // outside it here — so it scrolls away with the rest of the
             // timeline instead of staying pinned above it.
             DayTimelineGridView(
-                rows: timelineRows(viewModel: viewModel),
+                materializedRows: timelineRows(viewModel: viewModel),
                 eligibleHoursWindows: eligibleHoursWindows,
                 targetDate: viewModel.targetDate,
                 lockedStore: lockedStore,
@@ -572,11 +572,17 @@ struct ScheduleReviewView: View {
 enum DayTimelineRow: Identifiable {
     case event(CalendarEventSummary)
     case proposed(ScheduledBlock)
+    /// A Specific-Time recurring task occurrence with no real block yet —
+    /// see `ProjectedRecurringTaskOccurrence`'s own doc comment for why
+    /// this exists and how it stays visually/behaviorally distinct from
+    /// `.proposed`.
+    case projectedRecurringTask(ProjectedRecurringTaskOccurrence)
 
     var id: String {
         switch self {
         case .event(let event): return "event-\(event.id)"
         case .proposed(let block): return "block-\(block.id)"
+        case .projectedRecurringTask(let occurrence): return occurrence.id
         }
     }
 
@@ -584,6 +590,7 @@ enum DayTimelineRow: Identifiable {
         switch self {
         case .event(let event): return event.start
         case .proposed(let block): return block.startTime
+        case .projectedRecurringTask(let occurrence): return occurrence.startTime
         }
     }
 
@@ -591,6 +598,7 @@ enum DayTimelineRow: Identifiable {
         switch self {
         case .event(let event): return event.end
         case .proposed(let block): return block.endTime
+        case .projectedRecurringTask(let occurrence): return occurrence.endTime
         }
     }
 

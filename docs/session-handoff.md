@@ -126,6 +126,100 @@ with no `PushedRecurringOccurrence` ever created to carry it forward.
   in the same run, ruling out "the mechanism is just inert" as an
   alternative explanation for the clean result.
 
+### Specific-Time recurring task projection + habit streak display on the day calendar
+
+**Uncommitted as of this writing.**
+
+Reported symptom: recurring task occurrences stopped showing when
+navigating the day calendar forward to future days. Checked each mode
+before writing anything, per the investigation rules:
+
+- **AM/Midday/PM was already fine.** `openRecurringTaskOccurrences` reads
+  `TaskItem.hasRecurringOccurrence(on:)` — pure date math, no
+  `ScheduledBlock` dependency — confirmed directly from the source, not
+  assumed.
+- **Specific-Time was broken, but not for the reason first guessed.** The
+  working theory going in was "blocks are only generated for
+  today/tomorrow." Pulling the live device store showed that's wrong:
+  blocks already existed out to ~26 days ahead. **The real finding: it was
+  never a fixed horizon at all — it's whatever `regenerateFromNow`'s last
+  walk actually reached**, which is generation-*timing*-dependent, not
+  generation-*distance*-dependent. That walk can reach as little as
+  tomorrow (if it hasn't run recently) or as far as 44 days out
+  (`habitPopulationDays` + `taskStallThresholdDays`, if it has) — and
+  `viewModel.blocks` never generates on the fly when you simply navigate
+  to a day, so a Specific-Time occurrence's visibility depends entirely on
+  whether some *earlier, unrelated* regenerate walk happened to reach that
+  far, not on how many days out you're looking. This is the more useful
+  fact for whoever touches this next — "it can break as soon as tomorrow"
+  is a very different bug shape to chase than "it breaks past a fixed
+  cutoff."
+
+**Fix:** a display-time projection
+(`ScheduleReviewViewModel.projectedRecurringTaskOccurrences` /
+`DayTimelineRow.projectedRecurringTask`), not a materialized block —
+deliberately, since generating further ahead would change scheduling
+behavior/cost for every task, not just what one screen shows. Computed
+once per body pass (`DayTimelineGridView.body`, same reasoning as
+`computeOpenHabitOccurrenceLists`) and merged into the row list only for a
+task that doesn't already have a real block that day. Kept from being
+confused with a real block via the existing `isLockedRow` mechanism (the
+same one a habit-linked block already uses) — drag, swipe-delete, and the
+replace-menu tap all disable themselves through that one flag, no new
+per-gesture special-casing needed. Completion reads `RecurringTaskLog` per
+day, same as the untimed modes, so each day is independent by
+construction (completing today's occurrence never touches tomorrow's).
+
+**Deliberate divergence from the rest of the app — do not "fix" back to
+the general convention:** everywhere else, a completed row/block stays
+visible (faded, struck through) as a record of what was actually done. A
+completed occurrence on a *future* day is hidden entirely instead
+(`projectedRecurringTaskOccurrences`'s `isFutureDay` guard) — a day that
+hasn't happened yet has nothing to keep a record of, so a pre-completed
+occurrence sitting there is just noise. Today's own completed occurrence
+still shows, same as everywhere else; only strictly-future days hide it.
+
+**Known issue, left deliberately unfixed — more likely to bite now than
+before the divergence above:** a real Specific-Time `ScheduledBlock`
+tracks completion on `block.isCompleted` and never reads
+`RecurringTaskLog` at all — that store has otherwise always been exclusive
+to the untimed (AM/Midday/PM) modes. A *projected* future occurrence's
+completion, though, is recorded in `RecurringTaskLog` (there's nothing
+else to write it to). If a real block later gets generated for a day
+whose projection was already completed — e.g. a `regenerateFromNow` walk
+finally reaches that far — the new block starts with `isCompleted =
+false` and the earlier completion is silently orphaned; nothing in
+`AISchedulingService`'s block-creation path ever consults
+`RecurringTaskLog` when creating one. Fixing it means teaching Specific-
+Time block creation to check `RecurringTaskLog` for that task/day and
+seed `isCompleted` from it — deliberately not done here, since that's
+touching the scheduling engine's own block-creation path for what's
+fundamentally a display-layer feature. **Before the hide-on-future-
+completion change above, this was at least visible** (the stale-but-
+completed projection kept showing faded, so a mismatch would have been
+noticeable if anyone looked closely). Now that a completed future
+projection is hidden, the orphaning is invisible until the real block
+eventually appears looking uncompleted, out of nowhere, with no
+on-screen trail back to the earlier completion. Whoever hits this will
+have no lead — worth fixing before it's reported as its own mystery bug.
+
+Tests: `NoteForLaterTests/DayTimelineProjectionAndStreakTests.swift`.
+Fail-then-pass verified on the future-day-with-no-block case, the
+day-independence case, and the hide-on-future-completion case.
+
+Habit streaks (`Habit.currentStreak(asOf:)`, already-signed
+`HabitStats.currentStreakDisplay` — no new streak math) were added to the
+same screen's habit rows (both AM/Midday/PM occurrence rows and
+Specific-Time habit blocks) the same visit, since it touched the same
+file and the same "don't add per-row cost to this view's body" concern.
+Cached (`DayTimelineGridView.cachedHabitStreaks`), refreshed once per
+`targetDate` change and via the existing `HabitStatsRefreshCoordinator`
+idle tick — never computed inline per row. Unlike `HabitsTodayView`'s own
+cache (deliberately "as of right now" regardless of which day its date
+nav shows), this one **is** keyed to `targetDate`, per the explicit ask —
+so it does genuinely recompute on every day-navigation, just not on every
+tap/body-pass.
+
 ### StepAutoSkip
 
 Nightly Review auto-skips empty 2-Minute Tasks / Inbox / At Risk / Meals
