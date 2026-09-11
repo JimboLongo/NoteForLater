@@ -12,6 +12,7 @@
 		998F418406E40339E31F12AA /* DayTimelineProjectionAndStreakTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0419204E4EC0C5A53F4420DE /* DayTimelineProjectionAndStreakTests.swift */; };
 		F14B3888D0BF179BB461520B /* MissedHabitVisibilityAndReviewCutoffTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0BA0889A77DCF1B6300805D /* MissedHabitVisibilityAndReviewCutoffTests.swift */; };
 		3F96A71DA7BEB7B66B1CAAA0 /* NightlyReviewHabitCycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A19E8555D501762377B5BDB /* NightlyReviewHabitCycleTests.swift */; };
+		F0C2441333B98937013CAB4B /* NightlyReviewSortOrderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DADF01ABFE13BFE9781BE123 /* NightlyReviewSortOrderTests.swift */; };
 		11C9C180B9449F181FC4A6EA /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1FE8D30E50874F1CFBC6C2DA /* Foundation.framework */; };
 		5020DD4813CD545554230040 /* OpenFoodFactsServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09BD699B348D80CB6806E2B9 /* OpenFoodFactsServiceTests.swift */; };
 		69161A13195235691F23449B /* PantryDeductionServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DACE29CB1AB1502A34BCD4F0 /* PantryDeductionServiceTests.swift */; };
@@ -52,6 +53,7 @@
 		0419204E4EC0C5A53F4420DE /* DayTimelineProjectionAndStreakTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DayTimelineProjectionAndStreakTests.swift; sourceTree = "<group>"; };
 		D0BA0889A77DCF1B6300805D /* MissedHabitVisibilityAndReviewCutoffTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MissedHabitVisibilityAndReviewCutoffTests.swift; sourceTree = "<group>"; };
 		8A19E8555D501762377B5BDB /* NightlyReviewHabitCycleTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NightlyReviewHabitCycleTests.swift; sourceTree = "<group>"; };
+		DADF01ABFE13BFE9781BE123 /* NightlyReviewSortOrderTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NightlyReviewSortOrderTests.swift; sourceTree = "<group>"; };
 		DACE29CB1AB1502A34BCD4F0 /* PantryDeductionServiceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PantryDeductionServiceTests.swift; sourceTree = "<group>"; };
 		90FF46E7544F4142BA6ABA3C /* RecurringTaskReviewTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecurringTaskReviewTests.swift; sourceTree = "<group>"; };
 		CC96AD75D7A2490F81BD3A53 /* NightlyReviewAutoSkipTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NightlyReviewAutoSkipTests.swift; sourceTree = "<group>"; };
@@ -119,6 +121,7 @@
 				0419204E4EC0C5A53F4420DE /* DayTimelineProjectionAndStreakTests.swift */,
 				D0BA0889A77DCF1B6300805D /* MissedHabitVisibilityAndReviewCutoffTests.swift */,
 				8A19E8555D501762377B5BDB /* NightlyReviewHabitCycleTests.swift */,
+				DADF01ABFE13BFE9781BE123 /* NightlyReviewSortOrderTests.swift */,
 				09BD699B348D80CB6806E2B9 /* OpenFoodFactsServiceTests.swift */,
 				1EEEA0F8829F20DBDC58BF32 /* MealSuggestionServiceTests.swift */,
 				8CEFFCE3E6ACC74FC7D7BF6A /* RecipeIngredientParserTests.swift */,
@@ -261,6 +264,7 @@
 				998F418406E40339E31F12AA /* DayTimelineProjectionAndStreakTests.swift in Sources */,
 				F14B3888D0BF179BB461520B /* MissedHabitVisibilityAndReviewCutoffTests.swift in Sources */,
 				3F96A71DA7BEB7B66B1CAAA0 /* NightlyReviewHabitCycleTests.swift in Sources */,
+				F0C2441333B98937013CAB4B /* NightlyReviewSortOrderTests.swift in Sources */,
 				5020DD4813CD545554230040 /* OpenFoodFactsServiceTests.swift in Sources */,
 				A85A179B079F60FD5A4043E9 /* MealSuggestionServiceTests.swift in Sources */,
 				6B282F81F54E6AE9014E0FE8 /* RecipeIngredientParserTests.swift in Sources */,

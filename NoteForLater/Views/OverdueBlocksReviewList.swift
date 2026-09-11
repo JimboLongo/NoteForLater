@@ -74,7 +74,11 @@ enum ReviewItem: Identifiable {
         }
     }
 
-    fileprivate var day: Date {
+    // `internal` (not `fileprivate`) so `NightlyReviewSortOrderTests` can
+    // exercise the real sort logic in `groupedByDay` directly, rather than
+    // duplicating it in test code — a duplicated comparator could drift
+    // from the real one and pass while the real one regresses.
+    var day: Date {
         let calendar = Calendar.current
         switch self {
         case .block(let block): return calendar.startOfDay(for: block.date)
@@ -91,7 +95,7 @@ enum ReviewItem: Identifiable {
     /// scheduled or completed at: these read as "already cleared out of
     /// the way," not as competing with the day's actual timed habits and
     /// tasks for a position among them.
-    fileprivate var sortTime: Date {
+    var sortTime: Date {
         switch self {
         case .block(let block):
             if block.task?.shelf?.isTwoMinuteTasks == true {
@@ -108,19 +112,16 @@ enum ReviewItem: Identifiable {
         }
     }
 
-    /// True only for a habit occurrence at any status other than `.none`
-    /// — since `allHabitOccurrencesForReview` started admitting every
-    /// status (not just still-open ones), a day's resolved and unresolved
-    /// habits would otherwise interleave purely by `sortTime`, burying an
-    /// unresolved 6am habit under a resolved 9pm one from the same day.
-    /// Used by `groupedByDay` to push resolved habits to the end of their
-    /// day, after everything still needing attention, without touching
-    /// how blocks/meals/completed-tasks already sort (all `false` here,
-    /// same as before this existed — see `groupedByDay`'s own comment for
-    /// why those keep their established fade-in-place behavior instead).
-    fileprivate var isResolvedHabit: Bool {
-        if case .habit(let occurrence) = self { return occurrence.status != .none }
-        return false
+    /// The habit's own `sortOrder` — same field `openHabitOccurrences`
+    /// already sorts by — for `.habit` items only; `nil` for everything
+    /// else. Purely a same-`sortTime` tiebreak (see `groupedByDay`), so
+    /// two AM habits stay in a stable, predictable order regardless of
+    /// which one gets cycled — a habit's position must never depend on
+    /// its own status, only on its time mode and its place among habits
+    /// sharing that mode.
+    var habitSortOrder: Int? {
+        if case .habit(let occurrence) = self { return occurrence.habit.sortOrder }
+        return nil
     }
 }
 
@@ -165,28 +166,38 @@ struct OverdueBlocksReviewList: View {
     /// to reading the model directly, unchanged from before this existed.
     var isEffectivelyCompleted: ((ReviewItem) -> Bool)? = nil
 
-    private struct DayGroup: Identifiable {
+    // `internal` for the same testability reason as `ReviewItem`'s sort
+    // fields above.
+    struct DayGroup: Identifiable {
         let day: Date
         var id: Date { day }
         let items: [ReviewItem]
     }
 
-    /// Within a day, resolved habits (see `ReviewItem.isResolvedHabit`)
-    /// sort after everything else, itself by `sortTime` — so a habit
-    /// already checked off, missed, or excused before the review opened
-    /// doesn't bury an unresolved item earlier in the day underneath it.
-    /// Blocks/meals/completed-tasks are untouched: `isResolvedHabit` is
-    /// `false` for all of them, so among themselves (and relative to any
-    /// unresolved habit) they keep the exact same pure-`sortTime` order
-    /// they've always had — a completed block still just fades in place
-    /// rather than jumping to the end of its day, which is a different,
-    /// already-established convention this doesn't change.
-    private var groupedByDay: [DayGroup] {
+    /// Within a day, everything sorts by `sortTime` alone, regardless of
+    /// status — a habit's position must stay fixed while working down the
+    /// list, so tapping it complete/missed/excused can never move it
+    /// (an earlier version pushed resolved habits to the end of their
+    /// day; that made the list shift under the reviewer's finger, which
+    /// is worse than a completed item just sitting inline). `sortTime`
+    /// for a habit occurrence is a stand-in built from its
+    /// `HabitOccurrenceTimeMode` (see `ScheduleReviewViewModel
+    /// .targetMinutes`: AM=6am, Midday=noon, PM=9pm), so AM/Midday/PM
+    /// order is explicit and deterministic, not incidental. When two
+    /// items land on the exact same `sortTime` — two habits sharing a
+    /// time mode — `habitSortOrder` breaks the tie using the habit's own
+    /// `sortOrder`, the same field `openHabitOccurrences` sorts by, so
+    /// two AM habits keep a stable relative order. Non-habit ties (or a
+    /// habit tied against a block/meal/completed-task) fall through to
+    /// `sorted`'s stability, preserving `items`' own order — the same as
+    /// before any of this existed.
+    var groupedByDay: [DayGroup] {
         let byDay = Dictionary(grouping: items) { $0.day }
         return byDay
             .map { DayGroup(day: $0.key, items: $0.value.sorted {
-                if $0.isResolvedHabit != $1.isResolvedHabit { return !$0.isResolvedHabit }
-                return $0.sortTime < $1.sortTime
+                if $0.sortTime != $1.sortTime { return $0.sortTime < $1.sortTime }
+                if let lhs = $0.habitSortOrder, let rhs = $1.habitSortOrder { return lhs < rhs }
+                return false
             }) }
             .sorted { $0.day < $1.day }
     }
