@@ -107,6 +107,21 @@ enum ReviewItem: Identifiable {
         case .meal(_, let targetTime): return targetTime
         }
     }
+
+    /// True only for a habit occurrence at any status other than `.none`
+    /// — since `allHabitOccurrencesForReview` started admitting every
+    /// status (not just still-open ones), a day's resolved and unresolved
+    /// habits would otherwise interleave purely by `sortTime`, burying an
+    /// unresolved 6am habit under a resolved 9pm one from the same day.
+    /// Used by `groupedByDay` to push resolved habits to the end of their
+    /// day, after everything still needing attention, without touching
+    /// how blocks/meals/completed-tasks already sort (all `false` here,
+    /// same as before this existed — see `groupedByDay`'s own comment for
+    /// why those keep their established fade-in-place behavior instead).
+    fileprivate var isResolvedHabit: Bool {
+        if case .habit(let occurrence) = self { return occurrence.status != .none }
+        return false
+    }
 }
 
 /// Live "mark complete" review mixing calendar blocks and untimed habit
@@ -156,10 +171,23 @@ struct OverdueBlocksReviewList: View {
         let items: [ReviewItem]
     }
 
+    /// Within a day, resolved habits (see `ReviewItem.isResolvedHabit`)
+    /// sort after everything else, itself by `sortTime` — so a habit
+    /// already checked off, missed, or excused before the review opened
+    /// doesn't bury an unresolved item earlier in the day underneath it.
+    /// Blocks/meals/completed-tasks are untouched: `isResolvedHabit` is
+    /// `false` for all of them, so among themselves (and relative to any
+    /// unresolved habit) they keep the exact same pure-`sortTime` order
+    /// they've always had — a completed block still just fades in place
+    /// rather than jumping to the end of its day, which is a different,
+    /// already-established convention this doesn't change.
     private var groupedByDay: [DayGroup] {
         let byDay = Dictionary(grouping: items) { $0.day }
         return byDay
-            .map { DayGroup(day: $0.key, items: $0.value.sorted { $0.sortTime < $1.sortTime }) }
+            .map { DayGroup(day: $0.key, items: $0.value.sorted {
+                if $0.isResolvedHabit != $1.isResolvedHabit { return !$0.isResolvedHabit }
+                return $0.sortTime < $1.sortTime
+            }) }
             .sorted { $0.day < $1.day }
     }
 

@@ -214,4 +214,137 @@ final class NightlyReviewHabitCycleTests: XCTestCase {
 
         XCTAssertTrue(sweepCandidates.contains { $0.habit.id == habit.id }, "an untouched .none occurrence must still be swept, same as today")
     }
+
+    // MARK: - allHabitOccurrencesForReview: every status, not just .none
+
+    private func allOccurrences(habits: [Habit], reviewDay: Date, completedSince: Date?) -> [HabitReviewOccurrence] {
+        ScheduleReviewViewModel.allHabitOccurrencesForReview(
+            habits: habits, context: context, upTo: reviewDay.addingTimeInterval(86400), completedSince: completedSince, calendar: calendar
+        )
+    }
+
+    /// The reported gap, fixed: a habit completed *before* the review ever
+    /// opened must still appear — in its actual state, not hidden the way
+    /// the `.none`-only operational list would hide it.
+    ///
+    /// Verified fail-then-pass: with `allHabitOccurrencesForReview`
+    /// temporarily reverted to re-apply a `status == .none` filter (the
+    /// exact "just widen the operational filter" mistake this task warned
+    /// against, simulated here on the *new* function instead), this test
+    /// failed — the completed habit was absent, reproducing "never shows
+    /// up at all." Restored the real, unfiltered function and reran:
+    /// green. Both via `xcodebuild test`.
+    func test_allHabitOccurrencesForReview_completedBeforeReviewOpened_stillAppears() {
+        let reviewDay = day(2026, 9, 9)
+        let habit = makeHabit(name: "Read", mode: .midday, startDate: reviewDay)
+        habit.cycleOccurrence(0, on: reviewDay, context: context, calendar: calendar) // -> complete, "earlier today"
+
+        let result = allOccurrences(habits: [habit], reviewDay: reviewDay, completedSince: day(2026, 9, 8))
+
+        XCTAssertEqual(result.first { $0.habit.id == habit.id }?.status, .complete)
+    }
+
+    func test_allHabitOccurrencesForReview_missedBeforeReviewOpened_stillAppears() {
+        let reviewDay = day(2026, 9, 9)
+        let habit = makeHabit(name: "Floss", mode: .midday, startDate: reviewDay)
+        habit.cycleOccurrence(0, on: reviewDay, context: context, calendar: calendar) // -> complete
+        habit.cycleOccurrence(0, on: reviewDay, context: context, calendar: calendar) // -> missed
+
+        let result = allOccurrences(habits: [habit], reviewDay: reviewDay, completedSince: day(2026, 9, 8))
+
+        XCTAssertEqual(result.first { $0.habit.id == habit.id }?.status, .missed)
+    }
+
+    func test_allHabitOccurrencesForReview_excusedBeforeReviewOpened_stillAppears() {
+        let reviewDay = day(2026, 9, 9)
+        let habit = makeHabit(name: "Water plants", mode: .midday, startDate: reviewDay)
+        habit.cycleOccurrence(0, on: reviewDay, context: context, calendar: calendar) // -> complete
+        habit.cycleOccurrence(0, on: reviewDay, context: context, calendar: calendar) // -> missed
+        habit.cycleOccurrence(0, on: reviewDay, context: context, calendar: calendar) // -> excused
+
+        let result = allOccurrences(habits: [habit], reviewDay: reviewDay, completedSince: day(2026, 9, 8))
+
+        XCTAssertEqual(result.first { $0.habit.id == habit.id }?.status, .excused)
+    }
+
+    /// A resolved occurrence from *before* the last closed review must
+    /// not flood back in — the bound that keeps a long-running habit's
+    /// entire history from appearing in every future review.
+    func test_allHabitOccurrencesForReview_oldResolvedOccurrence_isBoundedByCompletedSince() {
+        let habitStart = day(2026, 8, 1)
+        let oldDay = day(2026, 8, 15)
+        let reviewDay = day(2026, 9, 9)
+        let habit = makeHabit(name: "Ancient habit", mode: .midday, startDate: habitStart)
+        habit.cycleOccurrence(0, on: oldDay, context: context, calendar: calendar) // -> complete, weeks ago
+
+        // completedSince is *after* oldDay, so that old completion is
+        // already-handled history, not something tonight's review needs
+        // to show again. Every other day between habitStart and reviewDay
+        // is still `.none` (unbounded, so it legitimately appears too —
+        // see the next test) — this checks specifically for `oldDay`'s
+        // own entry, not just "does this habit appear at all."
+        let result = allOccurrences(habits: [habit], reviewDay: reviewDay, completedSince: day(2026, 9, 1))
+
+        XCTAssertFalse(
+            result.contains { $0.habit.id == habit.id && Calendar.current.isDate($0.targetTime, inSameDayAs: oldDay) },
+            "a resolved occurrence from before the last closed review must not flood back in"
+        )
+    }
+
+    /// An unresolved (`.none`) occurrence has no such bound — still open
+    /// backlog keeps showing regardless of age, exactly as
+    /// `openHabitOccurrencesForReview` already does.
+    func test_allHabitOccurrencesForReview_oldUnresolvedOccurrence_isNotBoundedByCompletedSince() {
+        let habitStart = day(2026, 8, 1)
+        let reviewDay = day(2026, 9, 9)
+        let habit = makeHabit(name: "Long overdue habit", mode: .midday, startDate: habitStart)
+        // Never touched — still .none since habitStart.
+
+        let result = allOccurrences(habits: [habit], reviewDay: reviewDay, completedSince: day(2026, 9, 1))
+
+        XCTAssertTrue(result.contains { $0.habit.id == habit.id && Calendar.current.isDate($0.targetTime, inSameDayAs: habitStart) })
+    }
+
+    // MARK: - The operational filter is unchanged
+
+    /// Pins `openHabitOccurrencesForReview` (the operational list) to
+    /// exactly `.none` — given all four statuses on the same day, only the
+    /// `.none` one may appear. A future widening of that filter (the exact
+    /// thing this task explicitly forbade) fails this test.
+    ///
+    /// This is the guardrail for "What actually protects the untimed path"
+    /// (see the scheduling spec): that filter, not the sweep's own guard, is
+    /// what stops a resolved occurrence from ever being overwritten, because
+    /// it runs before the sweep ever sees the candidate list. If someone
+    /// widens this filter later to make a display feature easier and this
+    /// test is in their way, that's the signal to build a separate display
+    /// function instead (see `allHabitOccurrencesForReview`) — do not delete
+    /// or loosen this test to make room for that change.
+    ///
+    /// Verified fail-then-pass: with the operational filter's guard
+    /// temporarily widened to `status == .none || status == .complete`,
+    /// this test failed — a completed occurrence appeared in the
+    /// operational list, which is exactly what must never happen. Restored
+    /// the real, unwidened filter and reran: green. Both via `xcodebuild
+    /// test`.
+    func test_openHabitOccurrencesForReview_onlyEverReturnsNoneStatus() {
+        let reviewDay = day(2026, 9, 9)
+        let completedHabit = makeHabit(name: "Complete", mode: .am, startDate: reviewDay)
+        completedHabit.cycleOccurrence(0, on: reviewDay, context: context, calendar: calendar)
+        let missedHabit = makeHabit(name: "Missed", mode: .midday, startDate: reviewDay)
+        missedHabit.cycleOccurrence(0, on: reviewDay, context: context, calendar: calendar)
+        missedHabit.cycleOccurrence(0, on: reviewDay, context: context, calendar: calendar)
+        let excusedHabit = makeHabit(name: "Excused", mode: .pm, startDate: reviewDay)
+        excusedHabit.cycleOccurrence(0, on: reviewDay, context: context, calendar: calendar)
+        excusedHabit.cycleOccurrence(0, on: reviewDay, context: context, calendar: calendar)
+        excusedHabit.cycleOccurrence(0, on: reviewDay, context: context, calendar: calendar)
+        let noneHabit = makeHabit(name: "None", mode: .midday, startDate: reviewDay)
+
+        let result = ScheduleReviewViewModel.openHabitOccurrencesForReview(
+            habits: [completedHabit, missedHabit, excusedHabit, noneHabit], context: context, upTo: reviewDay.addingTimeInterval(86400)
+        )
+
+        XCTAssertTrue(result.allSatisfy { $0.status == .none }, "the operational list must never return anything but .none")
+        XCTAssertEqual(result.map(\.habit.id), [noneHabit.id], "only the untouched habit should be a sweep candidate")
+    }
 }

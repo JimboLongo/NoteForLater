@@ -1985,6 +1985,10 @@ final class ScheduleReviewViewModel {
         }
     }
 
+    /// **Operational list — governs what the sweep acts on.** Do not
+    /// widen this to admit more statuses for display purposes; see
+    /// `allHabitOccurrencesForReview` below for that.
+    ///
     /// AM/Midday/PM habit occurrences (see `HabitOccurrenceTimeMode`)
     /// genuinely still open (`.none`) as of `cutoff`, PLUS any occurrence
     /// whose id appears in `alsoInclude` regardless of its current status
@@ -2105,20 +2109,91 @@ final class ScheduleReviewViewModel {
         return result
     }
 
-    /// `NightlyReviewView.openHabitOccurrencesForReview`'s core logic,
-    /// extracted so it's unit-testable without constructing a live view.
-    /// Re-derives each `frozen` occurrence's `status` fresh, right now,
-    /// rather than trusting whatever it was at the moment `frozen` was
-    /// captured — this is the "live" half of the frozen-snapshot design
-    /// that keeps a Nightly Review habit row visible (frozen identity)
-    /// while still showing whichever of the four states it's actually in
-    /// right now (live status), rather than the state it was in when the
-    /// step was entered. `frozen` itself must still come from a genuinely
-    /// live, filtered call to `openHabitOccurrencesForReview` at the
-    /// moment the step is entered — freezing *that* call instead of just
-    /// its result would remove the `status == .none` filter's protection,
-    /// not just its display twitchiness (see the spec's "What actually
-    /// protects the untimed path").
+    /// **Display list — every habit occurrence, any status.** The
+    /// counterpart to `openHabitOccurrencesForReview` (the **operational**
+    /// list, `.none`-only) below: this one has no status filter at all,
+    /// so a habit already resolved (complete/missed/excused) before
+    /// tonight's review ever opened still shows up, in whatever state
+    /// it's actually in, instead of being invisible the way the filtered
+    /// list would make it. Otherwise structurally identical — same
+    /// backward day-scan (bounded by each habit's own `startDate`, capped
+    /// at 400 days back), same `targetTime < cutoff` bound, same `.specific`
+    /// exclusion.
+    ///
+    /// A resolved occurrence (anything but `.none`) is further bounded to
+    /// `cursor > completedSinceDay` — the same "strictly after the day the
+    /// previous review closed" rule `openHabitOccurrencesForReview`'s own
+    /// `completedRecently` already uses for `.complete`, generalized here
+    /// to all three resolved statuses. Without this, a long-running habit
+    /// with months of `.complete` days behind it would flood *every*
+    /// future review with its entire history the backward scan can reach —
+    /// the same 400-day floor that's appropriate for "how far back could
+    /// an unresolved backlog item still matter" is very much not
+    /// appropriate for "how far back should an already-handled day keep
+    /// reappearing." An unresolved (`.none`) occurrence has no such bound —
+    /// it's still open, so it keeps showing regardless of age, same as
+    /// today. `completedSinceDay == nil` (no review has ever closed) falls
+    /// back to `.distantPast`, i.e. no bound — acceptable only because
+    /// it's a one-time, first-ever-review edge case.
+    ///
+    /// **Never used to decide what gets swept — this is a parallel,
+    /// independent function, not a modification of the operational one.**
+    /// `markUnresolvedHabitOccurrencesAsMissed` must keep calling
+    /// `openHabitOccurrencesForReview` directly, live and unfrozen; only
+    /// *that* filter is what actually protects the untimed path from
+    /// corruption (see the spec's "What actually protects the untimed
+    /// path") — weakening or bypassing it, even by feeding the sweep from
+    /// this function instead, would reopen exactly what it protects
+    /// against, regardless of any guard downstream. This function exists
+    /// solely to feed `NightlyReviewView.frozenTodayHabitOccurrences`, the
+    /// display-only frozen snapshot.
+    static func allHabitOccurrencesForReview(habits: [Habit], context: ModelContext, upTo cutoff: Date = .now, completedSince: Date?, calendar: Calendar = .current) -> [HabitReviewOccurrence] {
+        let cutoffDay = calendar.startOfDay(for: cutoff)
+        let completedSinceDay = calendar.startOfDay(for: completedSince ?? .distantPast)
+        var result: [HabitReviewOccurrence] = []
+        for habit in habits {
+            let earliestDay = calendar.startOfDay(for: habit.startDate)
+            let scanFloorDay = calendar.date(byAdding: .day, value: -400, to: cutoffDay) ?? earliestDay
+            let boundedEarliestDay = max(earliestDay, scanFloorDay)
+            guard boundedEarliestDay <= cutoffDay else { continue }
+
+            var cursor = cutoffDay
+            while cursor >= boundedEarliestDay {
+                if habit.isApplicable(on: cursor, calendar: calendar) {
+                    for index in 0..<max(habit.timesPerDay, 1) {
+                        let mode = habit.timeMode(for: index)
+                        guard mode != .specific else { continue }
+                        let targetTime = calendar.date(byAdding: .minute, value: targetMinutes(for: mode), to: cursor) ?? cursor
+                        guard targetTime < cutoff else { continue }
+                        let status = habit.occurrenceStatus(index, on: cursor, context: context, calendar: calendar)
+                        guard status == .none || cursor > completedSinceDay else { continue }
+                        let id = "\(habit.id)-\(index)-\(Int(cursor.timeIntervalSince1970))"
+                        result.append(HabitReviewOccurrence(id: id, habit: habit, index: index, status: status, targetTime: targetTime, modeLabel: mode.label))
+                    }
+                }
+                guard let previousDay = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
+                cursor = previousDay
+            }
+        }
+        return result
+    }
+
+    /// **Operational list — `.none` only.** `NightlyReviewView
+    /// .openHabitOccurrencesForReview`'s core logic (the display-side
+    /// wrapper of the same name), extracted so it's unit-testable without
+    /// constructing a live view. Re-derives each `frozen` occurrence's
+    /// `status` fresh, right now, rather than trusting whatever it was at
+    /// the moment `frozen` was captured — this is the "live" half of the
+    /// frozen-snapshot design that keeps a Nightly Review habit row
+    /// visible (frozen identity) while still showing whichever of the
+    /// four states it's actually in right now (live status), rather than
+    /// the state it was in when the step was entered. `frozen` itself now
+    /// comes from `allHabitOccurrencesForReview` (every status) rather
+    /// than this file's own `openHabitOccurrencesForReview` (`.none`
+    /// only) — freezing the *filtered* call's result would have meant an
+    /// already-resolved habit never entered the frozen set to begin with,
+    /// which is the exact gap `allHabitOccurrencesForReview` exists to
+    /// close.
     static func refreshedHabitReviewOccurrences(frozen: [HabitReviewOccurrence], context: ModelContext, calendar: Calendar = .current) -> [HabitReviewOccurrence] {
         frozen.map { occurrence in
             let day = calendar.startOfDay(for: occurrence.targetTime)

@@ -66,22 +66,29 @@ struct NightlyReviewView: View {
     @State private var stagedTodayToggleIDs = Set<String>()
     /// Which habit occurrences the Today step is reviewing, frozen the
     /// moment the step is entered (`runEntryEffects(for: .today)`) rather
-    /// than re-derived from `ScheduleReviewViewModel
-    /// .openHabitOccurrencesForReview` on every render. Habit rows cycle
-    /// through the full four-state sequence via `Habit.cycleOccurrence`
-    /// (see `cycleHabitReviewOccurrence`), writing immediately rather than
-    /// staging like `stagedTodayToggleIDs` — the moment a row advances
-    /// past `.none`, that live function's own `status == .none` filter
-    /// would otherwise drop it, making the row vanish mid-cycle with no
-    /// way to tap it back out. This is a **display-only** fix layered on
-    /// top of that filter, not a replacement for it: the filter still runs
-    /// fresh, unfrozen, everywhere it actually protects something —
-    /// `markUnresolvedHabitOccurrencesAsMissed`'s own sweep calls the live
-    /// function directly and must keep doing so (see the spec's "What
-    /// actually protects the untimed path"). This frozen list only decides
-    /// which *rows this screen renders*; each row's own displayed status
-    /// is still read live (see the `openHabitOccurrencesForReview`
-    /// computed property below), so a row correctly shows whichever state
+    /// than re-derived on every render. Sourced from `ScheduleReviewViewModel
+    /// .allHabitOccurrencesForReview` — the **display** list, every status,
+    /// not `.openHabitOccurrencesForReview` (the **operational** list,
+    /// `.none` only, what the sweep acts on) — so a habit already resolved
+    /// before the step ever opened is part of the frozen set too, not just
+    /// the ones still open. Habit rows cycle through the full four-state
+    /// sequence via `Habit.cycleOccurrence` (see `cycleHabitReviewOccurrence`),
+    /// writing immediately rather than staging like `stagedTodayToggleIDs`
+    /// — the moment a row advances past `.none`, the operational list's
+    /// own `status == .none` filter would otherwise drop it, making the
+    /// row vanish mid-cycle with no way to tap it back out. This is a
+    /// **display-only** fix layered on top of that filter, not a
+    /// replacement for it: the filter still runs fresh, unfrozen,
+    /// everywhere it actually protects something —
+    /// `markUnresolvedHabitOccurrencesAsMissed`'s own sweep calls
+    /// `openHabitOccurrencesForReview` directly and must keep doing so
+    /// (see the spec's "What actually protects the untimed path"). This
+    /// frozen list only decides which *rows this screen renders*; each
+    /// row's own displayed status is still read live (see the
+    /// `openHabitOccurrencesForReview` computed property below — same
+    /// name as the operational list on purpose, since it's this view's
+    /// own display-facing wrapper around the frozen set, not the
+    /// operational list itself), so a row correctly shows whichever state
     /// it's actually in right now, not its state at the moment of freezing.
     ///
     /// **Do not "simplify" this by freezing each occurrence's `status`
@@ -400,10 +407,15 @@ struct NightlyReviewView: View {
             stagedTwoMinuteToggleIDs = []
             // Frozen exactly once, on entry — see `frozenTodayHabitOccurrences`'s
             // own doc comment for why this can't just be re-derived live on
-            // every render the way it used to be. Same call the display
-            // property below used to make directly; the only change is
-            // *when* it's made.
-            frozenTodayHabitOccurrences = ScheduleReviewViewModel.openHabitOccurrencesForReview(
+            // every render the way it used to be. Deliberately
+            // `allHabitOccurrencesForReview` (every status), not
+            // `openHabitOccurrencesForReview` (`.none` only, what the sweep
+            // acts on) — freezing the *filtered* call's result would mean
+            // a habit already resolved before the step opened never
+            // entered the frozen set in the first place, the exact gap
+            // this exists to close. See both functions' own doc comments
+            // for the display/operational split.
+            frozenTodayHabitOccurrences = ScheduleReviewViewModel.allHabitOccurrencesForReview(
                 habits: allHabits,
                 context: modelContext,
                 upTo: reviewDisplayCutoff,
