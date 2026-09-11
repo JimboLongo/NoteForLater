@@ -2035,6 +2035,43 @@ final class ScheduleReviewViewModel {
     /// *already* closed out by the previous review session — a habit
     /// completed on that day was already surfaced and handled then, so
     /// including it again here would leak it into one extra review cycle.
+    /// `NightlyReviewView.reviewCutoff`/`.reviewDisplayCutoff`'s shared
+    /// formula — extracted purely for testability (matching
+    /// `projectedRecurringTaskOccurrences`'s `today` parameter reasoning),
+    /// since both properties are otherwise private `View` state. The two
+    /// were deliberately different once: `reviewCutoff` used to clamp to
+    /// `min(.now, dayEnd)` so an operational decision (mark missed, clear
+    /// a stale block) never acted on a time that hadn't happened yet.
+    /// That clamp is gone now — see `NightlyReviewView.reviewCutoff`'s own
+    /// doc comment for why treating a not-yet-passed time as still
+    /// "elapsed" once you're doing the Today→Tomorrow handoff is the
+    /// correct call, not a bug — so this is now a pure function of
+    /// `reviewDate` alone, the end of that day, full stop.
+    static func nightlyReviewOperationalCutoff(reviewDate: Date, calendar: Calendar = .current) -> Date {
+        calendar.date(byAdding: .day, value: 1, to: reviewDate) ?? reviewDate
+    }
+
+    /// `DayTimelineGridView.openHabitOccurrences`'s core logic, extracted
+    /// so it's unit-testable without constructing a live view. Every
+    /// occurrence whose own `HabitOccurrenceTimeMode` is `mode` — no
+    /// status filter: `OccurrenceStatus` has exactly four cases and every
+    /// one of them must render now that a tap can cycle through all four
+    /// (see `DayTimelineGridView.toggleHabitOccurrence`). Excluding
+    /// `.excused` here (as an earlier version of this did) would make a
+    /// row disappear mid-cycle with no way to tap it back out again.
+    static func openHabitOccurrences(habits: [Habit], mode: HabitOccurrenceTimeMode, targetDate: Date, context: ModelContext, calendar: Calendar = .current) -> [(habit: Habit, index: Int, status: OccurrenceStatus)] {
+        var result: [(habit: Habit, index: Int, status: OccurrenceStatus)] = []
+        for habit in habits.sorted(by: { $0.sortOrder < $1.sortOrder }) where habit.isApplicable(on: targetDate, calendar: calendar) {
+            let log = habit.log(on: targetDate, context: context, calendar: calendar)
+            for index in 0..<max(habit.timesPerDay, 1) {
+                guard habit.timeMode(for: index) == mode else { continue }
+                let status = log?.occurrenceStatus(index) ?? .none
+                result.append((habit: habit, index: index, status: status))
+            }
+        }
+        return result
+    }
+
     static func openHabitOccurrencesForReview(habits: [Habit], context: ModelContext, upTo cutoff: Date = .now, alsoInclude: Set<String> = [], completedSince: Date? = nil) -> [HabitReviewOccurrence] {
         let calendar = Calendar.current
         let cutoffDay = calendar.startOfDay(for: cutoff)
@@ -2058,7 +2095,7 @@ final class ScheduleReviewViewModel {
                         let status = habit.occurrenceStatus(index, on: cursor, context: context, calendar: calendar)
                         let completedRecently = status == .complete && completedSinceDay.map { cursor > $0 } ?? false
                         guard status == .none || alsoInclude.contains(id) || completedRecently else { continue }
-                        result.append(HabitReviewOccurrence(id: id, habit: habit, index: index, isCompleted: status == .complete, targetTime: targetTime, modeLabel: mode.label))
+                        result.append(HabitReviewOccurrence(id: id, habit: habit, index: index, status: status, targetTime: targetTime, modeLabel: mode.label))
                     }
                 }
                 guard let previousDay = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
@@ -2066,6 +2103,28 @@ final class ScheduleReviewViewModel {
             }
         }
         return result
+    }
+
+    /// `NightlyReviewView.openHabitOccurrencesForReview`'s core logic,
+    /// extracted so it's unit-testable without constructing a live view.
+    /// Re-derives each `frozen` occurrence's `status` fresh, right now,
+    /// rather than trusting whatever it was at the moment `frozen` was
+    /// captured — this is the "live" half of the frozen-snapshot design
+    /// that keeps a Nightly Review habit row visible (frozen identity)
+    /// while still showing whichever of the four states it's actually in
+    /// right now (live status), rather than the state it was in when the
+    /// step was entered. `frozen` itself must still come from a genuinely
+    /// live, filtered call to `openHabitOccurrencesForReview` at the
+    /// moment the step is entered — freezing *that* call instead of just
+    /// its result would remove the `status == .none` filter's protection,
+    /// not just its display twitchiness (see the spec's "What actually
+    /// protects the untimed path").
+    static func refreshedHabitReviewOccurrences(frozen: [HabitReviewOccurrence], context: ModelContext, calendar: Calendar = .current) -> [HabitReviewOccurrence] {
+        frozen.map { occurrence in
+            let day = calendar.startOfDay(for: occurrence.targetTime)
+            let status = occurrence.habit.occurrenceStatus(occurrence.index, on: day, context: context, calendar: calendar)
+            return HabitReviewOccurrence(id: occurrence.id, habit: occurrence.habit, index: occurrence.index, status: status, targetTime: occurrence.targetTime, modeLabel: occurrence.modeLabel)
+        }
     }
 
     /// `NightlyReviewView.completedTasksWithNoBlock`'s core logic,
@@ -2162,7 +2221,14 @@ final class ScheduleReviewViewModel {
     /// to match the general convention; it's intentional. `today` is a
     /// parameter (defaulting to `.now`) rather than reading `Date.now`
     /// inline purely for testability — production callers never override it.
-    static func projectedRecurringTaskOccurrences(tasks: [TaskItem], materializedRows: [DayTimelineRow], targetDate: Date, context: ModelContext, calendar: Calendar = .current, today: Date = .now) -> [ProjectedRecurringTaskOccurrence] {
+    /// `carriedForwardTaskIDs` — see `carriedForwardRecurringTaskIDs` — is
+    /// what lets a task with *no* real recurrence on `targetDate` still
+    /// get a projected row here: an incomplete occurrence from on-or-before
+    /// today, standing in for the real `PushedRecurringOccurrence` Nightly
+    /// Review hasn't created yet. Marked `isPushed` the same as a genuine
+    /// one, reusing the existing "Pushed" indicator rather than a second
+    /// one — see that indicator's own doc comment on `OpenRecurringTaskOccurrence`.
+    static func projectedRecurringTaskOccurrences(tasks: [TaskItem], materializedRows: [DayTimelineRow], targetDate: Date, carriedForwardTaskIDs: Set<UUID> = [], context: ModelContext, calendar: Calendar = .current, today: Date = .now) -> [ProjectedRecurringTaskOccurrence] {
         let tasksWithRealBlockToday = Set(materializedRows.compactMap { row -> UUID? in
             guard case .proposed(let block) = row, let task = block.task, task.isRecurring else { return nil }
             return task.id
@@ -2171,15 +2237,78 @@ final class ScheduleReviewViewModel {
         var result: [ProjectedRecurringTaskOccurrence] = []
         for task in tasks where task.isRecurring && task.recurrenceTimeMode == .specific {
             guard !tasksWithRealBlockToday.contains(task.id) else { continue }
-            guard task.hasRecurringOccurrence(on: targetDate, calendar: calendar),
+            let isCarriedForward = carriedForwardTaskIDs.contains(task.id)
+            guard task.hasRecurringOccurrence(on: targetDate, calendar: calendar) || isCarriedForward,
                   let startTime = task.recurringOccurrenceTime(on: targetDate, calendar: calendar)
             else { continue }
             let isCompleted = RecurringTaskLog.log(taskID: task.id, on: targetDate, context: context, calendar: calendar)?.isCompleted ?? false
             guard !(isFutureDay && isCompleted) else { continue }
             let endTime = calendar.date(byAdding: .minute, value: max(task.estimatedMinutes, 15), to: startTime) ?? startTime
-            result.append(ProjectedRecurringTaskOccurrence(id: "projectedRecurringTask.\(task.id)", task: task, startTime: startTime, endTime: endTime, isCompleted: isCompleted))
+            result.append(ProjectedRecurringTaskOccurrence(id: "projectedRecurringTask.\(task.id)", task: task, startTime: startTime, endTime: endTime, isCompleted: isCompleted, isPushed: isCarriedForward))
         }
         return result
+    }
+
+    /// Task IDs whose most recent occurrence at or before `today` is still
+    /// unresolved and needs to display as carried forward onto
+    /// `targetDate` — a stand-in for the real `PushedRecurringOccurrence`
+    /// Nightly Review would eventually create, shown without waiting for
+    /// that to run. Display only: writes nothing, creates no records.
+    ///
+    /// Bounded exactly the way `PushedRecurringOccurrence.advanceOneHop`
+    /// already bounds a *real* pushed occurrence at runtime: stops the
+    /// moment the task's own next real recurrence day arrives, since the
+    /// ordinary pattern takes back over there — an incomplete monthly task
+    /// shows every day from `today` until its next pattern day, then hands
+    /// off, never past it. `TaskItem.previousRecurringOccurrenceDate`/
+    /// `nextRecurringOccurrenceDate` both cap their own walks (400/366
+    /// days), so neither direction can scan unboundedly on an old daily
+    /// task, and a task whose next occurrence falls outside that cap is
+    /// treated as "never project" rather than "project forever."
+    ///
+    /// Shared between `DayTimelineGridView.openRecurringTaskOccurrences`
+    /// (untimed) and `.projectedRecurringTaskOccurrences` (Specific-Time)
+    /// so the carry-forward rule itself lives in exactly one place — only
+    /// the display wrapper differs per mode, avoiding two near-copies of
+    /// the same rule drifting apart. `alreadyCoveredTaskIDs` (a real
+    /// `PushedRecurringOccurrence` already sitting on `targetDate`, or a
+    /// real `ScheduledBlock` there) is the caller's job to supply, since
+    /// both callers already have that data for their own reasons — this
+    /// only excludes what it's told to, so a task never gets a duplicate
+    /// row alongside its own real one.
+    static func carriedForwardRecurringTaskIDs(tasks: [TaskItem], targetDate: Date, alreadyCoveredTaskIDs: Set<UUID>, context: ModelContext, calendar: Calendar = .current, today: Date = .now) -> Set<UUID> {
+        let targetDay = calendar.startOfDay(for: targetDate)
+        let todayDay = calendar.startOfDay(for: today)
+        guard targetDay > todayDay else { return [] }
+        var result: Set<UUID> = []
+        for task in tasks where task.isRecurring {
+            guard !alreadyCoveredTaskIDs.contains(task.id) else { continue }
+            guard !task.hasRecurringOccurrence(on: targetDay, calendar: calendar) else { continue }
+            guard let lastDay = task.previousRecurringOccurrenceDate(onOrBefore: todayDay, calendar: calendar) else { continue }
+            guard !isRecurringTaskOccurrenceComplete(task: task, on: lastDay, context: context, calendar: calendar) else { continue }
+            let dayAfterLast = calendar.date(byAdding: .day, value: 1, to: lastDay) ?? lastDay
+            guard let nextOccurrence = task.nextRecurringOccurrenceDate(asOf: dayAfterLast, calendar: calendar) else { continue }
+            let handoffDay = calendar.startOfDay(for: nextOccurrence)
+            guard targetDay < handoffDay else { continue }
+            result.insert(task.id)
+        }
+        return result
+    }
+
+    /// Shared by `carriedForwardRecurringTaskIDs` — completion for a given
+    /// day, checking whichever store that mode could plausibly have
+    /// written to: a completed `ScheduledBlock` for a Specific-Time task
+    /// (its long-standing completion store), or `RecurringTaskLog` for
+    /// either mode (the untimed modes' own store, and — since a projected
+    /// Specific-Time occurrence with no block writes here too, see
+    /// `projectedRecurringTaskOccurrences` — the only place a *projected*
+    /// Specific-Time completion could have landed).
+    static func isRecurringTaskOccurrenceComplete(task: TaskItem, on day: Date, context: ModelContext, calendar: Calendar = .current) -> Bool {
+        if task.recurrenceTimeMode == .specific {
+            let hasCompletedBlock = (task.scheduledBlocks ?? []).contains { calendar.isDate($0.date, inSameDayAs: day) && $0.isCompleted }
+            if hasCompletedBlock { return true }
+        }
+        return RecurringTaskLog.log(taskID: task.id, on: day, context: context, calendar: calendar)?.isCompleted ?? false
     }
 
     /// `DayTimelineGridView.refreshHabitStreaks`'s core logic, extracted
@@ -2189,8 +2318,21 @@ final class ScheduleReviewViewModel {
     /// per habit and collected, so a test can confirm the cache a calendar
     /// screen shows genuinely tracks `asOf` rather than silently drifting
     /// to always mean "today."
-    static func habitStreaks(for habits: [Habit], asOf date: Date, calendar: Calendar = .current) -> [UUID: Int] {
-        Dictionary(uniqueKeysWithValues: habits.map { ($0.id, $0.currentStreak(asOf: date, calendar: calendar)) })
+    ///
+    /// Clamped to `min(date, today)` — `Habit.currentStreak(asOf:)` walks
+    /// every applicable day up to its reference date, counting one with no
+    /// log at all as a miss (see `Habit.status(on:asOf:)`). Passing a
+    /// *future* `date` straight through would count every day between
+    /// today and then as a miss that hasn't happened yet, reading more
+    /// negative the further forward you navigate. A *past* `date` is left
+    /// unclamped — that's a real as-of value someone genuinely wants (what
+    /// the streak was on that day), not a projection into days that don't
+    /// exist yet. `today` is a parameter (defaulting to `.now`), same
+    /// reasoning as `projectedRecurringTaskOccurrences`'s own `today` —
+    /// purely for testability, production callers never override it.
+    static func habitStreaks(for habits: [Habit], asOf date: Date, calendar: Calendar = .current, today: Date = .now) -> [UUID: Int] {
+        let clampedDate = min(date, today)
+        return Dictionary(uniqueKeysWithValues: habits.map { ($0.id, $0.currentStreak(asOf: clampedDate, calendar: calendar)) })
     }
 
     static func hasOpenHabitOccurrences(habits: [Habit], context: ModelContext, upTo cutoff: Date = .now) -> Bool {
@@ -2467,11 +2609,32 @@ final class ScheduleReviewViewModel {
     /// that hasn't actually finished being deleted yet would still show
     /// that time as busy, and the freed task wouldn't actually get a slot
     /// back despite being unscheduled again.
-    /// `cutoff` defaults to right now (the regular Regenerate flow's
-    /// notion of "past"), but Nightly Review's Plan step passes its own —
-    /// whichever day was picked in Choose Day, not real-now — so a task
-    /// left unchecked there gets freed up for tomorrow's generation even
-    /// when `reviewDate` isn't today.
+    /// `cutoff` defaults to right now — as of this writing there's no
+    /// other actual caller (grepped while verifying `NightlyReviewView
+    /// .reviewCutoff`'s widened-cutoff change), only Nightly Review's own
+    /// handoff, passing whichever day was picked in Choose Day, not
+    /// real-now — so a task left unchecked there gets freed up for
+    /// tomorrow's generation even when `reviewDate` isn't today. The
+    /// default stays `.now` regardless, both as the sensible fallback for
+    /// a future caller and because it's what an ordinary intra-day
+    /// Regenerate would want if one ever calls this directly instead of
+    /// its own separate `clearBlocksBeforeToday`.
+    ///
+    /// Never clears a habit-linked block (`$0.habit == nil` below),
+    /// regardless of `cutoff` — a habit has no "shelf" or
+    /// `remainingMinutes` for clearing to restore the way a task's does;
+    /// its completion record of record is `HabitLog`
+    /// (`markUnresolvedHabitOccurrencesAsMissed` marks it missed there
+    /// independent of this function entirely), and deleting the block on
+    /// top of that just made a missed Specific-Time habit's calendar row
+    /// disappear for a second, unrelated reason beyond `DayTimelineGridView
+    /// .openHabitOccurrences`'s own missed/excused filter. A stale
+    /// habit block from days ago sitting unresolved isn't a bug the way a
+    /// stale task block would be — `AISchedulingService
+    /// .placeHabitsAndRecurringTasks` generates each day's habit blocks
+    /// keyed by that day and occurrence index, never conditioned on
+    /// whether an *earlier* day's block for the same habit still exists —
+    /// verified directly before relying on it, not assumed.
     func clearIncompletePastBlocks(allBlocks: [ScheduledBlock], cutoff: Date = .now) async {
         // Deliberately ignores isLocked — a lock only pins a block within
         // a day's own layout. Once that day is over, protecting it here
@@ -2482,7 +2645,7 @@ final class ScheduleReviewViewModel {
         // remainingMinutes is restored below, so it just goes back to the
         // shelf to be rescheduled. Locking still protects present/future
         // blocks everywhere else (regenerateFromNow etc).
-        let toClear = allBlocks.filter { !$0.isCompleted && $0.startTime < cutoff }
+        let toClear = allBlocks.filter { !$0.isCompleted && $0.startTime < cutoff && $0.habit == nil }
         for block in toClear {
             block.task?.isScheduled = false
             block.task?.pushedCount += 1

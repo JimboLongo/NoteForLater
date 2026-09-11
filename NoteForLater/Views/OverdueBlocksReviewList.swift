@@ -10,7 +10,15 @@ struct HabitReviewOccurrence: Identifiable {
     let id: String
     let habit: Habit
     let index: Int
-    let isCompleted: Bool
+    /// The full four-state status, not just complete/incomplete — Nightly
+    /// Review's habit rows now cycle through the same `none -> complete ->
+    /// missed -> excused -> none` sequence the Habits tab and the day
+    /// calendar already use (see `NightlyReviewView.cycleHabitReviewOccurrence`),
+    /// so a row needs to render all four, not just two.
+    let status: OccurrenceStatus
+    var isCompleted: Bool { status == .complete }
+    var isMissed: Bool { status == .missed }
+    var isExcused: Bool { status == .excused }
     /// Stand-in time used purely for sorting/grouping this in among real
     /// blocks — never shown; the row displays `modeLabel` instead (see
     /// `OverdueBlocksReviewList.habitRow`).
@@ -184,7 +192,11 @@ struct OverdueBlocksReviewList: View {
         case .block(let block):
             blockRow(block, isCompleted: isEffectivelyCompleted?(item) ?? block.isCompleted)
         case .habit(let occurrence):
-            habitRow(occurrence, isCompleted: isEffectivelyCompleted?(item) ?? occurrence.isCompleted)
+            // No `isEffectivelyCompleted` override here — a habit
+            // occurrence's own `status` is always live (see
+            // `NightlyReviewView`'s frozen-snapshot-with-live-refresh
+            // design), never staged, so there's nothing to override.
+            habitRow(occurrence)
         case .completedTask(let record, _):
             completedTaskRow(record)
         case .meal(let selection, let targetTime):
@@ -221,22 +233,27 @@ struct OverdueBlocksReviewList: View {
     }
 
     /// Same full-row tap target as `blockRow`.
-    private func habitRow(_ occurrence: HabitReviewOccurrence, isCompleted: Bool) -> some View {
+    private func habitRow(_ occurrence: HabitReviewOccurrence) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            selectionCircle(isSelected: isCompleted)
+            habitSelectionCircle(status: occurrence.status)
                 .padding(.vertical, 4)
             VStack(alignment: .leading) {
                 Text(occurrence.modeLabel)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                // Strikethrough stays tied to completion specifically, not
+                // missed/excused — same reasoning as `DayTimelineGridView
+                // .occurrenceRow`: crossed-out reads as "done," which
+                // neither of those is: the circle alone carries that
+                // distinction.
                 Text(occurrence.habit.name)
-                    .strikethrough(isCompleted)
+                    .strikethrough(occurrence.isCompleted)
             }
             Spacer()
         }
         .contentShape(Rectangle())
         .onTapGesture { onToggle(.habit(occurrence)) }
-        .opacity(isCompleted ? 0.5 : 1)
+        .opacity(occurrence.isCompleted || occurrence.isMissed || occurrence.isExcused ? 0.5 : 1)
         .listRowBackground(Shelf.flatten(.accentColor, opacity: 0.2))
     }
 
@@ -276,6 +293,35 @@ struct OverdueBlocksReviewList: View {
             Spacer()
         }
         .opacity(0.5)
+    }
+
+    /// Same fill/icon mapping `HabitsView.fillColor`/`occurrenceIcon` and
+    /// `DayTimelineGridView.occurrenceRow` already use for the four-state
+    /// cycle — reused here rather than invented a third time, so a habit
+    /// reads the same way on the Habits tab, the day calendar, and in
+    /// Nightly Review.
+    private func habitSelectionCircle(status: OccurrenceStatus) -> some View {
+        let circleColor: Color = status == .complete ? .green : (status == .missed ? .red.opacity(0.55) : (status == .excused ? .gray.opacity(0.4) : .clear))
+        let strokeColor: Color = status == .none ? .secondary.opacity(0.5) : circleColor
+        return ZStack {
+            Circle()
+                .fill(circleColor)
+                .overlay(Circle().strokeBorder(strokeColor, lineWidth: 1.5))
+            if status == .complete {
+                Image(systemName: "checkmark")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.white)
+            } else if status == .missed {
+                Image(systemName: "xmark")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.white)
+            } else if status == .excused {
+                Image(systemName: "xmark")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 22, height: 22)
     }
 
     private func selectionCircle(isSelected: Bool) -> some View {

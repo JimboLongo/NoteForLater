@@ -42,7 +42,7 @@ final class DayTimelineProjectionAndStreakTests: XCTestCase {
     override func setUpWithError() throws {
         container = try ModelContainer(
             for: TaskItem.self, ScheduledBlock.self, Shelf.self, RecurringTaskLog.self,
-                Habit.self, HabitLog.self,
+                Habit.self, HabitLog.self, PushedRecurringOccurrence.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
         context = ModelContext(container)
@@ -56,6 +56,19 @@ final class DayTimelineProjectionAndStreakTests: XCTestCase {
         task.recurrenceUnit = .days
         task.recurrenceIntervalCount = 1
         task.recurrenceTimeMode = .specific
+        context.insert(task)
+        return task
+    }
+
+    /// Monthly recurring task (untimed — mode doesn't matter to the
+    /// carry-forward rule itself, `.midday` picked arbitrarily), anchored
+    /// so every month's 10th is a real pattern day.
+    private func makeMonthlyTask(anchor: Date, mode: HabitOccurrenceTimeMode = .midday) -> TaskItem {
+        let task = TaskItem(title: "Pay rent", dueDate: anchor, estimatedMinutes: 10)
+        task.isRecurring = true
+        task.recurrenceUnit = .months
+        task.recurrenceIntervalCount = 1
+        task.recurrenceTimeMode = mode
         context.insert(task)
         return task
     }
@@ -215,5 +228,129 @@ final class DayTimelineProjectionAndStreakTests: XCTestCase {
         XCTAssertEqual(midResult[habit.id], habit.currentStreak(asOf: midStreakDay, calendar: calendar))
         XCTAssertEqual(afterResult[habit.id], habit.currentStreak(asOf: afterStreakDay, calendar: calendar))
         XCTAssertNotEqual(midResult[habit.id], afterResult[habit.id], "as-of date must actually matter, not just happen to match")
+    }
+
+    /// The clamp: a *future* day must show the streak as of *today*, not
+    /// a walk that counts every intervening day (none of which have
+    /// happened yet) as a miss. A *past* day is left unclamped — that's a
+    /// real as-of value, not a projection into days that don't exist.
+    ///
+    /// Verified fail-then-pass: with the `min(date, today)` clamp
+    /// temporarily removed (passing `date` straight through), this test
+    /// failed — the future day's streak came back more negative than
+    /// today's, reproducing the reported bug. Restored the clamp and
+    /// reran: green. Both via `xcodebuild test`.
+    func test_habitStreaks_futureDayClampsToToday_pastDayUnclamped() {
+        let start = day(2026, 8, 1)
+        let habit = makeHabit(name: "Stretch", startDate: start)
+        for offset in 0..<3 {
+            let logDay = calendar.date(byAdding: .day, value: offset, to: start)!
+            habit.logOrCreate(on: logDay, context: context, calendar: calendar).setOccurrence(0, to: .complete)
+        }
+        let fixedToday = calendar.date(byAdding: .day, value: 5, to: start)! // after the 3-day streak
+        let futureDay = calendar.date(byAdding: .day, value: 20, to: start)!
+        let pastDay = calendar.date(byAdding: .day, value: 1, to: start)! // mid-streak
+
+        let futureResult = ScheduleReviewViewModel.habitStreaks(for: [habit], asOf: futureDay, calendar: calendar, today: fixedToday)
+        let todayResult = ScheduleReviewViewModel.habitStreaks(for: [habit], asOf: fixedToday, calendar: calendar, today: fixedToday)
+        let pastResult = ScheduleReviewViewModel.habitStreaks(for: [habit], asOf: pastDay, calendar: calendar, today: fixedToday)
+
+        XCTAssertEqual(futureResult[habit.id], todayResult[habit.id], "a future day must clamp to today's own streak")
+        XCTAssertEqual(pastResult[habit.id], habit.currentStreak(asOf: pastDay, calendar: calendar), "a past day must keep showing its true as-of value, not clamp")
+    }
+
+    // MARK: - Carry-forward projection of an incomplete recurring task
+
+    /// Verified fail-then-pass: with `carriedForwardRecurringTaskIDs`
+    /// temporarily reverted to `return []` unconditionally, this test
+    /// failed — the incomplete task never carried forward onto the future
+    /// non-pattern day. Restored the real walk and reran: green. Both via
+    /// `xcodebuild test`.
+    func test_carriedForward_incompleteMonthlyTask_appearsOnFutureNonPatternDay() {
+        let anchor = day(2026, 8, 10)
+        let fixedToday = day(2026, 9, 10) // also a pattern day, left incomplete
+        let notAPatternDay = day(2026, 9, 20)
+        let task = makeMonthlyTask(anchor: anchor)
+
+        let result = ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
+            tasks: [task], targetDate: notAPatternDay, alreadyCoveredTaskIDs: [], context: context, calendar: calendar, today: fixedToday
+        )
+
+        XCTAssertTrue(result.contains(task.id))
+    }
+
+    /// The bound: projection stops the moment the task's own next real
+    /// pattern day arrives — never past it, never indefinitely.
+    func test_carriedForward_stopsOnAndAfterNextRealPatternDay() {
+        let anchor = day(2026, 8, 10)
+        let fixedToday = day(2026, 9, 10)
+        let nextPatternDay = day(2026, 10, 10)
+        let wellAfterHandoff = day(2026, 10, 15)
+        let task = makeMonthlyTask(anchor: anchor)
+
+        let onHandoffDay = ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
+            tasks: [task], targetDate: nextPatternDay, alreadyCoveredTaskIDs: [], context: context, calendar: calendar, today: fixedToday
+        )
+        let afterHandoff = ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
+            tasks: [task], targetDate: wellAfterHandoff, alreadyCoveredTaskIDs: [], context: context, calendar: calendar, today: fixedToday
+        )
+
+        XCTAssertFalse(onHandoffDay.contains(task.id), "the real occurrence takes over on its own pattern day, not a projection")
+        XCTAssertFalse(afterHandoff.contains(task.id), "must not project past the handoff day either")
+    }
+
+    /// A completed occurrence has nothing to carry forward.
+    func test_carriedForward_completedOccurrence_doesNotProject() {
+        let anchor = day(2026, 8, 10)
+        let fixedToday = day(2026, 9, 10)
+        let notAPatternDay = day(2026, 9, 20)
+        let task = makeMonthlyTask(anchor: anchor)
+        RecurringTaskLog.logOrCreate(taskID: task.id, on: fixedToday, context: context, calendar: calendar).isCompleted = true
+
+        let result = ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
+            tasks: [task], targetDate: notAPatternDay, alreadyCoveredTaskIDs: [], context: context, calendar: calendar, today: fixedToday
+        )
+
+        XCTAssertFalse(result.contains(task.id))
+    }
+
+    /// One row per task per day: a real `PushedRecurringOccurrence` (or a
+    /// real `ScheduledBlock`) already sitting on `targetDate` is the
+    /// caller's job to exclude via `alreadyCoveredTaskIDs` — confirms the
+    /// function actually honors that exclusion rather than re-admitting
+    /// the task regardless.
+    func test_carriedForward_doesNotDuplicate_whenAlreadyCovered() {
+        let anchor = day(2026, 8, 10)
+        let fixedToday = day(2026, 9, 10)
+        let notAPatternDay = day(2026, 9, 20)
+        let task = makeMonthlyTask(anchor: anchor)
+
+        let result = ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
+            tasks: [task], targetDate: notAPatternDay, alreadyCoveredTaskIDs: [task.id], context: context, calendar: calendar, today: fixedToday
+        )
+
+        XCTAssertFalse(result.contains(task.id), "a task already covered by a real pushed occurrence or block must not also get a projection")
+    }
+
+    /// The carry-forward rule is shared, not duplicated per mode — same
+    /// `carriedForwardRecurringTaskIDs` call feeds both
+    /// `openRecurringTaskOccurrences` (untimed) and
+    /// `projectedRecurringTaskOccurrences` (Specific-Time). This confirms
+    /// the rule itself doesn't care which mode the task is in.
+    func test_carriedForward_appliesToSpecificTimeTaskToo() {
+        let anchor = day(2026, 8, 10)
+        let fixedToday = day(2026, 9, 10)
+        let notAPatternDay = day(2026, 9, 20)
+        let task = makeMonthlyTask(anchor: anchor, mode: .specific)
+
+        let carriedForwardIDs = ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
+            tasks: [task], targetDate: notAPatternDay, alreadyCoveredTaskIDs: [], context: context, calendar: calendar, today: fixedToday
+        )
+        let result = ScheduleReviewViewModel.projectedRecurringTaskOccurrences(
+            tasks: [task], materializedRows: [], targetDate: notAPatternDay, carriedForwardTaskIDs: carriedForwardIDs, context: context, calendar: calendar, today: fixedToday
+        )
+
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result.first?.isPushed, true)
     }
 }

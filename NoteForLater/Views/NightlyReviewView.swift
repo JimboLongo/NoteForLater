@@ -64,6 +64,37 @@ struct NightlyReviewView: View {
     /// `twoMinuteReviewTaskIDs`, since a stale entry from another day's
     /// `reviewItems` would never match anything real here anyway.
     @State private var stagedTodayToggleIDs = Set<String>()
+    /// Which habit occurrences the Today step is reviewing, frozen the
+    /// moment the step is entered (`runEntryEffects(for: .today)`) rather
+    /// than re-derived from `ScheduleReviewViewModel
+    /// .openHabitOccurrencesForReview` on every render. Habit rows cycle
+    /// through the full four-state sequence via `Habit.cycleOccurrence`
+    /// (see `cycleHabitReviewOccurrence`), writing immediately rather than
+    /// staging like `stagedTodayToggleIDs` — the moment a row advances
+    /// past `.none`, that live function's own `status == .none` filter
+    /// would otherwise drop it, making the row vanish mid-cycle with no
+    /// way to tap it back out. This is a **display-only** fix layered on
+    /// top of that filter, not a replacement for it: the filter still runs
+    /// fresh, unfrozen, everywhere it actually protects something —
+    /// `markUnresolvedHabitOccurrencesAsMissed`'s own sweep calls the live
+    /// function directly and must keep doing so (see the spec's "What
+    /// actually protects the untimed path"). This frozen list only decides
+    /// which *rows this screen renders*; each row's own displayed status
+    /// is still read live (see the `openHabitOccurrencesForReview`
+    /// computed property below), so a row correctly shows whichever state
+    /// it's actually in right now, not its state at the moment of freezing.
+    ///
+    /// **Do not "simplify" this by freezing each occurrence's `status`
+    /// alongside its identity here.** That's the obvious version of this
+    /// fix, and it's wrong: the whole point of freezing is to stop the
+    /// filter from dropping a row once it leaves `.none`, not to stop the
+    /// row from reflecting what you just tapped. Freeze the status too and
+    /// every checkmark goes stale the instant you tap it — you'd see
+    /// `.none` right after cycling to `.complete`, since the write landed
+    /// in the model but the frozen copy never heard about it. Identity
+    /// frozen, status live — that split is deliberate, not an oversight to
+    /// clean up later.
+    @State private var frozenTodayHabitOccurrences: [HabitReviewOccurrence] = []
     /// Same idea as `stagedTodayToggleIDs`, for the 2-Minute Tasks step —
     /// committed in `advance()`'s `next == .today` branch instead (that
     /// step now runs *before* Today Review, not after it).
@@ -367,6 +398,17 @@ struct NightlyReviewView: View {
                 ScheduleDirtyState.shared.isDirty = true
             }
             stagedTwoMinuteToggleIDs = []
+            // Frozen exactly once, on entry — see `frozenTodayHabitOccurrences`'s
+            // own doc comment for why this can't just be re-derived live on
+            // every render the way it used to be. Same call the display
+            // property below used to make directly; the only change is
+            // *when* it's made.
+            frozenTodayHabitOccurrences = ScheduleReviewViewModel.openHabitOccurrencesForReview(
+                habits: allHabits,
+                context: modelContext,
+                upTo: reviewDisplayCutoff,
+                completedSince: NightlyReviewCompletionState.shared.lastClosedReviewDay
+            )
         }
         if next == .twoMinuteTasks {
             let pending = (twoMinuteShelf?.tasks ?? []).filter { !$0.isCompleted && $0.isEligibleToStart(on: reviewDate) }
@@ -403,8 +445,13 @@ struct NightlyReviewView: View {
                 switch item {
                 case .block(let block):
                     todayViewModel.toggleComplete(block)
-                case .habit(let occurrence):
-                    toggleHabitReviewOccurrence(habit: occurrence.habit, index: occurrence.index, isCompleted: occurrence.isCompleted, day: occurrence.targetTime)
+                case .habit:
+                    // Never actually reached — a `.habit` tap writes
+                    // immediately via `cycleHabitReviewOccurrence`
+                    // (see `todayStep`), so its id never lands in
+                    // `stagedTodayToggleIDs` for this loop's own `where`
+                    // clause to match.
+                    break
                 case .completedTask:
                     break
                 case .meal:
@@ -496,11 +543,19 @@ struct NightlyReviewView: View {
             // moment Today is left behind, so it's marked missed right
             // here, synchronously, before any of the async cleanup below.
             // Deliberately not folded into `clearIncompletePastBlocks`
-            // itself (used here too, just below) — that function is also
-            // what the plain intra-day Regenerate flow calls, where a
-            // passed-but-undone habit should still get a fresh shot later
-            // *today*, not be written off; only Nightly Review's own
-            // end-of-day handoff means "no more chances left."
+            // itself (used here too, just below): a passed-but-undone
+            // habit should still get a fresh shot later *today* during an
+            // ordinary intra-day Regenerate, not be written off — only
+            // Nightly Review's own end-of-day handoff means "no more
+            // chances left." (Correcting a stale claim this comment used
+            // to make: `clearIncompletePastBlocks` does *not* currently
+            // have another caller from any Regenerate flow — grepped while
+            // verifying `reviewCutoff`'s widened-cutoff change was safe,
+            // confirmed exactly one call site, right below. The design
+            // reasoning above still holds regardless — habits and blocks
+            // are swept by two genuinely different mechanisms on purpose —
+            // it just isn't *currently* enforced by a second caller the
+            // way this used to say.)
             markUnresolvedHabitOccurrencesAsMissed()
             // Closes `reviewDate` out for `ScheduleReviewViewModel
             // .autoPlaceEligibleTasks`'s own live auto-place walk — once
@@ -735,6 +790,7 @@ struct NightlyReviewView: View {
         .onChange(of: reviewDate) { _, _ in
             stagedTodayToggleIDs = []
             stagedMealSelectionIDs = []
+            frozenTodayHabitOccurrences = []
         }
         .onAppear {
             // Only ever applied once — after this, whatever the user
@@ -751,32 +807,58 @@ struct NightlyReviewView: View {
 
     /// Used only for *operational* decisions — actually marking something
     /// missed, or clearing/rescheduling an incomplete block — never for
-    /// what the Today step displays (see `reviewDisplayCutoff` for that).
-    /// When `reviewDate` is today, this is `.now` itself rather than
-    /// end-of-day, since a block later today hasn't happened yet and
-    /// can't legitimately be judged "missed" or "not done" until its own
-    /// time actually passes; when `reviewDate` is an earlier day (already
-    /// fully elapsed), it's that day's midnight boundary instead. Shared
-    /// by `markUnresolvedHabitOccurrencesAsMissed` and `advance()` (what
-    /// gets frozen as `frozenCutoff`, for `clearIncompletePastBlocks`).
+    /// what the Today step displays (see `reviewDisplayCutoff` for that,
+    /// though the two are now computed identically — see below).
+    ///
+    /// **Deliberately no longer clamped to `.now`.** This used to be
+    /// `min(.now, dayEnd)`, so reviewing at 7pm with `reviewDate` = today
+    /// gave a 7pm cutoff — a 9pm habit or task was correctly still
+    /// *displayed* (`reviewDisplayCutoff` never clamped), but the sweep
+    /// and the past-block clear below both read *this* property, so
+    /// neither one ever touched it: it stayed `.none`, showed up again in
+    /// the next review, and the cycle repeated forever. That protection
+    /// was intentional once — "a block later today hasn't happened yet
+    /// and can't legitimately be judged missed until its own time
+    /// actually passes" — but it's the wrong call for what this cutoff
+    /// actually gates: by the time you're doing the Today→Tomorrow
+    /// handoff, the review's own premise is that today is done being
+    /// planned, whatever the wall clock says. A 9pm habit not done by the
+    /// time you sit down to close out the day out **is** incomplete, full
+    /// stop — reviewing early doesn't make it any less so. `reviewDate`
+    /// itself already can't be later than today (see `ChooseDayPlanning`/
+    /// the "Plan a different day" `DatePicker`'s own upper bound), so this
+    /// change only ever widens what's swept on the reviewDate=today path;
+    /// every earlier-`reviewDate` path (Plan Today, or the DatePicker's
+    /// own "catching up on an earlier day" case) had `dayEnd` already
+    /// before `.now` regardless, so the clamp was already inert there —
+    /// verified directly, not assumed, by tracing all three ways
+    /// `reviewDate` gets set.
+    ///
+    /// Shared by `markUnresolvedHabitOccurrencesAsMissed`,
+    /// `advance()` (what gets frozen as `frozenCutoff`, for both
+    /// `clearIncompletePastBlocks` and `pushMissedRecurringOccurrences` —
+    /// the latter not originally called out when this cutoff was widened,
+    /// found by grepping every reader rather than trusting the two
+    /// already-known ones). Widening is correct for all three: each one
+    /// exists specifically to resolve "is this actually done," and none of
+    /// them should stop early just because the review happened to run
+    /// before midnight.
     private var reviewCutoff: Date {
-        let dayEnd = Calendar.current.date(byAdding: .day, value: 1, to: reviewDate) ?? reviewDate
-        return min(.now, dayEnd)
+        ScheduleReviewViewModel.nightlyReviewOperationalCutoff(reviewDate: reviewDate)
     }
 
     /// What the Today step actually *shows* — always the full span of
-    /// `reviewDate`, regardless of what time it currently is. A task or
-    /// habit later today should be visible in tonight's review the moment
-    /// you open it, not only once its own time has technically passed —
-    /// unlike `reviewCutoff`, this never clamps to `.now`. Deliberately
-    /// kept separate from `reviewCutoff`: `reviewableBlocks` and
-    /// `openHabitOccurrencesForReview` both read this one, while anything
-    /// that actually *acts* on "is this done or not yet due" — the missed
-    /// sweep, the past-block clear — still reads the narrower
-    /// `reviewCutoff`, so showing a 9pm habit at 6pm review time never
-    /// causes it to be prematurely marked missed or rescheduled off today.
+    /// `reviewDate`, regardless of what time it currently is. Computed
+    /// identically to `reviewCutoff` now that the latter no longer clamps
+    /// to `.now` — kept as a separate named property rather than merged
+    /// into one, since they answer conceptually different questions
+    /// ("what should be visible" vs. "what should be treated as settled")
+    /// that happened to converge once the review's own premise became
+    /// "today is done being planned as of right now, regardless of the
+    /// clock" — a future change to either one's semantics shouldn't have
+    /// to first re-discover this distinction.
     private var reviewDisplayCutoff: Date {
-        Calendar.current.date(byAdding: .day, value: 1, to: reviewDate) ?? reviewDate
+        ScheduleReviewViewModel.nightlyReviewOperationalCutoff(reviewDate: reviewDate)
     }
 
     /// Every block (complete or not) up through `reviewDisplayCutoff`,
@@ -857,28 +939,36 @@ struct NightlyReviewView: View {
         )
     }
 
-    /// A tap here only flips membership in `stagedTodayToggleIDs` (or, for
-    /// a `.meal` item, `stagedMealSelectionIDs` — its own separate set,
-    /// since its eventual commit in `advance()` does something neither
-    /// other kind needs: trigger pantry deduction) — no model write
+    /// A tap on a `.block`/`.meal` item only flips membership in
+    /// `stagedTodayToggleIDs`/`stagedMealSelectionIDs` — no model write
     /// happens until `advance()` commits the batch on Next (§ requirement
     /// that Today-step taps be visual-only and reversible).
-    /// `effectiveCompleted` is what lets the row render that pending
-    /// state without touching the underlying model directly.
+    /// `effectiveCompleted` is what lets those rows render that pending
+    /// state without touching the underlying model directly. A `.habit`
+    /// tap is different: it writes immediately, via `Habit.cycleOccurrence`
+    /// (see `cycleHabitReviewOccurrence`) — there's no staged "pending
+    /// flip" for a four-state cycle to represent, since the next tap's
+    /// result depends on knowing which of the four states the row is
+    /// *actually* in right now.
     @ViewBuilder
     private var todayStep: some View {
         if todayViewModel != nil {
             OverdueBlocksReviewList(items: reviewItems, onToggle: { item in
-                if case .meal(let selection, _) = item {
+                switch item {
+                case .habit(let occurrence):
+                    cycleHabitReviewOccurrence(occurrence)
+                case .meal(let selection, _):
                     if stagedMealSelectionIDs.contains(selection.id) {
                         stagedMealSelectionIDs.remove(selection.id)
                     } else {
                         stagedMealSelectionIDs.insert(selection.id)
                     }
-                } else if stagedTodayToggleIDs.contains(item.id) {
-                    stagedTodayToggleIDs.remove(item.id)
-                } else {
-                    stagedTodayToggleIDs.insert(item.id)
+                case .block, .completedTask:
+                    if stagedTodayToggleIDs.contains(item.id) {
+                        stagedTodayToggleIDs.remove(item.id)
+                    } else {
+                        stagedTodayToggleIDs.insert(item.id)
+                    }
                 }
             }, isEffectivelyCompleted: effectiveCompleted)
         } else {
@@ -888,13 +978,18 @@ struct NightlyReviewView: View {
 
     /// `.meal` reads/writes `stagedMealSelectionIDs` instead of
     /// `stagedTodayToggleIDs` — see `todayStep`'s own doc comment for why
-    /// it needs its own separate staged set.
+    /// it needs its own separate staged set. `.habit` is never actually
+    /// consulted here — `OverdueBlocksReviewList.row(for:)` reads a habit
+    /// occurrence's own live `status` directly instead of going through
+    /// `isEffectivelyCompleted` at all, since it's never staged — kept
+    /// here only so this `switch` stays exhaustive, returning the same
+    /// thing the live value already would.
     private func effectiveCompleted(for item: ReviewItem) -> Bool {
         switch item {
         case .block(let block):
             return stagedTodayToggleIDs.contains(item.id) ? !block.isCompleted : block.isCompleted
         case .habit(let occurrence):
-            return stagedTodayToggleIDs.contains(item.id) ? !occurrence.isCompleted : occurrence.isCompleted
+            return occurrence.isCompleted
         case .completedTask:
             return true
         case .meal(let selection, _):
@@ -905,34 +1000,39 @@ struct NightlyReviewView: View {
     /// An AM/Midday/PM habit occurrence (see `HabitOccurrenceTimeMode`)
     /// never gets a `ScheduledBlock` at all, so it'd otherwise be
     /// invisible to `reviewableBlocks` — a Specific-Time occurrence
-    /// doesn't need this, it already shows up as a real block. See
-    /// `ScheduleReviewViewModel.openHabitOccurrencesForReview` (this just
-    /// supplies `reviewDisplayCutoff` — same cutoff `reviewableBlocks`
-    /// already uses, so a PM habit shows up here the moment the Today
-    /// step opens rather than only once its own time has passed — and
-    /// `completedSince`, so an occurrence already checked off earlier
-    /// today, before this review session ever opened, still shows up here
-    /// instead of being invisible until the sweep runs). A same-session
-    /// tap never needs its own escape hatch the way `completedSince`
-    /// does — see `stagedTodayToggleIDs`/`effectiveCompleted`: the real
-    /// status never changes mid-session, so the `.none` filter below
-    /// never has anything to exclude yet.
+    /// doesn't need this, it already shows up as a real block.
+    ///
+    /// Reads from `frozenTodayHabitOccurrences` (which row IDENTITIES are
+    /// being reviewed — captured once on entry) rather than calling
+    /// `ScheduleReviewViewModel.openHabitOccurrencesForReview` directly on
+    /// every render, but each occurrence's `status` is still looked up
+    /// fresh, right here, every time this is read — so a row stays put as
+    /// you cycle it (the frozen part) while still showing whatever state
+    /// it's actually in right now (the live part), rather than the state
+    /// it was in at the moment of freezing. `markUnresolvedHabitOccurrencesAsMissed`'s
+    /// sweep does **not** go through this — it calls the live, filtered
+    /// function directly, which is what actually protects the untimed
+    /// path (see the spec's "What actually protects the untimed path");
+    /// freezing that call too would remove the filter's protection, not
+    /// just its display twitchiness.
     private var openHabitOccurrencesForReview: [HabitReviewOccurrence] {
-        ScheduleReviewViewModel.openHabitOccurrencesForReview(
-            habits: allHabits,
-            context: modelContext,
-            upTo: reviewDisplayCutoff,
-            completedSince: NightlyReviewCompletionState.shared.lastClosedReviewDay
-        )
+        ScheduleReviewViewModel.refreshedHabitReviewOccurrences(frozen: frozenTodayHabitOccurrences, context: modelContext)
     }
 
-    /// Mirrors `DayTimelineGridView.toggleHabitOccurrence` — both
-    /// directions (checking and un-checking) — scoped to the occurrence's
-    /// own day (`occurrence.targetTime`, backlog or not) rather than
-    /// always `reviewDate`, now that `openHabitOccurrencesForReview` can
-    /// surface an occurrence from an earlier day.
-    private func toggleHabitReviewOccurrence(habit: Habit, index: Int, isCompleted: Bool, day: Date) {
-        habitLog(for: habit, on: day).setOccurrence(index, to: isCompleted ? .none : .complete)
+    /// Routes through the exact same four-state cycle
+    /// (`none -> complete -> missed -> excused -> none`) the Habits tab
+    /// and the day calendar already use — one behavior everywhere, not a
+    /// third variant. Writes immediately rather than staging: a 4-state
+    /// cycle has no sensible "pending flip" to represent the way a plain
+    /// boolean toggle did, since the caller needs to know *which* state a
+    /// row is currently showing in order to decide what the next tap
+    /// produces — that's the row's own live `status`, not anything staged
+    /// here. Scoped to the occurrence's own day (`occurrence.targetTime`,
+    /// backlog or not) rather than always `reviewDate`, same as before.
+    private func cycleHabitReviewOccurrence(_ occurrence: HabitReviewOccurrence) {
+        let calendar = Calendar.current
+        let day = calendar.startOfDay(for: occurrence.targetTime)
+        occurrence.habit.cycleOccurrence(occurrence.index, on: day, context: modelContext, calendar: calendar)
         HabitStatsRefreshCoordinator.shared.habitLogsChanged()
     }
 
@@ -964,11 +1064,17 @@ struct NightlyReviewView: View {
         // drawn from it is worthless. That is the whole value of the line.
         //
         // Deliberately NOT `reviewableBlocks`/`openHabitOccurrencesForReview`
-        // here — those now show the *whole day* regardless of time (see
-        // `reviewDisplayCutoff`), so reusing them would mark a habit due
-        // later tonight as missed the instant Next is tapped, even though
-        // there's still time left today to actually do it. This sweep
-        // stays scoped to the narrower, `.now`-based `reviewCutoff`.
+        // — those are scoped to `reviewDisplayCutoff` (what the step
+        // *shows*) rather than `reviewCutoff` (what this sweep *acts* on).
+        // The two are computed identically now (see `reviewCutoff`'s own
+        // doc comment for why the old `.now`-clamped version got removed —
+        // a habit due later tonight is now correctly swept, not protected
+        // from it), but this stays reading `reviewCutoff` specifically
+        // rather than switching to `reviewDisplayCutoff` directly: they
+        // answer different questions that only happen to agree today, and
+        // a future divergence between them should change this sweep's
+        // behavior by way of `reviewCutoff` actually changing, not
+        // silently by way of which property happened to get read here.
         let sweepBlocks = allBlocks.filter { ($0.startTime < reviewCutoff || $0.isCompleted) && $0.habit != nil }
         let sweepOccurrences = ScheduleReviewViewModel.openHabitOccurrencesForReview(
             habits: allHabits,

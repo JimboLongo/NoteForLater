@@ -260,6 +260,30 @@ final class TaskItem {
         return nil
     }
 
+    /// The most recent day (on or before `referenceDate`) this recurring
+    /// task has an occurrence on, walking backward day by day — the
+    /// mirror of `nextRecurringOccurrenceDate`. Capped at `scanDays`
+    /// (default 400, same floor `ScheduleReviewViewModel
+    /// .openHabitOccurrencesForReview` already uses for the identical
+    /// concern) so an old daily task can't mean an unbounded walk back to
+    /// its own anchor. `nil` if nothing recurring lands in that whole
+    /// window (recurrence started after `referenceDate`, or the scan
+    /// reached `scanDays` back without finding one).
+    func previousRecurringOccurrenceDate(onOrBefore referenceDate: Date, scanDays: Int = 400, calendar: Calendar = .current) -> Date? {
+        guard isRecurring, let anchor = dueDate else { return nil }
+        let referenceDay = calendar.startOfDay(for: referenceDate)
+        let anchorDay = calendar.startOfDay(for: anchor)
+        guard referenceDay >= anchorDay else { return nil }
+        let floor = max(anchorDay, calendar.date(byAdding: .day, value: -scanDays, to: referenceDay) ?? anchorDay)
+        var cursor = referenceDay
+        while cursor >= floor {
+            if hasRecurringOccurrence(on: cursor, calendar: calendar) { return cursor }
+            guard let previous = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
+            cursor = previous
+        }
+        return nil
+    }
+
     /// "Oct 14" — short enough to sit as supporting detail alongside
     /// `recurrenceSummary`. Same "MMM d" pattern
     /// `ShelfListView.TaskRow.pantryAgeText` already uses for a short

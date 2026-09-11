@@ -97,6 +97,15 @@ struct ProjectedRecurringTaskOccurrence: Identifiable {
     let startTime: Date
     let endTime: Date
     let isCompleted: Bool
+    /// True when this occurrence is showing on `targetDate` only because
+    /// it's an incomplete occurrence from on-or-before today being carried
+    /// forward (see `ScheduleReviewViewModel.carriedForwardRecurringTaskIDs`)
+    /// — a display-only stand-in for the real `PushedRecurringOccurrence`
+    /// Nightly Review would eventually create — not because `targetDate`
+    /// is one of the task's own real recurrence days. Drives the same
+    /// "Pushed" indicator `OpenRecurringTaskOccurrence.isPushed` already
+    /// shows for the untimed modes.
+    var isPushed: Bool = false
 }
 
 struct DayTimelineGridView: View {
@@ -324,20 +333,37 @@ struct DayTimelineGridView: View {
         let id: String
         let habit: Habit
         let index: Int
-        /// So the row can show checked/faded/struck-through instead of
-        /// disappearing the instant it's tapped — same as a Specific-Time
-        /// habit's own calendar block, which stays visible (just faded)
-        /// until Nightly Review actually sweeps it, rather than vanishing
-        /// on tap.
-        let isCompleted: Bool
+        /// So the row can show checked/missed/excused/untouched instead of
+        /// disappearing the instant its state changes — same as a
+        /// Specific-Time habit's own calendar block, which stays visible
+        /// (just faded) rather than vanishing on tap. Every `OccurrenceStatus`
+        /// case is representable here now — see `openHabitOccurrences`'s
+        /// own doc comment for why `.excused` had to join `.missed`.
+        let status: OccurrenceStatus
+        var isCompleted: Bool { status == .complete }
+        var isMissed: Bool { status == .missed }
+        var isExcused: Bool { status == .excused }
     }
 
     /// Every occurrence today whose own `HabitOccurrenceTimeMode` is
-    /// `mode` and isn't missed/excused — habits sorted by `sortOrder`,
-    /// occurrences within a habit in index order. Includes an already-
-    /// complete occurrence (see `isCompleted`) so it can still render,
-    /// checked; only missed/excused ones (resolved a different way, with
-    /// no toggle-back UI here) are actually left out.
+    /// `mode` — habits sorted by `sortOrder`, occurrences within a habit
+    /// in index order. No status filter at all now — `OccurrenceStatus`
+    /// only has four cases, and every one of them renders.
+    ///
+    /// `.missed` was added first (a missed occurrence used to disappear
+    /// from this screen entirely the moment Nightly Review's sweep ran,
+    /// with no trace it had ever been due), tappable through `Habit
+    /// .cycleOccurrence`'s existing four-state cycle. `.excused` joined it
+    /// once tapping was wired to the *full* cycle rather than the old
+    /// two-way none/complete toggle plus a missed/excused special case —
+    /// once a tap can *produce* `.excused` (cycling forward from
+    /// `.missed`), it has to render, or the row would vanish mid-cycle
+    /// with no way to tap it back out again. The earlier "leave `.excused`
+    /// out, undecided" reasoning this comment used to carry no longer
+    /// applies: it wasn't wrong when only `.missed`/`.excused` had their
+    /// own special-cased toggle path and `.excused` was reachable only
+    /// from the Habits tab, but making every state cycle through the same
+    /// mechanism removes the choice — see `toggleHabitOccurrence`.
     ///
     /// `Habit.log(on:)` linearly scans that habit's *entire* log
     /// history to find today's entry — this used to call it indirectly
@@ -351,26 +377,17 @@ struct DayTimelineGridView: View {
     /// habit, not just the one tapped.
     private func openHabitOccurrences(mode: HabitOccurrenceTimeMode) -> [OpenHabitOccurrence] {
         let perfStart = Date()
-        var perfFetchCount = 0
         let calendar = Calendar.current
-        var result: [OpenHabitOccurrence] = []
-        for habit in allHabits.sorted(by: { $0.sortOrder < $1.sortOrder }) where habit.isApplicable(on: targetDate, calendar: calendar) {
-            // Context-taking read, deliberately: this list drives each
-            // row's `isCompleted`, which `toggleHabitOccurrence` uses to
-            // decide which *direction* to write. A relationship read here
-            // can't see a pending same-day insert, so it reports `.none`
-            // and every tap re-writes `.complete`, making an occurrence
-            // impossible to un-toggle on a day with no saved log. See
-            // `Habit.log(on:context:)`.
-            perfFetchCount += 1
-            let log = habit.log(on: targetDate, context: modelContext, calendar: calendar)
-            for index in 0..<max(habit.timesPerDay, 1) {
-                guard habit.timeMode(for: index) == mode else { continue }
-                let status = log?.occurrenceStatus(index) ?? .none
-                guard status == .none || status == .complete else { continue }
-                result.append(OpenHabitOccurrence(id: "\(habit.id).\(index)", habit: habit, index: index, isCompleted: status == .complete))
-            }
-        }
+        // Context-taking read, deliberately, inside the shared function
+        // below: this list drives each row's `status`, which
+        // `toggleHabitOccurrence` uses to decide which *direction* to
+        // write. A relationship read can't see a pending same-day insert,
+        // so it reports `.none` and every tap re-writes `.complete`,
+        // making an occurrence impossible to un-toggle on a day with no
+        // saved log. See `Habit.log(on:context:)`.
+        let perfFetchCount = allHabits.filter { $0.isApplicable(on: targetDate, calendar: calendar) }.count
+        let result = ScheduleReviewViewModel.openHabitOccurrences(habits: allHabits, mode: mode, targetDate: targetDate, context: modelContext, calendar: calendar)
+            .map { OpenHabitOccurrence(id: "\($0.habit.id).\($0.index)", habit: $0.habit, index: $0.index, status: $0.status) }
         DiagFileLog.write("PERF openHabitOccurrences mode=\(mode) allHabits=\(allHabits.count) fetches=\(perfFetchCount) dt=\(Date().timeIntervalSince(perfStart))")
         return result
     }
@@ -415,19 +432,55 @@ struct DayTimelineGridView: View {
     /// all, but has an unresolved `PushedRecurringOccurrence` currently
     /// sitting on `targetDate` — pushed forward from an earlier miss, not
     /// shown here because today is one of its own pattern days.
-    private func openRecurringTaskOccurrences(mode: HabitOccurrenceTimeMode) -> [OpenRecurringTaskOccurrence] {
+    /// Real `PushedRecurringOccurrence`s already sitting on `targetDate` —
+    /// hoisted out of `openRecurringTaskOccurrences` (which used to
+    /// recompute this identically 3 times per body pass, once per mode)
+    /// so it's shared with `computeCarriedForwardTaskIDs`'s own exclusion
+    /// set too.
+    private var pushedTaskIDsForTargetDate: Set<UUID> {
+        let calendar = Calendar.current
+        return Set(allPushedRecurringOccurrences
+            .filter { !$0.isCompleted && calendar.isDate($0.currentDate, inSameDayAs: targetDate) }
+            .map(\.taskID))
+    }
+
+    /// Task IDs needing a carried-forward display row on `targetDate` —
+    /// computed once per body pass (see `body`'s own `carriedForwardTaskIDs`
+    /// local) and threaded into both `openRecurringTaskOccurrences` (all
+    /// three modes) and `projectedRecurringTaskOccurrences`, rather than
+    /// each redoing `ScheduleReviewViewModel.carriedForwardRecurringTaskIDs`'s
+    /// bounded-but-nontrivial walk independently.
+    private func computeCarriedForwardTaskIDs() -> Set<UUID> {
+        let tasksWithRealBlockToday = Set(materializedRows.compactMap { row -> UUID? in
+            guard case .proposed(let block) = row, let task = block.task, task.isRecurring else { return nil }
+            return task.id
+        })
+        return ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
+            tasks: allTasks, targetDate: targetDate,
+            alreadyCoveredTaskIDs: pushedTaskIDsForTargetDate.union(tasksWithRealBlockToday),
+            context: modelContext
+        )
+    }
+
+    private func openRecurringTaskOccurrences(mode: HabitOccurrenceTimeMode, carriedForwardTaskIDs: Set<UUID>) -> [OpenRecurringTaskOccurrence] {
         let perfStart = Date()
         var perfFetchCount = 0
         let calendar = Calendar.current
-        let pushedTaskIDs = Set(allPushedRecurringOccurrences
-            .filter { !$0.isCompleted && calendar.isDate($0.currentDate, inSameDayAs: targetDate) }
-            .map(\.taskID))
+        let pushedTaskIDs = pushedTaskIDsForTargetDate
+        // Same divergence `projectedRecurringTaskOccurrences` already
+        // documents: a completed occurrence on a *future* day is hidden
+        // entirely rather than shown faded — applied here too now that
+        // this function can also admit a future day via carry-forward, so
+        // the two paths agree once an occurrence actually gets checked
+        // off out there rather than one hiding it and the other not.
+        let isFutureDay = calendar.startOfDay(for: targetDate) > calendar.startOfDay(for: .now)
         var result: [OpenRecurringTaskOccurrence] = []
         for task in allTasks where task.isRecurring && task.recurrenceTimeMode == mode {
-            let isPushed = pushedTaskIDs.contains(task.id)
+            let isPushed = pushedTaskIDs.contains(task.id) || carriedForwardTaskIDs.contains(task.id)
             guard task.hasRecurringOccurrence(on: targetDate, calendar: calendar) || isPushed else { continue }
             perfFetchCount += 1
             let isCompleted = RecurringTaskLog.log(taskID: task.id, on: targetDate, context: modelContext, calendar: calendar)?.isCompleted ?? false
+            guard !(isFutureDay && isCompleted) else { continue }
             result.append(OpenRecurringTaskOccurrence(id: "recurringTask.\(task.id)", task: task, isCompleted: isCompleted, isPushed: isPushed))
         }
         DiagFileLog.write("PERF openRecurringTaskOccurrences mode=\(mode) allTasks=\(allTasks.count) fetches=\(perfFetchCount) dt=\(Date().timeIntervalSince(perfStart))")
@@ -446,9 +499,9 @@ struct DayTimelineGridView: View {
     /// list would make "already has a block" and "already has a
     /// projection from an earlier call" indistinguishable, risking a
     /// projection re-projecting itself.
-    private func projectedRecurringTaskOccurrences() -> [ProjectedRecurringTaskOccurrence] {
+    private func projectedRecurringTaskOccurrences(carriedForwardTaskIDs: Set<UUID>) -> [ProjectedRecurringTaskOccurrence] {
         ScheduleReviewViewModel.projectedRecurringTaskOccurrences(
-            tasks: allTasks, materializedRows: materializedRows, targetDate: targetDate, context: modelContext
+            tasks: allTasks, materializedRows: materializedRows, targetDate: targetDate, carriedForwardTaskIDs: carriedForwardTaskIDs, context: modelContext
         )
     }
 
@@ -478,21 +531,21 @@ struct DayTimelineGridView: View {
     /// still governs its position relative to other habits without
     /// recurring tasks (which have no comparable ordering field)
     /// interleaving mid-list.
-    private func computeOpenHabitOccurrenceLists() -> OpenHabitOccurrenceLists {
+    private func computeOpenHabitOccurrenceLists(carriedForwardTaskIDs: Set<UUID>) -> OpenHabitOccurrenceLists {
         OpenHabitOccurrenceLists(
             am: openHabitOccurrences(mode: .am).map(OpenOccurrenceRow.habit)
-                + openRecurringTaskOccurrences(mode: .am).map(OpenOccurrenceRow.recurringTask),
+                + openRecurringTaskOccurrences(mode: .am, carriedForwardTaskIDs: carriedForwardTaskIDs).map(OpenOccurrenceRow.recurringTask),
             midday: openHabitOccurrences(mode: .midday).map(OpenOccurrenceRow.habit)
-                + openRecurringTaskOccurrences(mode: .midday).map(OpenOccurrenceRow.recurringTask),
+                + openRecurringTaskOccurrences(mode: .midday, carriedForwardTaskIDs: carriedForwardTaskIDs).map(OpenOccurrenceRow.recurringTask),
             pm: openHabitOccurrences(mode: .pm).map(OpenOccurrenceRow.habit)
-                + openRecurringTaskOccurrences(mode: .pm).map(OpenOccurrenceRow.recurringTask)
+                + openRecurringTaskOccurrences(mode: .pm, carriedForwardTaskIDs: carriedForwardTaskIDs).map(OpenOccurrenceRow.recurringTask)
         )
     }
 
     /// The calendar only actually splits in two when there's a Midday
     /// occurrence to show between the halves — a day with no Midday
     /// habits renders as the single continuous grid it always has.
-    private var isSplitAtNoon: Bool { !middayOccurrences.isEmpty || !openRecurringTaskOccurrences(mode: .midday).isEmpty }
+    private var isSplitAtNoon: Bool { !middayOccurrences.isEmpty || !openRecurringTaskOccurrences(mode: .midday, carriedForwardTaskIDs: []).isEmpty }
 
     /// Where the day actually splits for Midday habits, in minutes since
     /// midnight — noon by default, but pushed later to clear any row
@@ -605,7 +658,12 @@ struct DayTimelineGridView: View {
         }()
         let perfBodyStart = Date()
         let _ = DiagFileLog.write("PERF body#\(perfBodyEvalN) ENTER tick=\(habitOccurrenceRefreshTick)")
-        let occurrenceLists = computeOpenHabitOccurrenceLists()
+        // Computed once here — feeds both `occurrenceLists` (all three
+        // modes) and `displayRows` below, rather than each of the four
+        // re-running `ScheduleReviewViewModel.carriedForwardRecurringTaskIDs`'s
+        // bounded backward/forward walk independently.
+        let carriedForwardTaskIDs = computeCarriedForwardTaskIDs()
+        let occurrenceLists = computeOpenHabitOccurrenceLists(carriedForwardTaskIDs: carriedForwardTaskIDs)
         let _ = DiagFileLog.write("PERF body#\(perfBodyEvalN) occurrenceLists dt=\(Date().timeIntervalSince(perfBodyStart))")
         // Computed once here, same reasoning as `occurrenceLists` above —
         // every other use of the day's rows below (the hour bounds, the
@@ -614,7 +672,7 @@ struct DayTimelineGridView: View {
         // never costs more than one `projectedRecurringTaskOccurrences()`
         // call per body pass no matter how many times its result is
         // consulted.
-        let displayRows = materializedRows + projectedRecurringTaskOccurrences().map(DayTimelineRow.projectedRecurringTask)
+        let displayRows = materializedRows + projectedRecurringTaskOccurrences(carriedForwardTaskIDs: carriedForwardTaskIDs).map(DayTimelineRow.projectedRecurringTask)
         let hourRange = visibleHourRange(rows: displayRows)
         let morningQuarterRange = morningRange(hourRange: hourRange)
         let afternoonQuarterRange = afternoonRange(hourRange: hourRange)
@@ -963,8 +1021,8 @@ struct DayTimelineGridView: View {
                 ForEach(rows) { row in
                     switch row {
                     case .habit(let occurrence):
-                        occurrenceRow(name: occurrence.habit.name, isCompleted: occurrence.isCompleted, streak: cachedHabitStreaks[occurrence.habit.id]) {
-                            toggleHabitOccurrence(habit: occurrence.habit, index: occurrence.index, isCompleted: occurrence.isCompleted)
+                        occurrenceRow(name: occurrence.habit.name, isCompleted: occurrence.isCompleted, isMissed: occurrence.isMissed, isExcused: occurrence.isExcused, streak: cachedHabitStreaks[occurrence.habit.id]) {
+                            toggleHabitOccurrence(habit: occurrence.habit, index: occurrence.index)
                         }
                     case .recurringTask(let occurrence):
                         occurrenceRow(name: occurrence.task.title, isCompleted: occurrence.isCompleted, isPushed: occurrence.isPushed) {
@@ -992,9 +1050,21 @@ struct DayTimelineGridView: View {
     /// `isPushed` (never true for a habit — only `OpenRecurringTaskOccurrence`
     /// ever sets it) shows a small "Pushed" tag, so it's clear this row is
     /// here because of an earlier miss rather than today being one of
-    /// this task's own recurrence days.
-    private func occurrenceRow(name: String, isCompleted: Bool, isPushed: Bool = false, streak: Int? = nil, onToggle: @escaping () -> Void) -> some View {
-        Button(action: onToggle) {
+    /// this task's own recurrence days. `isMissed`/`isExcused` (never true
+    /// for a recurring task — those have no missed/excused concept, only
+    /// `isCompleted`) reuse the exact fill/icon treatment
+    /// `HabitsView.fillColor`/`occurrenceIcon` already use for `.missed`/
+    /// `.excused`, so a habit reads the same way whether you're looking at
+    /// the Habits tab or this calendar.
+    private func occurrenceRow(name: String, isCompleted: Bool, isMissed: Bool = false, isExcused: Bool = false, isPushed: Bool = false, streak: Int? = nil, onToggle: @escaping () -> Void) -> some View {
+        // Same fill/stroke mapping as `HabitsView.fillColor`, and the same
+        // icon mapping as `HabitsView.occurrenceIcon` — kept as plain
+        // local values rather than a fifth boolean branch inline below,
+        // since a fourth visual state (after complete/missed) is exactly
+        // where a chain of ternaries stops being readable.
+        let circleColor: Color = isCompleted ? .green : (isMissed ? .red.opacity(0.55) : (isExcused ? .gray.opacity(0.4) : .clear))
+        let circleStrokeColor: Color = isCompleted || isMissed || isExcused ? circleColor : .secondary.opacity(0.7)
+        return Button(action: onToggle) {
             HStack(spacing: 10) {
                 // Same checkmark-circle look
                 // `DayTimelineSegment.completeCircle` uses for a calendar
@@ -1002,19 +1072,30 @@ struct DayTimelineGridView: View {
                 // timed or not.
                 ZStack {
                     Circle()
-                        .fill(isCompleted ? Color.green : Color.clear)
-                        .overlay(Circle().strokeBorder(isCompleted ? Color.green : Color.secondary.opacity(0.7), lineWidth: 1.5))
+                        .fill(circleColor)
+                        .overlay(Circle().strokeBorder(circleStrokeColor, lineWidth: 1.5))
                     if isCompleted {
                         Image(systemName: "checkmark")
                             .font(.system(size: 8, weight: .bold))
                             .foregroundStyle(.white)
+                    } else if isMissed {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.white)
+                    } else if isExcused {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.secondary)
                     }
                 }
                 .frame(width: 15, height: 15)
                 // Same title font a Specific-Time habit's own calendar
                 // block uses (see `DayTimelineSegment.blockContent`), so
                 // an AM/Midday/PM occurrence reads as the same kind of
-                // thing, just without a time.
+                // thing, just without a time. Strikethrough stays tied to
+                // completion specifically, not missed — crossed-out reads
+                // as "done," which a miss isn't; the red circle alone
+                // already carries that distinction.
                 Text(name)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.primary)
@@ -1037,7 +1118,7 @@ struct DayTimelineGridView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .opacity(isCompleted ? 0.5 : 1)
+        .opacity(isCompleted || isMissed || isExcused ? 0.5 : 1)
     }
 
     /// Same sign-to-color mapping `HabitsView` already uses for its own
@@ -1049,18 +1130,23 @@ struct DayTimelineGridView: View {
         return .secondary
     }
 
-    /// Mirrors `HabitsView.toggleOccurrence`'s completion side (both
-    /// directions — checking and un-checking) — an AM/Midday/PM
-    /// occurrence never has a `ScheduledBlock` to keep in sync (see
-    /// `AISchedulingService.placeHabitsAndRecurringTasks`), so there's
-    /// nothing here beyond the log itself.
-    private func toggleHabitOccurrence(habit: Habit, index: Int, isCompleted: Bool) {
+    /// Every state routes through `Habit.cycleOccurrence` — the same
+    /// four-state cycle (`.none` → `.complete` → `.missed` → `.excused` →
+    /// `.none`) the Habits tab's own tap already uses. Used to special-case
+    /// `.none`/`.complete` into a plain two-way toggle (check/un-check) and
+    /// only send `.missed`/`.excused` through the real cycle; now there's
+    /// one behavior for every state, not two — tapping a complete
+    /// occurrence here now advances to `.missed` rather than un-checking
+    /// it, matching the Habits tab exactly rather than offering a
+    /// calendar-only shortcut back to untouched. `cycleOccurrence` itself
+    /// reads the occurrence's current status, so the caller doesn't need
+    /// to know or pass it.
+    private func toggleHabitOccurrence(habit: Habit, index: Int) {
         let perfStart = Date()
         DiagFileLog.write("PERF toggleHabit ENTER habit=\(habit.name) index=\(index)")
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: targetDate)
-        let log = habit.logOrCreate(on: today, context: modelContext, calendar: calendar)
-        log.setOccurrence(index, to: isCompleted ? .none : .complete)
+        habit.cycleOccurrence(index, on: today, context: modelContext, calendar: calendar)
         DiagFileLog.write("PERF toggleHabit afterWrite dt=\(Date().timeIntervalSince(perfStart))")
         habitOccurrenceRefreshTick += 1
         HabitStatsRefreshCoordinator.shared.habitLogsChanged()
@@ -2481,6 +2567,9 @@ private struct DayTimelineSegment: View {
                             .font(.caption.weight(.semibold))
                             .lineLimit(1)
                             .strikethrough(occurrence.isCompleted)
+                        if occurrence.isPushed {
+                            pushedTag
+                        }
                         Text(timeRangeText(occurrence.startTime, occurrence.endTime))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
@@ -2495,6 +2584,9 @@ private struct DayTimelineSegment: View {
                                 .font(.caption.weight(.semibold))
                                 .lineLimit(2)
                                 .strikethrough(occurrence.isCompleted)
+                            if occurrence.isPushed {
+                                pushedTag
+                            }
                         }
                         .foregroundStyle(occurrence.isCompleted ? .secondary : .primary)
                         Text(timeRangeText(occurrence.startTime, occurrence.endTime))
@@ -2516,6 +2608,19 @@ private struct DayTimelineSegment: View {
                 .padding(2)
             }
         }
+    }
+
+    /// Same "Pushed" capsule `DayTimelineGridView.occurrenceRow` already
+    /// shows for a carried-forward AM/Midday/PM occurrence — reused here
+    /// rather than a second indicator, for a carried-forward Specific-Time
+    /// projection.
+    private var pushedTag: some View {
+        Text("Pushed")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.secondary.opacity(0.2), in: Capsule())
     }
 
     private func completeCircle(for block: ScheduledBlock) -> some View {
