@@ -165,6 +165,14 @@ struct OverdueBlocksReviewList: View {
     /// before Next actually commits it. `nil` (the default) falls back
     /// to reading the model directly, unchanged from before this existed.
     var isEffectivelyCompleted: ((ReviewItem) -> Bool)? = nil
+    /// Set by the caller to a `ReviewItem.id` to scroll that row into
+    /// view (e.g. Nightly Review's "N habits still unmarked" jump-to
+    /// button, for a long list where the gate is blocking on a row
+    /// that's scrolled off-screen) — reset back to `nil` immediately
+    /// after the scroll runs, so setting the same id again still fires
+    /// `onChange`. `.constant(nil)` (the default) makes this a no-op for
+    /// callers with nothing to jump to.
+    var scrollTarget: Binding<String?> = .constant(nil)
 
     // `internal` for the same testability reason as `ReviewItem`'s sort
     // fields above.
@@ -203,24 +211,34 @@ struct OverdueBlocksReviewList: View {
     }
 
     var body: some View {
-        List {
-            if items.isEmpty {
-                Text("Nothing to review.")
-                    .foregroundStyle(.secondary)
-            }
-            ForEach(groupedByDay) { group in
-                Section(dayLabel(group.day)) {
-                    ForEach(group.items) { item in
-                        row(for: item)
+        ScrollViewReader { proxy in
+            List {
+                if items.isEmpty {
+                    Text("Nothing to review.")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(groupedByDay) { group in
+                    Section(dayLabel(group.day)) {
+                        ForEach(group.items) { item in
+                            row(for: item)
+                                .id(item.id)
+                        }
                     }
                 }
             }
-        }
-        .toolbar {
-            if let onDone {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done", action: onDone)
+            .toolbar {
+                if let onDone {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done", action: onDone)
+                    }
                 }
+            }
+            .onChange(of: scrollTarget.wrappedValue) { _, target in
+                guard let target else { return }
+                withAnimation {
+                    proxy.scrollTo(target, anchor: .center)
+                }
+                scrollTarget.wrappedValue = nil
             }
         }
     }

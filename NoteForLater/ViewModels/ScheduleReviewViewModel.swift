@@ -2202,6 +2202,37 @@ final class ScheduleReviewViewModel {
         }
     }
 
+    /// **The Today-step "Next" gate's core predicate — habits only.**
+    /// `NightlyReviewView.unresolvedHabitOccurrences`'s logic, extracted
+    /// so it's unit-testable without constructing a live view (its
+    /// `@Query` properties make that impractical). Deliberately scoped to
+    /// habit occurrences alone, not blocks or meals: those only ever
+    /// expose a single `isCompleted` boolean with no "explicitly decided
+    /// not done" state distinct from "haven't looked at it," and leaving
+    /// one incomplete is the normal input the push-forward pipeline
+    /// (`NightlyReviewView.advance()`'s recurring-push/re-guarantee-
+    /// placement logic, and the meal backlog in `todayMealSelections`) is
+    /// built to absorb — gating on those would block the review on any
+    /// ordinary night with leftover work, with no way to clear it short
+    /// of falsely marking it complete. A habit occurrence is different:
+    /// `Habit.cycleOccurrence` always reaches complete/missed/excused in
+    /// a bounded number of taps, and `.none` is the one status this
+    /// app's habit-review design treats as "not actually looked at,"
+    /// never as an accepted final state — do not widen this to include
+    /// blocks/meals without re-deciding that; see the caller's own
+    /// comment for the fuller reasoning.
+    static func unresolvedHabitOccurrences(_ occurrences: [HabitReviewOccurrence]) -> [HabitReviewOccurrence] {
+        occurrences.filter { $0.status == .none }
+    }
+
+    /// The short line shown next to a disabled Next button on the Today
+    /// step — deliberately says "habit(s)," not "item(s)," so it can't be
+    /// misread as counting an unfinished task block, which this gate
+    /// never touches (see `unresolvedHabitOccurrences` above).
+    static func habitGateMessage(unresolvedCount: Int) -> String {
+        unresolvedCount == 1 ? "1 habit still unmarked" : "\(unresolvedCount) habits still unmarked"
+    }
+
     /// `NightlyReviewView.completedTasksWithNoBlock`'s core logic,
     /// extracted so the day-granularity bound (via `NightlyReviewCompletionState
     /// .completedSinceBound`) is unit-testable without constructing a live

@@ -102,6 +102,12 @@ struct NightlyReviewView: View {
     /// frozen, status live — that split is deliberate, not an oversight to
     /// clean up later.
     @State private var frozenTodayHabitOccurrences: [HabitReviewOccurrence] = []
+    /// Set to a `ReviewItem.id` to make `OverdueBlocksReviewList` scroll
+    /// that row into view — how `jumpToFirstUnresolvedHabit` finds a
+    /// blocking row in a long list. Self-resets to `nil` after each
+    /// scroll (see `OverdueBlocksReviewList.scrollTarget`), so no reset
+    /// needed elsewhere.
+    @State private var scrollToReviewItemID: String? = nil
     /// Same idea as `stagedTodayToggleIDs`, for the 2-Minute Tasks step —
     /// committed in `advance()`'s `next == .today` branch instead (that
     /// step now runs *before* Today Review, not after it).
@@ -311,23 +317,80 @@ struct NightlyReviewView: View {
     }
 
     private var navBar: some View {
-        HStack {
-            Button("Close") { finishAndDismiss() }
-            if step != .chooseDay {
-                Button("Back", action: back)
+        VStack(spacing: 6) {
+            // Deliberately its own row, above the buttons, rather than a
+            // disabled-Next tooltip — a dead button with no visible reason
+            // reads as broken, not gated (see `unresolvedHabitOccurrences`'s
+            // own comment for why this only ever counts habits).
+            if step == .today, !unresolvedHabitOccurrences.isEmpty {
+                Button(action: jumpToFirstUnresolvedHabit) {
+                    Label(unresolvedHabitGateMessage, systemImage: "arrow.down.circle")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.orange)
+                }
             }
-            Spacer()
-            if step == .tomorrow {
-                Button("Done") { finishAndDismiss() }
-                    .buttonStyle(.borderedProminent)
-            } else {
-                Button("Next", action: advance)
-                    .buttonStyle(.borderedProminent)
+            HStack {
+                Button("Close") { finishAndDismiss() }
+                if step != .chooseDay {
+                    Button("Back", action: back)
+                }
+                Spacer()
+                if step == .tomorrow {
+                    Button("Done") { finishAndDismiss() }
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    Button("Next", action: advance)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(step == .today && !unresolvedHabitOccurrences.isEmpty)
+                }
             }
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    /// **The Today-step Next gate — habits only, deliberately scoped.**
+    /// Reads from `openHabitOccurrencesForReview` below (this view's own
+    /// display-facing wrapper around the frozen set), so it's checking
+    /// exactly what's rendered, not a fresh unfiltered query.
+    ///
+    /// Blocks and meals are *not* part of this gate, and must not be
+    /// added to it later without re-litigating this: both only ever
+    /// expose a single `isCompleted` boolean with no "explicitly decided
+    /// not done" state distinct from "haven't looked at it yet," and
+    /// leaving one incomplete is the normal, expected input the
+    /// push-forward pipeline is built around — `advance()` already pushes
+    /// an incomplete recurring habit/task block forward and re-guarantees
+    /// placement for a non-recurring one, and an incomplete meal just sits
+    /// in next time's backlog by design (see `todayMealSelections`).
+    /// Gating Next on those being "resolved" would block the review on
+    /// any ordinary night with leftover work, with no way to explicitly
+    /// clear it short of falsely marking it complete — a permanently
+    /// uncompletable review, which is worse than the missed-row problem
+    /// this gate exists to solve. Habits are different: the four-state
+    /// cycle (`Habit.cycleOccurrence`) always reaches a genuine resolved
+    /// state (complete/missed/excused) in a bounded number of taps, and
+    /// `.none` is the one state this app's whole habit-review design
+    /// treats as "not actually looked at yet," not as an accepted
+    /// terminal state — see the missed sweep this gate makes largely
+    /// redundant but does not replace, `markUnresolvedHabitOccurrencesAsMissed`.
+    private var unresolvedHabitOccurrences: [HabitReviewOccurrence] {
+        ScheduleReviewViewModel.unresolvedHabitOccurrences(openHabitOccurrencesForReview)
+    }
+
+    private var unresolvedHabitGateMessage: String {
+        ScheduleReviewViewModel.habitGateMessage(unresolvedCount: unresolvedHabitOccurrences.count)
+    }
+
+    /// Scrolls the first still-`.none` habit row into view — for a long
+    /// list, "N habits still unmarked" on its own would mean hunting for
+    /// them one at a time. Jumps to the first only; tapping again after
+    /// resolving it lands on whichever is first next, which in practice
+    /// walks the whole blocking set one tap at a time.
+    private func jumpToFirstUnresolvedHabit() {
+        guard let first = unresolvedHabitOccurrences.first else { return }
+        scrollToReviewItemID = "habit-\(first.id)"
     }
 
     /// Mirrors `advance()`'s forward auto-skip, in reverse: walks backward
@@ -982,7 +1045,7 @@ struct NightlyReviewView: View {
                         stagedTodayToggleIDs.insert(item.id)
                     }
                 }
-            }, isEffectivelyCompleted: effectiveCompleted)
+            }, isEffectivelyCompleted: effectiveCompleted, scrollTarget: $scrollToReviewItemID)
         } else {
             ProgressView()
         }
