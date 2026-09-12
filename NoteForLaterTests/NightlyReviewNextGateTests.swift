@@ -110,8 +110,17 @@ final class NightlyReviewNextGateTests: XCTestCase {
     /// so it can't be misread as counting an unfinished task block, which
     /// this gate never touches.
     func test_gateMessage_namesHabitsSpecifically_andPluralizes() {
-        XCTAssertEqual(ScheduleReviewViewModel.habitGateMessage(unresolvedCount: 1), "1 habit still unmarked")
-        XCTAssertEqual(ScheduleReviewViewModel.habitGateMessage(unresolvedCount: 3), "3 habits still unmarked")
-        XCTAssertFalse(ScheduleReviewViewModel.habitGateMessage(unresolvedCount: 3).contains("item"), "must say habits, not items — blocks/meals aren't part of this gate")
+        XCTAssertEqual(ScheduleReviewViewModel.unresolvedGateMessage(unresolvedHabitCount: 1, unresolvedRecurringTaskCount: 0), "1 habit still unmarked")
+        XCTAssertEqual(ScheduleReviewViewModel.unresolvedGateMessage(unresolvedHabitCount: 3, unresolvedRecurringTaskCount: 0), "3 habits still unmarked")
+        XCTAssertFalse(ScheduleReviewViewModel.unresolvedGateMessage(unresolvedHabitCount: 3, unresolvedRecurringTaskCount: 0).contains("item"), "must say habits, not items — blocks/meals aren't part of this gate")
+    }
+
+    func test_gateMessage_namesRecurringTasksSpecifically_andPluralizes() {
+        XCTAssertEqual(ScheduleReviewViewModel.unresolvedGateMessage(unresolvedHabitCount: 0, unresolvedRecurringTaskCount: 1), "1 task still unmarked")
+        XCTAssertEqual(ScheduleReviewViewModel.unresolvedGateMessage(unresolvedHabitCount: 0, unresolvedRecurringTaskCount: 2), "2 tasks still unmarked")
+    }
+
+    func test_gateMessage_combinesBothCategories() {
+        XCTAssertEqual(ScheduleReviewViewModel.unresolvedGateMessage(unresolvedHabitCount: 1, unresolvedRecurringTaskCount: 2), "1 habit and 2 tasks still unmarked")
     }
 }

@@ -102,8 +102,22 @@ struct NightlyReviewView: View {
     /// frozen, status live — that split is deliberate, not an oversight to
     /// clean up later.
     @State private var frozenTodayHabitOccurrences: [HabitReviewOccurrence] = []
+    /// Same idea as `frozenTodayHabitOccurrences`, for AM/Midday/PM
+    /// recurring task occurrences — populated from `ScheduleReviewViewModel
+    /// .allRecurringTaskOccurrencesForReview` (display list, every status),
+    /// never `openRecurringTaskOccurrencesForReview` (operational, `.none`
+    /// only) for the identical reason `frozenTodayHabitOccurrences` isn't
+    /// either. Identity frozen, status read live — same split, same
+    /// "do not simplify this back together" warning.
+    @State private var frozenTodayRecurringTaskOccurrences: [ScheduleReviewViewModel.RecurringTaskReviewOccurrence] = []
+    /// Ids of `PushedRecurringOccurrence` records created by an
+    /// interactive missed-tap during this Today step (see `pushIfMissed`),
+    /// as opposed to `advance()`'s own batch sweep — tracked so the
+    /// one-hop-forward step in `advance()` catches these too, not just the
+    /// batch-created ones. See that call site's own comment.
+    @State private var immediatelyPushedRecurringOccurrenceIDs: Set<UUID> = []
     /// Set to a `ReviewItem.id` to make `OverdueBlocksReviewList` scroll
-    /// that row into view — how `jumpToFirstUnresolvedHabit` finds a
+    /// that row into view — how `jumpToFirstUnresolvedGateItem` finds a
     /// blocking row in a long list. Self-resets to `nil` after each
     /// scroll (see `OverdueBlocksReviewList.scrollTarget`), so no reset
     /// needed elsewhere.
@@ -320,11 +334,11 @@ struct NightlyReviewView: View {
         VStack(spacing: 6) {
             // Deliberately its own row, above the buttons, rather than a
             // disabled-Next tooltip — a dead button with no visible reason
-            // reads as broken, not gated (see `unresolvedHabitOccurrences`'s
-            // own comment for why this only ever counts habits).
-            if step == .today, !unresolvedHabitOccurrences.isEmpty {
-                Button(action: jumpToFirstUnresolvedHabit) {
-                    Label(unresolvedHabitGateMessage, systemImage: "arrow.down.circle")
+            // reads as broken, not gated (see `unresolvedGateReviewItems`'s
+            // own comment for exactly what this counts and why).
+            if step == .today, !unresolvedGateReviewItems.isEmpty {
+                Button(action: jumpToFirstUnresolvedGateItem) {
+                    Label(unresolvedGateMessage, systemImage: "arrow.down.circle")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.orange)
                 }
@@ -341,7 +355,7 @@ struct NightlyReviewView: View {
                 } else {
                     Button("Next", action: advance)
                         .buttonStyle(.borderedProminent)
-                        .disabled(step == .today && !unresolvedHabitOccurrences.isEmpty)
+                        .disabled(step == .today && !unresolvedGateReviewItems.isEmpty)
                 }
             }
         }
@@ -350,47 +364,67 @@ struct NightlyReviewView: View {
         .background(.bar)
     }
 
-    /// **The Today-step Next gate — habits only, deliberately scoped.**
-    /// Reads from `openHabitOccurrencesForReview` below (this view's own
-    /// display-facing wrapper around the frozen set), so it's checking
-    /// exactly what's rendered, not a fresh unfiltered query.
+    /// **The Today-step Next gate — habits and recurring tasks,
+    /// deliberately scoped to exactly those two.** Built by filtering
+    /// `reviewItems` itself (the same merged, sorted list the step
+    /// renders), so a row's gate status and its rendered position always
+    /// agree, and "jump to first" below lands on whichever blocking row
+    /// actually appears first on screen — not a second, independently-
+    /// ordered notion of "first."
     ///
-    /// Blocks and meals are *not* part of this gate, and must not be
-    /// added to it later without re-litigating this: both only ever
-    /// expose a single `isCompleted` boolean with no "explicitly decided
-    /// not done" state distinct from "haven't looked at it yet," and
-    /// leaving one incomplete is the normal, expected input the
-    /// push-forward pipeline is built around — `advance()` already pushes
-    /// an incomplete recurring habit/task block forward and re-guarantees
-    /// placement for a non-recurring one, and an incomplete meal just sits
-    /// in next time's backlog by design (see `todayMealSelections`).
-    /// Gating Next on those being "resolved" would block the review on
-    /// any ordinary night with leftover work, with no way to explicitly
-    /// clear it short of falsely marking it complete — a permanently
-    /// uncompletable review, which is worse than the missed-row problem
-    /// this gate exists to solve. Habits are different: the four-state
-    /// cycle (`Habit.cycleOccurrence`) always reaches a genuine resolved
-    /// state (complete/missed/excused) in a bounded number of taps, and
-    /// `.none` is the one state this app's whole habit-review design
-    /// treats as "not actually looked at yet," not as an accepted
-    /// terminal state — see the missed sweep this gate makes largely
-    /// redundant but does not replace, `markUnresolvedHabitOccurrencesAsMissed`.
-    private var unresolvedHabitOccurrences: [HabitReviewOccurrence] {
-        ScheduleReviewViewModel.unresolvedHabitOccurrences(openHabitOccurrencesForReview)
+    /// Non-recurring blocks and meals are **not** part of this gate, and
+    /// must not be added to it later without re-litigating this: both
+    /// only ever expose a single `isCompleted` boolean with no
+    /// "explicitly decided not done" state distinct from "haven't looked
+    /// at it yet," and leaving one incomplete is the normal, expected
+    /// input the push-forward pipeline is built around — `advance()`
+    /// already pushes an incomplete non-recurring task forward
+    /// (`guaranteePlacement`) and an incomplete meal just sits in next
+    /// time's backlog by design (see `todayMealSelections`). Gating Next
+    /// on those being "resolved" would block the review on any ordinary
+    /// night with leftover work, with no way to explicitly clear it short
+    /// of falsely marking it complete — a permanently uncompletable
+    /// review, which is worse than the missed-row problem this gate
+    /// exists to solve.
+    ///
+    /// Habits and recurring tasks are different: both cycle through a
+    /// bounded set of genuine terminal states (`Habit.cycleOccurrence`'s
+    /// four, `TaskItem.cycleRecurringOccurrence`'s three) in a bounded
+    /// number of taps, and `.none` is the one state either design treats
+    /// as "not actually looked at yet," never as an accepted final state
+    /// — see the missed sweeps this gate makes largely redundant but does
+    /// not replace, `markUnresolvedHabitOccurrencesAsMissed` and
+    /// `pushMissedRecurringOccurrences`. A recurring task's Specific-Time
+    /// occurrence is included here even though it renders as `.block` —
+    /// `task.isRecurring` is what tells it apart from an ordinary,
+    /// deliberately-ungated block.
+    private var unresolvedGateReviewItems: [ReviewItem] {
+        reviewItems.filter { item in
+            switch item {
+            case .habit(let occurrence): return occurrence.status == .none
+            case .recurringTask(let occurrence): return occurrence.status == .none
+            case .block(let block):
+                guard let task = block.task, task.isRecurring, task.recurrenceTimeMode == .specific else { return false }
+                return ScheduleReviewViewModel.recurringTaskOccurrenceStatus(task: task, on: block.date, context: modelContext) == .none
+            case .completedTask, .meal: return false
+            }
+        }
     }
 
-    private var unresolvedHabitGateMessage: String {
-        ScheduleReviewViewModel.habitGateMessage(unresolvedCount: unresolvedHabitOccurrences.count)
+    private var unresolvedGateMessage: String {
+        let habitCount = unresolvedGateReviewItems.filter { if case .habit = $0 { return true }; return false }.count
+        let taskCount = unresolvedGateReviewItems.count - habitCount
+        return ScheduleReviewViewModel.unresolvedGateMessage(unresolvedHabitCount: habitCount, unresolvedRecurringTaskCount: taskCount)
     }
 
-    /// Scrolls the first still-`.none` habit row into view — for a long
-    /// list, "N habits still unmarked" on its own would mean hunting for
-    /// them one at a time. Jumps to the first only; tapping again after
-    /// resolving it lands on whichever is first next, which in practice
-    /// walks the whole blocking set one tap at a time.
-    private func jumpToFirstUnresolvedHabit() {
-        guard let first = unresolvedHabitOccurrences.first else { return }
-        scrollToReviewItemID = "habit-\(first.id)"
+    /// Scrolls the first blocking row (in the same order the list itself
+    /// renders — see `unresolvedGateReviewItems`) into view. Jumps to the
+    /// first only; tapping again after resolving it lands on whichever is
+    /// first next, which in practice walks the whole blocking set one tap
+    /// at a time.
+    private func jumpToFirstUnresolvedGateItem() {
+        guard let first = unresolvedGateReviewItems.first else { return }
+        scrollToReviewItemID = first.id
     }
 
     /// Mirrors `advance()`'s forward auto-skip, in reverse: walks backward
@@ -484,6 +518,15 @@ struct NightlyReviewView: View {
                 upTo: reviewDisplayCutoff,
                 completedSince: NightlyReviewCompletionState.shared.lastClosedReviewDay
             )
+            // Same freeze, same reasoning, for AM/Midday/PM recurring
+            // tasks — see `frozenTodayRecurringTaskOccurrences`'s own doc
+            // comment.
+            frozenTodayRecurringTaskOccurrences = ScheduleReviewViewModel.allRecurringTaskOccurrencesForReview(
+                tasks: allTasks,
+                context: modelContext,
+                upTo: reviewDisplayCutoff,
+                completedSince: NightlyReviewCompletionState.shared.lastClosedReviewDay
+            )
         }
         if next == .twoMinuteTasks {
             let pending = (twoMinuteShelf?.tasks ?? []).filter { !$0.isCompleted && $0.isEligibleToStart(on: reviewDate) }
@@ -526,6 +569,11 @@ struct NightlyReviewView: View {
                     // (see `todayStep`), so its id never lands in
                     // `stagedTodayToggleIDs` for this loop's own `where`
                     // clause to match.
+                    break
+                case .recurringTask:
+                    // Never actually reached — same reasoning as `.habit`:
+                    // a `.recurringTask` tap writes immediately via
+                    // `cycleRecurringTaskReviewOccurrence`.
                     break
                 case .completedTask:
                     break
@@ -596,6 +644,32 @@ struct NightlyReviewView: View {
             let freshlyPushedRecurringOccurrences = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
                 reviewedBlocks: reviewedBlocks, tasks: allTasks, context: modelContext, cutoff: frozenCutoff
             )
+            // Immediate-tap-created pushes (see `pushIfMissed`, fired
+            // whenever cycling a habit-style row this step landed on
+            // `.missed`) aren't in `freshlyPushedRecurringOccurrences` —
+            // that only holds records the sweep call just above created
+            // itself. Fetched here by id and folded in below so the
+            // hop-forward loop treats both origins identically — without
+            // this, a tap-created push would sit at today's date, un-
+            // hopped, until the next app launch, silently undoing "pushes
+            // immediately." A push a later tap in this same session
+            // resolved (cycled back past `.missed` to `.complete`) is
+            // deleted here instead of hopped — reusing `isAlreadyResolved`,
+            // written for exactly this, rather than a second bespoke check.
+            let calendarForPushCleanup = Calendar.current
+            let tapPushedRecurringOccurrences: [(occurrence: PushedRecurringOccurrence, task: TaskItem, missedDay: Date)] = immediatelyPushedRecurringOccurrenceIDs.compactMap { id in
+                guard let occurrence = (try? modelContext.fetch(FetchDescriptor<PushedRecurringOccurrence>(predicate: #Predicate { $0.id == id })))?.first,
+                      let task = allTasks.first(where: { $0.id == occurrence.taskID })
+                else { return nil }
+                if PushedRecurringOccurrence.isAlreadyResolved(occurrence, task: task, calendar: calendarForPushCleanup, context: modelContext) {
+                    modelContext.delete(occurrence)
+                    return nil
+                }
+                guard calendarForPushCleanup.isDate(occurrence.currentDate, inSameDayAs: occurrence.originalDate) else { return nil }
+                return (occurrence, task, occurrence.originalDate)
+            }
+            immediatelyPushedRecurringOccurrenceIDs = []
+            let allFreshRecurringTaskPushes = freshlyPushedRecurringOccurrences + tapPushedRecurringOccurrences
 
             // A non-recurring task's own incomplete block is about to be
             // deleted outright by `clearIncompletePastBlocks` below too —
@@ -688,7 +762,7 @@ struct NightlyReviewView: View {
                 // to catch all the way up, deliberately: this Task isn't
                 // the place to fast-forward stale backlog.
                 let calendar = Calendar.current
-                for pushed in freshlyPushedRecurringOccurrences {
+                for pushed in allFreshRecurringTaskPushes {
                     guard let next = calendar.date(byAdding: .day, value: 1, to: pushed.missedDay) else { continue }
                     PushedRecurringOccurrence.advanceOneHop(pushed.occurrence, task: pushed.task, from: pushed.missedDay, to: next, calendar: calendar, context: modelContext)
                 }
@@ -866,6 +940,7 @@ struct NightlyReviewView: View {
             stagedTodayToggleIDs = []
             stagedMealSelectionIDs = []
             frozenTodayHabitOccurrences = []
+            frozenTodayRecurringTaskOccurrences = []
         }
         .onAppear {
             // Only ever applied once — after this, whatever the user
@@ -976,6 +1051,7 @@ struct NightlyReviewView: View {
     private var reviewItems: [ReviewItem] {
         reviewableBlocks.map { .block($0) }
             + openHabitOccurrencesForReview.map { .habit($0) }
+            + openRecurringTaskOccurrencesForReview.map { .recurringTask($0) }
             + completedTasksWithNoBlock.map { record in
                 .completedTask(record, isTwoMinuteTask: twoMinuteReviewTaskIDs.contains(record.taskID))
             }
@@ -1032,12 +1108,23 @@ struct NightlyReviewView: View {
                 switch item {
                 case .habit(let occurrence):
                     cycleHabitReviewOccurrence(occurrence)
+                case .recurringTask(let occurrence):
+                    cycleRecurringTaskReviewOccurrence(occurrence)
                 case .meal(let selection, _):
                     if stagedMealSelectionIDs.contains(selection.id) {
                         stagedMealSelectionIDs.remove(selection.id)
                     } else {
                         stagedMealSelectionIDs.insert(selection.id)
                     }
+                case .block(let block) where block.task?.isRecurring == true:
+                    // A recurring task's Specific-Time block goes through
+                    // the same immediate 3-state cycle as `.recurringTask`
+                    // above — it's never staged, same reasoning as
+                    // `.habit`/`.recurringTask`: the next tap's result
+                    // depends on the block's *actual* current status, which
+                    // a staged pending-flip can't represent for more than
+                    // two states.
+                    cycleRecurringTaskReviewOccurrence(block: block)
                 case .block, .completedTask:
                     if stagedTodayToggleIDs.contains(item.id) {
                         stagedTodayToggleIDs.remove(item.id)
@@ -1065,6 +1152,8 @@ struct NightlyReviewView: View {
             return stagedTodayToggleIDs.contains(item.id) ? !block.isCompleted : block.isCompleted
         case .habit(let occurrence):
             return occurrence.isCompleted
+        case .recurringTask(let occurrence):
+            return occurrence.status == .complete
         case .completedTask:
             return true
         case .meal(let selection, _):
@@ -1094,6 +1183,15 @@ struct NightlyReviewView: View {
         ScheduleReviewViewModel.refreshedHabitReviewOccurrences(frozen: frozenTodayHabitOccurrences, context: modelContext)
     }
 
+    /// This view's own display-facing wrapper around
+    /// `frozenTodayRecurringTaskOccurrences` — same identity-frozen/
+    /// status-live split as `openHabitOccurrencesForReview` above, same
+    /// name deliberately (it's this view's wrapper, not the operational
+    /// list itself).
+    private var openRecurringTaskOccurrencesForReview: [ScheduleReviewViewModel.RecurringTaskReviewOccurrence] {
+        ScheduleReviewViewModel.refreshedRecurringTaskReviewOccurrences(frozen: frozenTodayRecurringTaskOccurrences, context: modelContext)
+    }
+
     /// Routes through the exact same four-state cycle
     /// (`none -> complete -> missed -> excused -> none`) the Habits tab
     /// and the day calendar already use — one behavior everywhere, not a
@@ -1115,6 +1213,49 @@ struct NightlyReviewView: View {
     /// `toggleHabitReviewOccurrence` and `markUnresolvedHabitOccurrencesAsMissed`.
     private func habitLog(for habit: Habit, on day: Date) -> HabitLog {
         habit.logOrCreate(on: day, context: modelContext, calendar: Calendar.current)
+    }
+
+    /// The recurring-task counterpart to `cycleHabitReviewOccurrence`, for
+    /// an AM/Midday/PM occurrence — routes through `TaskItem
+    /// .cycleRecurringOccurrence`, same "write immediately, no staged
+    /// pending-flip" reasoning.
+    private func cycleRecurringTaskReviewOccurrence(_ occurrence: ScheduleReviewViewModel.RecurringTaskReviewOccurrence) {
+        let day = Calendar.current.startOfDay(for: occurrence.targetTime)
+        pushIfMissed(task: occurrence.task, day: day)
+    }
+
+    /// The Specific-Time counterpart — same cycle, same immediate-push
+    /// behavior, different day source (`block.date`, not a stand-in
+    /// `targetTime`, since a real block already has one).
+    private func cycleRecurringTaskReviewOccurrence(block: ScheduledBlock) {
+        guard let task = block.task else { return }
+        pushIfMissed(task: task, day: block.date)
+    }
+
+    /// Cycles `task`'s occurrence on `day` and, per the "marking missed
+    /// pushes immediately" decision, creates the real
+    /// `PushedRecurringOccurrence` right here the moment the cycle lands
+    /// on `.missed` — not deferred to `advance()`'s commit-time sweep.
+    /// Shares `pushRecurringOccurrenceIfNeeded` with that sweep (see its
+    /// own doc comment) so the two can never both push the same task.
+    ///
+    /// Tracks the created record's id in `immediatelyPushedRecurringOccurrenceIDs`
+    /// so `advance()`'s own one-hop-forward step (which otherwise only
+    /// sees records *it* just created via the batch sweep) also catches
+    /// this one — without that, a push created here would sit at today's
+    /// date, un-hopped, until the next app launch, silently undoing
+    /// "pushes immediately." Does **not** delete the record if the task
+    /// later gets cycled back past `.missed` to `.none` within the same
+    /// session — see `advance()`'s own comment on why that's handled
+    /// there instead, via the already-existing `isAlreadyResolved` check,
+    /// rather than reversed eagerly here.
+    private func pushIfMissed(task: TaskItem, day: Date) {
+        let calendar = Calendar.current
+        let next = task.cycleRecurringOccurrence(on: day, context: modelContext, calendar: calendar)
+        guard next == .missed else { return }
+        if let occurrence = ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(task: task, missedDay: day, context: modelContext) {
+            immediatelyPushedRecurringOccurrenceIDs.insert(occurrence.id)
+        }
     }
 
     /// Marks every still-open (`.none`) habit occurrence the Today review

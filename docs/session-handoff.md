@@ -179,29 +179,46 @@ hasn't happened yet has nothing to keep a record of, so a pre-completed
 occurrence sitting there is just noise. Today's own completed occurrence
 still shows, same as everywhere else; only strictly-future days hide it.
 
-**Known issue, left deliberately unfixed — more likely to bite now than
-before the divergence above:** a real Specific-Time `ScheduledBlock`
-tracks completion on `block.isCompleted` and never reads
-`RecurringTaskLog` at all — that store has otherwise always been exclusive
-to the untimed (AM/Midday/PM) modes. A *projected* future occurrence's
-completion, though, is recorded in `RecurringTaskLog` (there's nothing
-else to write it to). If a real block later gets generated for a day
-whose projection was already completed — e.g. a `regenerateFromNow` walk
-finally reaches that far — the new block starts with `isCompleted =
-false` and the earlier completion is silently orphaned; nothing in
-`AISchedulingService`'s block-creation path ever consults
-`RecurringTaskLog` when creating one. Fixing it means teaching Specific-
-Time block creation to check `RecurringTaskLog` for that task/day and
-seed `isCompleted` from it — deliberately not done here, since that's
-touching the scheduling engine's own block-creation path for what's
-fundamentally a display-layer feature. **Before the hide-on-future-
-completion change above, this was at least visible** (the stale-but-
-completed projection kept showing faded, so a mismatch would have been
-noticeable if anyone looked closely). Now that a completed future
-projection is hidden, the orphaning is invisible until the real block
-eventually appears looking uncompleted, out of nowhere, with no
-on-screen trail back to the earlier completion. Whoever hits this will
-have no lead — worth fixing before it's reported as its own mystery bug.
+**Fixed** (was: "known issue, left deliberately unfixed" — see git
+history for this paragraph's original text if the old shape matters).
+The recurring-task tap-cycle upgrade (habits-style
+complete/missed/none, `TaskItem.cycleRecurringOccurrence`) made
+`RecurringTaskLog` the single source of truth for *both*
+`recurrenceTimeMode`s, not just the untimed ones — a real Specific-Time
+`ScheduledBlock`'s own `isCompleted` is now a display mirror only, kept
+in sync by `cycleRecurringOccurrence`, never read as truth. That alone
+doesn't close the gap described below, since a block created *before*
+this existed still starts with no mirror written — so
+`AISchedulingService.placeHabitsAndRecurringTasks` (the block-creation
+path this paragraph named as the fix) now also seeds a fresh block's
+`isCompleted` from `RecurringTaskLog.log(taskID:on:)` at creation time.
+Verified by direct code review rather than a test in this repo — a
+minimal-fixture call into the full scheduling pipeline crashed on an
+unrelated, pre-existing SwiftData issue before it could exercise this
+path; the fix itself is two lines and was read carefully instead.
+
+**Known test-harness limitation, confirmed pre-existing — do not
+rediscover this as a new bug.** Calling `MockAISchedulingService
+.placeHabitsAndRecurringTasks` from a unit test against a minimal
+in-memory fixture (a bare `Shelf` holding one Specific-Time recurring
+`TaskItem`, no habits, no free slots, no eligible-hours windows) crashes
+immediately with `malloc: *** error for object 0x...: pointer being
+freed was not allocated`, before any assertion runs. Reproduced with
+`git stash` against commit `4875169` (before the recurring-task
+tap-cycle work touched this file at all) — identical crash, same
+message, so this is not something that change introduced. Given the
+`RecurringTaskLog`/`MealSelection`-class history of "unregistered
+model" heap corruption, this was checked specifically: `RecurringTaskLog`
+and every other type reachable from this fixture's object graph is
+present in both the app's real `Schema` (`NoteForLaterApp.swift`) and
+the test's own `ModelContainer` type list, so that's ruled out as the
+cause. The actual mechanism wasn't tracked down further — root-causing
+a native SwiftData memory bug was out of scope for the change that hit
+it. Whoever needs to test this path: either construct a fuller fixture
+(populate `SchedulingRule`/`EligibleHoursWindow` etc. the way
+`SchedulingEngineTests` does for its own `placeHabitsAndRecurringTasks`-
+adjacent coverage) or verify by code review, as here — don't spend time
+suspecting whatever change you're making first.
 
 Tests: `NoteForLaterTests/DayTimelineProjectionAndStreakTests.swift`.
 Fail-then-pass verified on the future-day-with-no-block case, the

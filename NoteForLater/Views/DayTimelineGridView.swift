@@ -1167,7 +1167,7 @@ struct DayTimelineGridView: View {
         let today = calendar.startOfDay(for: targetDate)
         let log = RecurringTaskLog.logOrCreate(taskID: task.id, on: today, context: modelContext, calendar: calendar)
         DiagFileLog.write("PERF toggleRecurringTask afterLogOrCreate dt=\(Date().timeIntervalSince(perfStart))")
-        log.isCompleted = !isCompleted
+        log.status = isCompleted ? .none : .complete
         log.lastModified = .now
         if log.isCompleted {
             TaskCompletionRecord.upsert(for: task, in: modelContext)

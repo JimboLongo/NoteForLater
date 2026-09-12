@@ -1,14 +1,14 @@
 import Foundation
 import SwiftData
 
-/// Per-day completion for a recurring `TaskItem` shown as a plain
-/// AM/Midday/PM check-off item (see `TaskItem.recurrenceTimeMode`) —
-/// exists for the same reason `HabitLog` does: an occurrence like this
-/// never gets a `ScheduledBlock`, so there's no block-level
-/// `isCompleted` to toggle. Simpler than `HabitLog` in one respect — a
-/// recurring task has exactly one occurrence per day, never
-/// `timesPerDay`-many, so this tracks a single `isCompleted` rather than
-/// three occurrence-index arrays.
+/// Per-day status for a recurring `TaskItem` — the task counterpart to
+/// `HabitLog`, and (since a Nightly Review upgrade unified both time
+/// modes onto this single store) now the source of truth for a
+/// Specific-Time occurrence's completion too, not just the untimed
+/// AM/Midday/PM modes it originally covered. Simpler than `HabitLog` in
+/// one respect — a recurring task has exactly one occurrence per day,
+/// never `timesPerDay`-many, so this tracks a single `status` rather
+/// than three occurrence-index arrays.
 ///
 /// `taskID` is a copied `TaskItem.id`, not a `@Relationship` — same
 /// "survive the original being edited or deleted" reasoning
@@ -21,18 +21,44 @@ final class RecurringTaskLog {
     var id: UUID
     var taskID: UUID
     var date: Date
-    var isCompleted: Bool
+    /// Backing storage for `status` — see `OccurrenceStatus`'s own doc
+    /// comment for why this is a raw string, not the enum directly.
+    /// Defaults to `.none`'s raw value so a pre-migration row (which had
+    /// no `statusRaw` column at all) reads as untouched, matching the old
+    /// `isCompleted: Bool`'s own default of `false`.
+    var statusRaw: String = OccurrenceStatus.none.rawValue
     /// Same reason `HabitLog.lastModified` exists — reconciling duplicate
     /// same-day logs (a real, possible outcome of two near-simultaneous
     /// taps under SwiftData's own pending-insert timing) needs a way to
     /// tell which of two logs for the same day is the newer one.
     var lastModified: Date = Date.distantPast
 
-    init(taskID: UUID, date: Date, isCompleted: Bool = false) {
+    /// `complete -> missed -> none`, cycled by `TaskItem
+    /// .cycleRecurringOccurrence` — deliberately never `.excused`; that
+    /// state exists on the shared `OccurrenceStatus` enum only because
+    /// habits use it, not because a recurring task's cycle admits it.
+    /// Nothing ever writes `.excused` here.
+    var status: OccurrenceStatus {
+        get { OccurrenceStatus(rawValue: statusRaw) ?? .none }
+        set { statusRaw = newValue.rawValue }
+    }
+
+    /// Convenience read for every call site that only ever needed a
+    /// binary "is this genuinely done" — `.missed` reads `false` here,
+    /// same as `.none`, which is correct for all of them; none currently
+    /// need to tell "untouched" apart from "missed." **Get-only,
+    /// deliberately**: a setter here would let `log.isCompleted = false`
+    /// silently collapse an explicit `.missed` back to `.none` — every
+    /// write goes through `status` instead, which is why
+    /// `DayTimelineGridView.toggleRecurringTaskOccurrence` (the one
+    /// remaining external write site) sets `.status`, not this.
+    var isCompleted: Bool { status == .complete }
+
+    init(taskID: UUID, date: Date, status: OccurrenceStatus = .none) {
         self.id = UUID()
         self.taskID = taskID
         self.date = Calendar.current.startOfDay(for: date)
-        self.isCompleted = isCompleted
+        self.statusRaw = status.rawValue
         self.lastModified = Date()
     }
 

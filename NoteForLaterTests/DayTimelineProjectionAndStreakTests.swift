@@ -143,7 +143,7 @@ final class DayTimelineProjectionAndStreakTests: XCTestCase {
 
         // Complete *today's* occurrence only.
         let todaysLog = RecurringTaskLog.logOrCreate(taskID: task.id, on: fixedToday, context: context, calendar: calendar)
-        todaysLog.isCompleted = true
+        todaysLog.status = .complete
 
         let tomorrowsResult = ScheduleReviewViewModel.projectedRecurringTaskOccurrences(
             tasks: [task], materializedRows: [], targetDate: tomorrow, context: context, calendar: calendar, today: fixedToday
@@ -161,7 +161,7 @@ final class DayTimelineProjectionAndStreakTests: XCTestCase {
     func test_todaysOccurrence_markedComplete_stillShows() {
         let task = makeSpecificTimeTask(anchor: day(2026, 9, 1))
         let log = RecurringTaskLog.logOrCreate(taskID: task.id, on: fixedToday, context: context, calendar: calendar)
-        log.isCompleted = true
+        log.status = .complete
 
         let result = ScheduleReviewViewModel.projectedRecurringTaskOccurrences(
             tasks: [task], materializedRows: [], targetDate: fixedToday, context: context, calendar: calendar, today: fixedToday
@@ -188,7 +188,7 @@ final class DayTimelineProjectionAndStreakTests: XCTestCase {
         let futureDay = calendar.date(byAdding: .day, value: 5, to: fixedToday)!
         let task = makeSpecificTimeTask(anchor: day(2026, 9, 1))
         let log = RecurringTaskLog.logOrCreate(taskID: task.id, on: futureDay, context: context, calendar: calendar)
-        log.isCompleted = true
+        log.status = .complete
 
         let result = ScheduleReviewViewModel.projectedRecurringTaskOccurrences(
             tasks: [task], materializedRows: [], targetDate: futureDay, context: context, calendar: calendar, today: fixedToday
@@ -305,7 +305,7 @@ final class DayTimelineProjectionAndStreakTests: XCTestCase {
         let fixedToday = day(2026, 9, 10)
         let notAPatternDay = day(2026, 9, 20)
         let task = makeMonthlyTask(anchor: anchor)
-        RecurringTaskLog.logOrCreate(taskID: task.id, on: fixedToday, context: context, calendar: calendar).isCompleted = true
+        RecurringTaskLog.logOrCreate(taskID: task.id, on: fixedToday, context: context, calendar: calendar).status = .complete
 
         let result = ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
             tasks: [task], targetDate: notAPatternDay, alreadyCoveredTaskIDs: [], context: context, calendar: calendar, today: fixedToday

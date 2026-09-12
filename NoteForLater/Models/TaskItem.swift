@@ -242,6 +242,46 @@ final class TaskItem {
         return calendar.date(bySettingHour: anchorComponents.hour ?? 9, minute: anchorComponents.minute ?? 0, second: 0, of: date)
     }
 
+    /// The recurring-task counterpart to `Habit.cycleOccurrence` — same
+    /// "log is truth, a linked block is a mirror" shape, but a shorter
+    /// cycle: `none -> complete -> missed -> none`. No `.excused` — a
+    /// recurring task isn't excusable the way a habit occurrence is,
+    /// there's no notion of "this one didn't need to happen."
+    ///
+    /// Both `recurrenceTimeMode`s go through this identically —
+    /// Specific-Time's own `ScheduledBlock.isCompleted` is kept as a
+    /// display mirror only, exactly like a habit-linked block already
+    /// is, never the source of truth. This closes the orphaned-
+    /// completion gap in docs/session-handoff.md, where a projected
+    /// Specific-Time completion (written to `RecurringTaskLog`, the only
+    /// store that existed before a real block was generated) used to get
+    /// silently lost once a real block appeared, since block creation
+    /// never consulted the log. See `AISchedulingService
+    /// .placeHabitsAndRecurringTasks`'s block-creation path for the other
+    /// half of that fix — seeding a fresh block's `isCompleted` from this
+    /// same log.
+    @discardableResult
+    func cycleRecurringOccurrence(on date: Date, context: ModelContext, calendar: Calendar = .current) -> OccurrenceStatus {
+        let log = RecurringTaskLog.logOrCreate(taskID: id, on: date, context: context, calendar: calendar)
+        let next: OccurrenceStatus
+        switch log.status {
+        case .none: next = .complete
+        case .complete: next = .missed
+        case .missed, .excused: next = .none
+        }
+        log.status = next
+        log.lastModified = .now
+        if let block = (scheduledBlocks ?? []).first(where: { calendar.isDate($0.date, inSameDayAs: date) }) {
+            block.isCompleted = next == .complete
+        }
+        if next == .complete {
+            TaskCompletionRecord.upsert(for: self, in: context)
+        } else {
+            TaskCompletionRecord.remove(for: self, in: context)
+        }
+        return next
+    }
+
     /// The next date (today or later) this recurring task has an
     /// occurrence on, walking forward day by day — used to sort recurring
     /// tasks by soonest-first on their shelf (see `ShelfListView`). `nil`

@@ -9,7 +9,13 @@ enum HabitCompletionStatus: String, Codable {
 
 /// One occurrence's state within a day, cycled by tapping its circle:
 /// none → complete → missed → excused → none.
-enum OccurrenceStatus {
+///
+/// `String`-backed so `RecurringTaskLog.statusRaw` can store it the same
+/// way `Habit.occurrenceTimeModesRaw` stores `HabitOccurrenceTimeMode` —
+/// SwiftData persists primitives, not bare enums, directly. `HabitLog`
+/// itself doesn't need this (it tracks membership across three `[Int]`
+/// arrays instead, one call site, added only for the new reader).
+enum OccurrenceStatus: String {
     case none
     case complete
     case missed

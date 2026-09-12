@@ -2225,13 +2225,6 @@ final class ScheduleReviewViewModel {
         occurrences.filter { $0.status == .none }
     }
 
-    /// The short line shown next to a disabled Next button on the Today
-    /// step — deliberately says "habit(s)," not "item(s)," so it can't be
-    /// misread as counting an unfinished task block, which this gate
-    /// never touches (see `unresolvedHabitOccurrences` above).
-    static func habitGateMessage(unresolvedCount: Int) -> String {
-        unresolvedCount == 1 ? "1 habit still unmarked" : "\(unresolvedCount) habits still unmarked"
-    }
 
     /// `NightlyReviewView.completedTasksWithNoBlock`'s core logic,
     /// extracted so the day-granularity bound (via `NightlyReviewCompletionState
@@ -2445,14 +2438,29 @@ final class ScheduleReviewViewModel {
         !openHabitOccurrencesForReview(habits: habits, context: context, upTo: cutoff).isEmpty
     }
 
-    /// One recurring `TaskItem` occurrence, on a day it was due, still open
-    /// — the task counterpart to `HabitReviewOccurrence`.
+    /// One AM/Midday/PM recurring `TaskItem` occurrence — the task
+    /// counterpart to `HabitReviewOccurrence`, same fields for the same
+    /// reasons (`targetTime` is a stand-in, never shown, used purely for
+    /// sorting/grouping into `OverdueBlocksReviewList`; `modeLabel` is
+    /// what the row actually shows in its place). `status` is `.none` for
+    /// every occurrence this operational list (`openRecurringTaskOccurrencesForReview`)
+    /// produces — it exists on this struct only because
+    /// `allRecurringTaskOccurrencesForReview` (the display list) shares
+    /// the same type and needs to carry a real one.
     struct RecurringTaskReviewOccurrence: Identifiable {
         let id: String
         let task: TaskItem
-        let missedDate: Date
+        let status: OccurrenceStatus
+        let targetTime: Date
+        let modeLabel: String
     }
 
+    /// **Operational list — governs what the sweep/push logic acts on.**
+    /// Do not widen this to admit more statuses for display purposes; see
+    /// `allRecurringTaskOccurrencesForReview` below for that — same split,
+    /// same reasoning, as `openHabitOccurrencesForReview`/
+    /// `allHabitOccurrencesForReview`.
+    ///
     /// AM/Midday/PM recurring-`TaskItem` occurrences genuinely still open
     /// as of `cutoff` — the task counterpart to `openHabitOccurrencesForReview`,
     /// needed for the same reason: an occurrence in this mode never gets a
@@ -2495,9 +2503,9 @@ final class ScheduleReviewViewModel {
                 if task.hasRecurringOccurrence(on: cursor, calendar: calendar) {
                     let targetTime = calendar.date(byAdding: .minute, value: targetMinutes(for: task.recurrenceTimeMode), to: cursor) ?? cursor
                     if targetTime < cutoff {
-                        let isCompleted = RecurringTaskLog.log(taskID: task.id, on: cursor, context: context, calendar: calendar)?.isCompleted ?? false
-                        if !isCompleted {
-                            result.append(RecurringTaskReviewOccurrence(id: "\(task.id)-\(Int(cursor.timeIntervalSince1970))", task: task, missedDate: cursor))
+                        let status = RecurringTaskLog.log(taskID: task.id, on: cursor, context: context, calendar: calendar)?.status ?? .none
+                        if status == .none {
+                            result.append(RecurringTaskReviewOccurrence(id: "\(task.id)-\(Int(cursor.timeIntervalSince1970))", task: task, status: status, targetTime: targetTime, modeLabel: task.recurrenceTimeMode.label))
                         }
                     }
                 }
@@ -2508,16 +2516,139 @@ final class ScheduleReviewViewModel {
         return result
     }
 
+    /// **Display list — every status, mirrors `allHabitOccurrencesForReview`
+    /// exactly.** Same structure as `openRecurringTaskOccurrencesForReview`
+    /// above (forward day-scan, 400-day cap, `dueDate` bound, `.specific`-
+    /// mode exclusion) but with no status filter for `.none` (always
+    /// shown, unbounded backlog, same as before) — a resolved status
+    /// (`.complete`/`.missed`) is bounded to `cursor > completedSinceDay`
+    /// so a long-running daily task's whole resolved history doesn't
+    /// flood every future review. `completedSinceDay` falls back to
+    /// `.distantPast` when `completedSince` is `nil`.
+    static func allRecurringTaskOccurrencesForReview(tasks: [TaskItem], context: ModelContext, upTo cutoff: Date = .now, completedSince: Date?, calendar: Calendar = .current) -> [RecurringTaskReviewOccurrence] {
+        let cutoffDay = calendar.startOfDay(for: cutoff)
+        let completedSinceDay = calendar.startOfDay(for: completedSince ?? .distantPast)
+        var result: [RecurringTaskReviewOccurrence] = []
+        for task in tasks where task.isRecurring && task.recurrenceTimeMode != .specific {
+            guard let anchor = task.dueDate else { continue }
+            let anchorDay = calendar.startOfDay(for: anchor)
+            guard anchorDay <= cutoffDay else { continue }
+            let scanFloorDay = calendar.date(byAdding: .day, value: -400, to: cutoffDay) ?? anchorDay
+            var cursor = max(anchorDay, scanFloorDay)
+            while cursor <= cutoffDay {
+                if task.hasRecurringOccurrence(on: cursor, calendar: calendar) {
+                    let targetTime = calendar.date(byAdding: .minute, value: targetMinutes(for: task.recurrenceTimeMode), to: cursor) ?? cursor
+                    if targetTime < cutoff {
+                        let status = RecurringTaskLog.log(taskID: task.id, on: cursor, context: context, calendar: calendar)?.status ?? .none
+                        if status == .none || cursor > completedSinceDay {
+                            result.append(RecurringTaskReviewOccurrence(id: "\(task.id)-\(Int(cursor.timeIntervalSince1970))", task: task, status: status, targetTime: targetTime, modeLabel: task.recurrenceTimeMode.label))
+                        }
+                    }
+                }
+                guard let nextDay = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
+                cursor = nextDay
+            }
+        }
+        return result
+    }
+
+    /// `NightlyReviewView.openRecurringTaskOccurrencesForReview`'s (the
+    /// display-side wrapper's) core logic — the recurring-task
+    /// counterpart to `refreshedHabitReviewOccurrences`. Re-derives each
+    /// `frozen` occurrence's `status` fresh, right now, rather than
+    /// trusting whatever it was when `frozen` was captured — same
+    /// frozen-identity/live-status split.
+    static func refreshedRecurringTaskReviewOccurrences(frozen: [RecurringTaskReviewOccurrence], context: ModelContext, calendar: Calendar = .current) -> [RecurringTaskReviewOccurrence] {
+        frozen.map { occurrence in
+            let day = calendar.startOfDay(for: occurrence.targetTime)
+            let status = RecurringTaskLog.log(taskID: occurrence.task.id, on: day, context: context, calendar: calendar)?.status ?? .none
+            return RecurringTaskReviewOccurrence(id: occurrence.id, task: occurrence.task, status: status, targetTime: occurrence.targetTime, modeLabel: occurrence.modeLabel)
+        }
+    }
+
+    /// A Specific-Time recurring task's current status, read through
+    /// `RecurringTaskLog` — the single source of truth for both
+    /// `recurrenceTimeMode`s as of `TaskItem.cycleRecurringOccurrence` (see
+    /// its own doc comment). `block.isCompleted` is a display mirror only;
+    /// this is what `OverdueBlocksReviewList` actually renders/cycles for
+    /// a recurring task's block row, and what the Next gate checks for it.
+    static func recurringTaskOccurrenceStatus(task: TaskItem, on day: Date, context: ModelContext, calendar: Calendar = .current) -> OccurrenceStatus {
+        RecurringTaskLog.log(taskID: task.id, on: day, context: context, calendar: calendar)?.status ?? .none
+    }
+
+    /// The Next gate's predicate for the AM/Midday/PM half of recurring
+    /// tasks — mirrors `unresolvedHabitOccurrences` exactly.
+    static func unresolvedRecurringTaskOccurrences(_ occurrences: [RecurringTaskReviewOccurrence]) -> [RecurringTaskReviewOccurrence] {
+        occurrences.filter { $0.status == .none }
+    }
+
+    /// The Next gate's predicate for the Specific-Time half — a recurring
+    /// task's own block, still `.none` in `RecurringTaskLog`. Non-recurring
+    /// blocks are never included (`task.isRecurring` guard) — see
+    /// `NightlyReviewView.unresolvedGateReviewItems`'s own comment for why
+    /// those stay ungated.
+    static func unresolvedRecurringTaskBlocks(_ blocks: [ScheduledBlock], context: ModelContext, calendar: Calendar = .current) -> [ScheduledBlock] {
+        blocks.filter { block in
+            guard let task = block.task, task.isRecurring, task.recurrenceTimeMode == .specific else { return false }
+            return recurringTaskOccurrenceStatus(task: task, on: block.date, context: context, calendar: calendar) == .none
+        }
+    }
+
+    /// The short line shown next to a disabled Next button on the Today
+    /// step, naming exactly which gated categories are still blocking —
+    /// "habit(s)," "task(s)," or both, never the generic "item(s)" a
+    /// reader could misread as counting an ordinary unfinished (and
+    /// deliberately ungated) task block. Only ever called with at least
+    /// one nonzero count — the caller doesn't show this line otherwise.
+    static func unresolvedGateMessage(unresolvedHabitCount: Int, unresolvedRecurringTaskCount: Int) -> String {
+        var parts: [String] = []
+        if unresolvedHabitCount > 0 {
+            parts.append(unresolvedHabitCount == 1 ? "1 habit" : "\(unresolvedHabitCount) habits")
+        }
+        if unresolvedRecurringTaskCount > 0 {
+            parts.append(unresolvedRecurringTaskCount == 1 ? "1 task" : "\(unresolvedRecurringTaskCount) tasks")
+        }
+        return parts.joined(separator: " and ") + " still unmarked"
+    }
+
+    /// The guarded creation step shared by `pushMissedRecurringOccurrences`
+    /// (the commit-time sweep) and `NightlyReviewView
+    /// .cycleRecurringTaskReviewOccurrence` (an interactive tap landing on
+    /// `.missed`) — one implementation for "does this task already have an
+    /// active push, and if not, start one," so the two triggers can never
+    /// disagree about what counts as already-pushed. A fetch, not a
+    /// relationship read, so a record inserted earlier in this same call
+    /// (or by an interactive tap moments before Next) is visible here too.
+    /// Returns `nil` when a push was already active — the caller does
+    /// nothing further in that case, same as before this was extracted.
+    static func pushRecurringOccurrenceIfNeeded(task: TaskItem, missedDay: Date, context: ModelContext) -> PushedRecurringOccurrence? {
+        let taskID = task.id
+        let alreadyPushed = (try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>(
+            predicate: #Predicate { $0.taskID == taskID && !$0.isCompleted }
+        )))?.first != nil
+        guard !alreadyPushed else { return nil }
+        let occurrence = PushedRecurringOccurrence(taskID: taskID, originalDate: missedDay)
+        context.insert(occurrence)
+        return occurrence
+    }
+
     /// Creates a `PushedRecurringOccurrence` for every recurring task left
     /// incomplete by tonight's review that doesn't already have one
     /// pending — both the block-scoped case (Specific Time, sourced from
     /// `reviewedBlocks`) and the `RecurringTaskLog`-scoped case
     /// (AM/Midday/PM, sourced from `openRecurringTaskOccurrencesForReview`
     /// since those tasks have no block for the first loop to ever see).
-    /// Same "skip if already pushed" guard for both — a fetch, not a
-    /// relationship read, so a record inserted earlier in this same call is
-    /// visible to a later check within it (matters when a task shows up in
-    /// more than one day's worth of backlog at once).
+    /// Uses `pushRecurringOccurrenceIfNeeded` for the actual creation, so
+    /// this and an interactive missed-tap can never both push the same
+    /// task.
+    ///
+    /// Also writes `.missed` to the occurrence's own `RecurringTaskLog`
+    /// (mirroring into a linked Specific-Time block same as
+    /// `TaskItem.cycleRecurringOccurrence` does) — the task counterpart to
+    /// `markUnresolvedHabitOccurrencesAsMissed`'s habit-log write. Without
+    /// this, an occurrence the interactive gate didn't catch would get a
+    /// push record but its log would silently stay `.none` forever, with
+    /// only the push as evidence anything happened.
     ///
     /// Returns each freshly-created record alongside its task and the day
     /// it was missed, so the caller can hop it forward once immediately
@@ -2527,23 +2658,24 @@ final class ScheduleReviewViewModel {
     static func pushMissedRecurringOccurrences(reviewedBlocks: [ScheduledBlock], tasks: [TaskItem], context: ModelContext, cutoff: Date) -> [(occurrence: PushedRecurringOccurrence, task: TaskItem, missedDay: Date)] {
         var created: [(occurrence: PushedRecurringOccurrence, task: TaskItem, missedDay: Date)] = []
 
-        func pushIfNeeded(task: TaskItem, missedDay: Date) {
-            let taskID = task.id
-            let alreadyPushed = (try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>(
-                predicate: #Predicate { $0.taskID == taskID && !$0.isCompleted }
-            )))?.first != nil
-            guard !alreadyPushed else { return }
-            let occurrence = PushedRecurringOccurrence(taskID: taskID, originalDate: missedDay)
-            context.insert(occurrence)
-            created.append((occurrence, task, missedDay))
+        func markMissedAndPush(task: TaskItem, missedDay: Date) {
+            let log = RecurringTaskLog.logOrCreate(taskID: task.id, on: missedDay, context: context, calendar: .current)
+            log.status = .missed
+            log.lastModified = .now
+            if let block = (task.scheduledBlocks ?? []).first(where: { Calendar.current.isDate($0.date, inSameDayAs: missedDay) }) {
+                block.isCompleted = false
+            }
+            if let occurrence = pushRecurringOccurrenceIfNeeded(task: task, missedDay: missedDay, context: context) {
+                created.append((occurrence, task, missedDay))
+            }
         }
 
         for block in reviewedBlocks where !block.isCompleted {
             guard let task = block.task, task.isRecurring else { continue }
-            pushIfNeeded(task: task, missedDay: block.date)
+            markMissedAndPush(task: task, missedDay: block.date)
         }
         for occurrence in openRecurringTaskOccurrencesForReview(tasks: tasks, context: context, upTo: cutoff) {
-            pushIfNeeded(task: occurrence.task, missedDay: occurrence.missedDate)
+            markMissedAndPush(task: occurrence.task, missedDay: occurrence.targetTime)
         }
         return created
     }

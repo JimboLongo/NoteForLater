@@ -110,7 +110,7 @@ final class RecurringTaskReviewTests: XCTestCase {
         let cutoff = day(2026, 9, 1)
 
         let log = RecurringTaskLog.logOrCreate(taskID: task.id, on: anchor, context: context, calendar: calendar)
-        log.isCompleted = true
+        log.status = .complete
 
         let created = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
             reviewedBlocks: [], tasks: [task], context: context, cutoff: cutoff

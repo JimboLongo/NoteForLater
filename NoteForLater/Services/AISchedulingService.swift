@@ -385,7 +385,21 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             guard !alreadyExists else { continue }
             let minutes = task.estimatedMinutes > 0 ? task.estimatedMinutes : 30
             let end = start.addingTimeInterval(TimeInterval(minutes * 60))
-            blocks.append(ScheduledBlock(date: date, startTime: start, endTime: end, task: task, isEstimatedDuration: task.estimatedMinutes <= 0))
+            let newBlock = ScheduledBlock(date: date, startTime: start, endTime: end, task: task, isEstimatedDuration: task.estimatedMinutes <= 0)
+            // Seeds from any `RecurringTaskLog` already written for this
+            // task/day — closes the orphaned-completion gap documented in
+            // docs/session-handoff.md: before this, a projected occurrence
+            // completed/missed ahead of a real block existing (see
+            // `ScheduleReviewViewModel.projectedRecurringTaskOccurrences`)
+            // recorded that status only in `RecurringTaskLog`, and a block
+            // materializing later here always started `isCompleted = false`
+            // with nothing to read the log back from — silently losing it.
+            // Now `RecurringTaskLog` is this task's single source of truth
+            // regardless of mode (see `TaskItem.cycleRecurringOccurrence`),
+            // so a fresh block just needs to catch up to whatever it says.
+            let seededStatus = RecurringTaskLog.log(taskID: task.id, on: date, context: context, calendar: calendar)?.status ?? .none
+            newBlock.isCompleted = seededStatus == .complete
+            blocks.append(newBlock)
             habitOccupiedRanges.append(TimeSlot(start: start, end: end))
         }
 

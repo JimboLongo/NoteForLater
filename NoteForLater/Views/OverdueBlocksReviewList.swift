@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 /// A still-open habit occurrence (AM/Midday/PM — see
 /// `HabitOccurrenceTimeMode`) being reviewed alongside calendar blocks in
@@ -37,6 +38,12 @@ struct HabitReviewOccurrence: Identifiable {
 enum ReviewItem: Identifiable {
     case block(ScheduledBlock)
     case habit(HabitReviewOccurrence)
+    /// An AM/Midday/PM recurring task occurrence — the task counterpart
+    /// to `.habit`, same reason: never has a `ScheduledBlock` of its own.
+    /// A Specific-Time recurring task occurrence is NOT this case — it
+    /// has a real block, so it stays `.block` (see `blockRow`'s own
+    /// comment for how that row goes 3-state for a recurring task).
+    case recurringTask(ScheduleReviewViewModel.RecurringTaskReviewOccurrence)
     /// A task completion with no live block to represent it — a 2-Minute
     /// Task and the older Task Attribute Review "Mark Complete" path both
     /// leave a task like this, and `ScheduleReviewViewModel
@@ -69,6 +76,7 @@ enum ReviewItem: Identifiable {
         switch self {
         case .block(let block): return "block-\(block.id)"
         case .habit(let occurrence): return "habit-\(occurrence.id)"
+        case .recurringTask(let occurrence): return "recurringTask-\(occurrence.id)"
         case .completedTask(let record, _): return "completedTask-\(record.id)"
         case .meal(let selection, _): return "meal-\(selection.id)"
         }
@@ -83,6 +91,7 @@ enum ReviewItem: Identifiable {
         switch self {
         case .block(let block): return calendar.startOfDay(for: block.date)
         case .habit(let occurrence): return calendar.startOfDay(for: occurrence.targetTime)
+        case .recurringTask(let occurrence): return calendar.startOfDay(for: occurrence.targetTime)
         case .completedTask(let record, _): return calendar.startOfDay(for: record.completedAt)
         case .meal(_, let targetTime): return calendar.startOfDay(for: targetTime)
         }
@@ -103,6 +112,7 @@ enum ReviewItem: Identifiable {
             }
             return block.startTime
         case .habit(let occurrence): return occurrence.targetTime
+        case .recurringTask(let occurrence): return occurrence.targetTime
         case .completedTask(let record, let isTwoMinuteTask):
             if isTwoMinuteTask {
                 return Calendar.current.startOfDay(for: record.completedAt)
@@ -173,6 +183,11 @@ struct OverdueBlocksReviewList: View {
     /// `onChange`. `.constant(nil)` (the default) makes this a no-op for
     /// callers with nothing to jump to.
     var scrollTarget: Binding<String?> = .constant(nil)
+    /// Needed only to read a recurring task's live `RecurringTaskLog`
+    /// status for a Specific-Time occurrence's `.block` row (see
+    /// `blockRow`) — every other row's status already arrives fully
+    /// formed on its `ReviewItem`.
+    @Environment(\.modelContext) private var modelContext
 
     // `internal` for the same testability reason as `ReviewItem`'s sort
     // fields above.
@@ -254,6 +269,9 @@ struct OverdueBlocksReviewList: View {
             // `NightlyReviewView`'s frozen-snapshot-with-live-refresh
             // design), never staged, so there's nothing to override.
             habitRow(occurrence)
+        case .recurringTask(let occurrence):
+            // Same reasoning as `.habit` — always live, never staged.
+            recurringTaskRow(occurrence)
         case .completedTask(let record, _):
             completedTaskRow(record)
         case .meal(let selection, let targetTime):
@@ -265,28 +283,65 @@ struct OverdueBlocksReviewList: View {
     /// `.contentShape(Rectangle())` on the outer `HStack` is what makes
     /// the `Spacer()`'s blank space and the lock icon tappable too, not
     /// just wherever the row happens to draw something.
+    ///
+    /// **Goes 3-state for a recurring task's own Specific-Time block**
+    /// (`block.task?.isRecurring == true`) — ignores the passed
+    /// `isCompleted`/`isEffectivelyCompleted` entirely and reads live
+    /// through `RecurringTaskLog` instead (see `ScheduleReviewViewModel
+    /// .recurringTaskOccurrenceStatus`), the same source of truth
+    /// `TaskItem.cycleRecurringOccurrence` writes to — `block.isCompleted`
+    /// is only ever a mirror for this task, never consulted directly here.
+    /// Every other block keeps the plain 2-state circle unchanged; the
+    /// caller's `onToggle` is what actually decides which path a tap
+    /// takes (see `NightlyReviewView.todayStep`'s own `isRecurring` check).
+    @ViewBuilder
     private func blockRow(_ block: ScheduledBlock, isCompleted: Bool) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            selectionCircle(isSelected: isCompleted)
-                .padding(.vertical, 4)
-            VStack(alignment: .leading) {
-                Text(timeRangeText(block))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(block.displayTitle)
-                    .strikethrough(isCompleted)
+        if let task = block.task, task.isRecurring {
+            let status = ScheduleReviewViewModel.recurringTaskOccurrenceStatus(task: task, on: block.date, context: modelContext)
+            HStack(alignment: .top, spacing: 12) {
+                habitSelectionCircle(status: status)
+                    .padding(.vertical, 4)
+                VStack(alignment: .leading) {
+                    Text(timeRangeText(block))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(block.displayTitle)
+                        .strikethrough(status == .complete)
+                }
+                Spacer()
+                if block.isLocked {
+                    Image(systemName: "lock.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
-            Spacer()
-            if block.isLocked {
-                Image(systemName: "lock.fill")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            .contentShape(Rectangle())
+            .onTapGesture { onToggle(.block(block)) }
+            .opacity(status == .none ? 1 : 0.5)
+            .listRowBackground((block.task?.shelf?.color ?? Color.clear).opacity(0.2))
+        } else {
+            HStack(alignment: .top, spacing: 12) {
+                selectionCircle(isSelected: isCompleted)
+                    .padding(.vertical, 4)
+                VStack(alignment: .leading) {
+                    Text(timeRangeText(block))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(block.displayTitle)
+                        .strikethrough(isCompleted)
+                }
+                Spacer()
+                if block.isLocked {
+                    Image(systemName: "lock.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
+            .contentShape(Rectangle())
+            .onTapGesture { onToggle(.block(block)) }
+            .opacity(isCompleted ? 0.5 : 1)
+            .listRowBackground((block.task?.shelf?.color ?? Color.clear).opacity(0.2))
         }
-        .contentShape(Rectangle())
-        .onTapGesture { onToggle(.block(block)) }
-        .opacity(isCompleted ? 0.5 : 1)
-        .listRowBackground((block.task?.shelf?.color ?? Color.clear).opacity(0.2))
     }
 
     /// Same full-row tap target as `blockRow`.
@@ -312,6 +367,29 @@ struct OverdueBlocksReviewList: View {
         .onTapGesture { onToggle(.habit(occurrence)) }
         .opacity(occurrence.isCompleted || occurrence.isMissed || occurrence.isExcused ? 0.5 : 1)
         .listRowBackground(Shelf.flatten(.accentColor, opacity: 0.2))
+    }
+
+    /// The AM/Midday/PM counterpart to `habitRow` — no `.excused` state,
+    /// so the circle only ever renders none/complete/missed, but reuses
+    /// the same `habitSelectionCircle` (which already tolerates a status
+    /// it doesn't need) rather than a second near-identical circle.
+    private func recurringTaskRow(_ occurrence: ScheduleReviewViewModel.RecurringTaskReviewOccurrence) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            habitSelectionCircle(status: occurrence.status)
+                .padding(.vertical, 4)
+            VStack(alignment: .leading) {
+                Text(occurrence.modeLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(occurrence.task.title)
+                    .strikethrough(occurrence.status == .complete)
+            }
+            Spacer()
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { onToggle(.recurringTask(occurrence)) }
+        .opacity(occurrence.status == .none ? 1 : 0.5)
+        .listRowBackground((occurrence.task.shelf?.color ?? Color.accentColor).opacity(0.2))
     }
 
     /// Same full-row tap target as `blockRow`/`habitRow` — reconstructs
