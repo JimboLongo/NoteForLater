@@ -87,6 +87,8 @@ final class InboxEngagementTests: XCTestCase {
         let shelf = Shelf(name: "Errands")
         let taskA = makeTask(title: "A", shelf: shelf) // now has a shelf and isn't missing attributes
         taskA.nextStep = "Call the office"
+        taskA.nextStepDecided = true
+        taskA.nextStepAnsweredYes = true
         taskA.dueDateDecided = true
         taskA.durationDecided = true
         taskA.isDivisibleDecided = true
@@ -118,6 +120,8 @@ final class InboxEngagementTests: XCTestCase {
         let shelf = Shelf(name: "Errands")
         let taskA = makeTask(title: "A", shelf: shelf)
         taskA.nextStep = "Call the office"
+        taskA.nextStepDecided = true
+        taskA.nextStepAnsweredYes = true
         taskA.dueDateDecided = true
         taskA.durationDecided = true
         taskA.isDivisibleDecided = true

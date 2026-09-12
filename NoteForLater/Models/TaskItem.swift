@@ -42,6 +42,19 @@ final class TaskItem {
     /// task.
     var startDate: Date?
     var nextStep: String = ""
+    /// Whether "Has next step" has actually been answered (either way) —
+    /// same shape as `dueDateDecided`: a bare `nextStep == ""` can't tell
+    /// "never decided" apart from "deliberately none," so a task with no
+    /// next step needed was flagged incomplete forever with no way to
+    /// resolve it. See `YesNoToggle`.
+    var nextStepDecided: Bool = false
+    /// Which pill "Has next step" landed on, independent of `nextStep` —
+    /// same reason `durationAnsweredYes` exists: Yes can be selected
+    /// before any text is actually typed, and No clears `nextStep` back
+    /// to `""`. Without this, "Yes, nothing typed yet" and "No" would
+    /// both collapse to `nextStep.isEmpty`, making them indistinguishable.
+    /// Only meaningful when `nextStepDecided` is true.
+    var nextStepAnsweredYes: Bool = false
     /// 0 means "no duration set" — see `durationLabel(for:)`. The user's
     /// stated size; never written by the scheduler. Compare against
     /// `remainingMinutes` for what's actually left to place.
@@ -351,6 +364,77 @@ final class TaskItem {
             summary += " until \(Self.recurrenceEndDateFormatter.string(from: recurrenceEndDate))"
         }
         return summary
+    }
+
+    /// Turns this task recurring and seeds the anchor fields
+    /// (`startDate`/`dueDate`/`dueDateDecided`/`dueDatePicked`) together,
+    /// atomically — exactly what `TaskReviewCard`'s own "Recurring?"
+    /// toggle already does the moment it's switched on, extracted here so
+    /// a task created directly on the Recurring Tasks shelf (see
+    /// `Shelf.isRecurringTasks`) starts in that same fully-consistent
+    /// state instead of `isRecurring == true` with no anchor at all.
+    ///
+    /// That combination — recurring, but no anchor — isn't otherwise
+    /// reachable (the toggle always sets both together), and leaving it
+    /// reachable has a real consequence: `hasRecurringOccurrence`/
+    /// `recurringOccurrenceTime`/`nextRecurringOccurrenceDate` all
+    /// require `dueDate` and simply return false/nil without it (no
+    /// crash — a recurring task with no anchor just never places on the
+    /// calendar and never shows a next-occurrence date, which
+    /// `ShelfListView`'s own `recurrenceLine` already falls back to the
+    /// frequency alone for), but `missingAttributeNames` doesn't know
+    /// this task is recurring at all when it checks `dueDateMissing` —
+    /// so without this, the task would silently read as "missing Due
+    /// Date" in the attribute review queue, the wrong question for a
+    /// recurring task, which asks for Start Date instead.
+    ///
+    /// Preserves an already-set `startDate` (don't clobber a date the
+    /// user already picked) and an already-set `dueDate`'s own time-of-
+    /// day (don't reset a chosen time back to the 9am default) — see
+    /// `combiningDate`'s original inline version this replaces.
+    ///
+    /// **This is the only way `isRecurring` should ever be set to
+    /// `true`.** Setting `task.isRecurring = true` directly, without
+    /// this, produces a task that looks fine at a glance — it has a
+    /// title, it's on a shelf — but silently never places on the
+    /// calendar (see above) and asks the wrong question in the attribute
+    /// review queue ("Due Date," not Start Date). Nothing crashes and
+    /// nothing looks obviously broken, which is exactly what makes this
+    /// easy to reach for by accident: the next new task-creation path
+    /// that needs a recurring default should call this, not set the flag
+    /// on its own.
+    func makeRecurring(anchorDay: Date = Calendar.current.startOfDay(for: .now), calendar: Calendar = .current) {
+        isRecurring = true
+        let day = startDate ?? anchorDay
+        startDate = day
+        var components = calendar.dateComponents([.year, .month, .day], from: day)
+        let timeSource = dueDate ?? (calendar.date(bySettingHour: 9, minute: 0, second: 0, of: day) ?? day)
+        let timeComponents = calendar.dateComponents([.hour, .minute], from: timeSource)
+        components.hour = timeComponents.hour
+        components.minute = timeComponents.minute
+        components.second = 0
+        dueDate = calendar.date(from: components) ?? day
+        dueDateDecided = true
+        dueDatePicked = true
+    }
+
+    /// Builds a new task for direct capture straight onto `shelf` — what
+    /// `ShelfListView`'s own capture bar (`addTask()`) uses. Defaults
+    /// `isRecurring` on via `makeRecurring()` when `shelf` is the
+    /// Recurring Tasks shelf (`Shelf.isRecurringTasks`) — a default, not
+    /// a lock, freely toggled off afterward from the task's own card.
+    ///
+    /// Only ever applied here, at creation. Moving an *existing* task
+    /// onto this shelf later — `InboxViewModel.route`, or either card's
+    /// `onMove` handler — never calls this and never touches
+    /// `isRecurring`, so a task moved in from elsewhere keeps whatever it
+    /// already was, not auto-flipped.
+    static func makeForDirectCapture(title: String, shelf: Shelf) -> TaskItem {
+        let task = TaskItem(title: title, shelf: shelf)
+        if shelf.isRecurringTasks {
+            task.makeRecurring()
+        }
+        return task
     }
 
     /// The soonest day *after* `date` where at least one of this task's
@@ -843,11 +927,19 @@ final class TaskItem {
         return !dueDateDecided || (dueDate != nil && !dueDatePicked)
     }
 
-    /// True if Next Step is blank, unless `shelf` doesn't track it at all —
-    /// matching where the Next Step field is shown/hidden.
+    /// True if "Has next step" is Yes but nothing's actually been typed,
+    /// unless `shelf` doesn't track it at all — matching where the Next
+    /// Step field is shown/hidden. Same shape as `durationMissing`: false
+    /// once real text exists, once the answer is an explicit "No"
+    /// (`nextStep` is `""` by design, not by omission), or once the shelf
+    /// doesn't track this attribute. The shelf-level gate above and the
+    /// task-level "No" answer are independent — a task explicitly
+    /// toggled off stays not-missing even if it later moves to a shelf
+    /// that tracks Next Step, and a shelf that doesn't track it never
+    /// looks at `nextStepDecided`/`nextStepAnsweredYes` at all.
     private func nextStepMissing(on shelf: Shelf?) -> Bool {
         guard shelf?.effectiveTracksNextStep ?? true else { return false }
-        return nextStep.isEmpty
+        return !nextStepDecided || (nextStepAnsweredYes && nextStep.isEmpty)
     }
 
     /// True if Priority is unset, unless `shelf` doesn't track it at all —

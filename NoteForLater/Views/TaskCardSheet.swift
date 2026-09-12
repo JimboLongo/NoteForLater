@@ -120,6 +120,8 @@ struct TaskCardSheet: View {
 struct TaskEditSnapshot: Equatable {
     let title: String
     let nextStep: String
+    let nextStepDecided: Bool
+    let nextStepAnsweredYes: Bool
     let dueDate: Date?
     let dueDateDecided: Bool
     let dueDatePicked: Bool
@@ -145,6 +147,8 @@ struct TaskEditSnapshot: Equatable {
     init(_ task: TaskItem) {
         title = task.title
         nextStep = task.nextStep
+        nextStepDecided = task.nextStepDecided
+        nextStepAnsweredYes = task.nextStepAnsweredYes
         dueDate = task.dueDate
         dueDateDecided = task.dueDateDecided
         dueDatePicked = task.dueDatePicked
@@ -171,6 +175,8 @@ struct TaskEditSnapshot: Equatable {
     func restore(into task: TaskItem) {
         task.title = title
         task.nextStep = nextStep
+        task.nextStepDecided = nextStepDecided
+        task.nextStepAnsweredYes = nextStepAnsweredYes
         task.dueDate = dueDate
         task.dueDateDecided = dueDateDecided
         task.dueDatePicked = dueDatePicked

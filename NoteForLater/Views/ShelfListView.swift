@@ -223,7 +223,7 @@ struct ShelfListView: View {
     private func addTask() {
         let trimmed = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let task = TaskItem(title: trimmed, shelf: shelf)
+        let task = TaskItem.makeForDirectCapture(title: trimmed, shelf: shelf)
         modelContext.insert(task)
         draftTitle = ""
         isCaptureFocused = false
@@ -250,6 +250,40 @@ struct TaskRow: View {
     private static let scheduledDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "EEE. MMM d, yyyy"
+        return formatter
+    }()
+
+    /// "Sunday" — a recurring task's next occurrence, when it falls
+    /// within the next 6 days (see `recurrenceNextOccurrenceLabel`).
+    /// Unambiguous on its own at that range: it's necessarily *this*
+    /// Sunday, not one several weeks out. Spelled out in full rather
+    /// than abbreviated ("Sun") — this is the only thing on the line
+    /// besides the frequency, so there's room, and it reads more clearly
+    /// than a three-letter abbreviation sitting right next to a spelled-
+    /// out frequency ("Every week · Sunday", not "Every week · Sun").
+    private static let weekdayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE"
+        return formatter
+    }()
+
+    /// "Sunday, Oct 5" — once the next occurrence is more than 6 days
+    /// out, a bare weekday could be any of several, so month/day is
+    /// added.
+    private static let nextOccurrenceFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE, MMM d"
+        return formatter
+    }()
+
+    /// "Sunday, Jan 3, 2027" — same as `nextOccurrenceFormatter`, plus
+    /// the year, for the rarer case where the next occurrence actually
+    /// falls in a different calendar year than today (a yearly-recurring
+    /// task next landing next year) — "Jan 3" alone reads ambiguously
+    /// close to a year boundary.
+    private static let nextOccurrenceFormatterWithYear: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE, MMM d, yyyy"
         return formatter
     }()
 
@@ -350,7 +384,18 @@ struct TaskRow: View {
                         .strikethrough(task.isCompleted)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer()
-                    if showsScheduledBadge && task.isScheduled,
+                    // `!task.isRecurring` is load-bearing, not defensive
+                    // filler: `isScheduled` is normally reset before a
+                    // task can be toggled recurring, but the "Recurring?"
+                    // toggle itself doesn't clear it (see that toggle's
+                    // own handler in `TaskReviewCard`) — a task scheduled
+                    // once, then later switched to recurring, keeps a
+                    // stale `isScheduled == true` and a stale block behind
+                    // it. Without this guard that stale badge would show
+                    // alongside `recurrenceLine`'s own, current date for
+                    // the same task. Recurring tasks always defer to
+                    // `recurrenceLine` — see its own doc comment.
+                    if showsScheduledBadge && task.isScheduled && !task.isRecurring,
                        let scheduledDate = (task.scheduledBlocks ?? []).min(by: { $0.startTime < $1.startTime })?.date {
                         VStack(alignment: .trailing, spacing: 1) {
                             Text(Self.scheduledDateFormatter.string(from: scheduledDate))
@@ -388,25 +433,30 @@ struct TaskRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                if let recurrenceSummary = task.recurrenceSummary {
-                    Label(recurrenceSummary, systemImage: "repeat")
+                // The recurring task's *only* date display on this row —
+                // frequency and next occurrence together, one line, not
+                // two separate rows the reader has to mentally merge
+                // themselves. See `recurrenceLine`'s own doc comment for
+                // why the bottom row's date preview and the top-right
+                // scheduled badge both stay out of this task's way.
+                if let recurrenceLine {
+                    Label(recurrenceLine, systemImage: "repeat")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 if !showsPantryAge {
                     HStack(spacing: 12) {
-                        Label(addedAgeText, systemImage: "hourglass")
-                        // A recurring task's own `dueDate` is just its
-                        // recurrence anchor (see `TaskItem.hasRecurringOccurrence`)
-                        // — once that anchor's passed, showing it here reads as
-                        // a stale/wrong date. `nextRecurringOccurrenceDate()` is
-                        // the same "soonest still-ahead occurrence" this list is
-                        // already sorted by (see `ShelfListView.sortDate`), so
-                        // the date shown here always matches the date it's
-                        // ordered by.
-                        if let previewDate = task.isRecurring ? task.nextRecurringOccurrenceDate() : task.dueDate {
-                            Label(previewDate.formatted(date: .abbreviated, time: .omitted), systemImage: "calendar")
+                        if showsAddedAge {
+                            Label(addedAgeText, systemImage: "hourglass")
+                        }
+                        // Non-recurring only — a recurring task's date
+                        // lives entirely in `recurrenceLine` above now;
+                        // showing it again here would be the exact
+                        // "second date treatment" that line exists to
+                        // rule out.
+                        if !task.isRecurring, let dueDate = task.dueDate {
+                            Label(dueDate.formatted(date: .abbreviated, time: .omitted), systemImage: "calendar")
                         }
                         if task.estimatedMinutes > 0 {
                             Label(task.durationLabel, systemImage: "clock")
@@ -454,6 +504,55 @@ struct TaskRow: View {
             from: Calendar.current.startOfDay(for: task.createdAt),
             to: Calendar.current.startOfDay(for: .now)
         ).day ?? 0)
+    }
+
+    /// False for a recurring task — `createdAt` is when the task was
+    /// first set up, not anything about the occurrence actually coming
+    /// up, so it's just noise there (the next-occurrence label already
+    /// carries the date that matters for a recurring task). `internal`
+    /// rather than `private` so this is directly testable without
+    /// rendering the view.
+    var showsAddedAge: Bool { !task.isRecurring }
+
+    /// "Every week · Sunday" — a recurring task's frequency and next
+    /// occurrence, combined onto the one line `recurrenceSummary` used
+    /// to render alone. `nil` for a non-recurring task (`recurrenceSummary`
+    /// is already `nil` there) and for a recurring one with no occurrence
+    /// left at all (`nextRecurringOccurrenceDate()` returns `nil` once
+    /// `recurrenceEndDate` has passed) — falls back to the frequency
+    /// alone rather than hiding the whole line in that case, since "every
+    /// week until Dec 31, 2026" is still worth showing on its own.
+    ///
+    /// This is deliberately the *only* date treatment a recurring task
+    /// gets on this row. The scheduled-date badge above
+    /// (`showsScheduledBadge && task.isScheduled`) is guarded off
+    /// `!task.isRecurring` specifically so the two can never both show
+    /// for the same task — see that guard's own comment for the stale-
+    /// `isScheduled` case that made this a real risk, not a theoretical
+    /// one. The bottom row's own calendar-icon date preview is likewise
+    /// non-recurring-only now (see `body`).
+    var recurrenceLine: String? {
+        guard let recurrenceSummary = task.recurrenceSummary else { return nil }
+        guard let nextOccurrence = task.nextRecurringOccurrenceDate() else { return recurrenceSummary }
+        return "\(recurrenceSummary) · \(Self.recurrenceNextOccurrenceLabel(for: nextOccurrence))"
+    }
+
+    /// Bare short weekday ("Sun") when `date` falls within the next 6
+    /// days — unambiguous, since that's necessarily this week's (or
+    /// tomorrow's) occurrence of that weekday. Beyond 6 days, a bare
+    /// weekday could be any of several out along the pattern, so
+    /// month/day is added ("Sun, Oct 5"); the year joins the two only
+    /// once `date` actually falls in a different calendar year than
+    /// today, since "Oct 5" alone is already unambiguous within the
+    /// current year. `today` is a parameter (defaulting to `.now`) purely
+    /// for testability — production callers never override it.
+    static func recurrenceNextOccurrenceLabel(for date: Date, today: Date = .now, calendar: Calendar = .current) -> String {
+        let today = calendar.startOfDay(for: today)
+        let targetDay = calendar.startOfDay(for: date)
+        let daysAway = calendar.dateComponents([.day], from: today, to: targetDay).day ?? 0
+        guard daysAway > 6 else { return weekdayFormatter.string(from: date) }
+        let sameYear = calendar.component(.year, from: targetDay) == calendar.component(.year, from: today)
+        return (sameYear ? nextOccurrenceFormatter : nextOccurrenceFormatterWithYear).string(from: date)
     }
 
     private var addedAgeText: String {

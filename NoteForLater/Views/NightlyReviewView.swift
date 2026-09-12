@@ -1920,6 +1920,33 @@ struct TaskReviewCard: View {
         )
     }
 
+    /// nil until "Has next step" is actually answered either way — same
+    /// shape as `dueDateAnswer`. Untapping Yes (going back to nil) clears
+    /// whatever was typed, same as `dueDateAnswer`'s "No" clears
+    /// `dueDate` — there's no reason to keep stale text around for a
+    /// question that's now unanswered again.
+    private var nextStepAnswer: Binding<Bool?> {
+        Binding(
+            get: { task.nextStepDecided ? task.nextStepAnsweredYes : nil },
+            set: { newValue in
+                focusedField = nil
+                switch newValue {
+                case .some(true):
+                    task.nextStepDecided = true
+                    task.nextStepAnsweredYes = true
+                case .some(false):
+                    task.nextStepDecided = true
+                    task.nextStepAnsweredYes = false
+                    task.nextStep = ""
+                case .none:
+                    task.nextStepDecided = false
+                    task.nextStepAnsweredYes = false
+                    task.nextStep = ""
+                }
+            }
+        )
+    }
+
     var body: some View {
         VStack(spacing: 14) {
             card
@@ -1965,6 +1992,14 @@ struct TaskReviewCard: View {
             // minimum segment before `isDivisibleDecided` existed.
             if task.isDivisible, task.minimumSegmentMinutes > 0, !task.isDivisibleDecided {
                 task.isDivisibleDecided = true
+            }
+            // Same idea for tasks that already had real next-step text
+            // typed before `nextStepDecided` existed — otherwise every
+            // one of them would suddenly read as unanswered (and
+            // therefore missing) despite already having a next step.
+            if !task.nextStep.isEmpty, !task.nextStepDecided {
+                task.nextStepDecided = true
+                task.nextStepAnsweredYes = true
             }
             if originalSnapshot == nil {
                 originalSnapshot = TaskEditSnapshot(task)
@@ -2134,27 +2169,34 @@ struct TaskReviewCard: View {
             }
 
             if nextStepAllowed {
-                HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "arrow.turn.down.right")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    TextField("Next step", text: $task.nextStep, axis: .vertical)
-                        .font(task.nextStep.count > 30 ? .subheadline.weight(.medium) : .body.weight(.medium))
-                        .animation(.easeInOut(duration: 0.1), value: task.nextStep.count > 30)
-                        .focused($focusedField, equals: .nextStep)
-                    // Right next to where you're actually typing — easier
-                    // to find in the moment than the accessory Done button
-                    // riding above the keyboard itself.
-                    if focusedField == .nextStep {
-                        Button {
-                            focusedField = nil
-                        } label: {
-                            Image(systemName: "keyboard.chevron.compact.down")
+                VStack(alignment: .leading, spacing: 8) {
+                    YesNoToggle(title: "Has next step", answer: nextStepAnswer)
+                    if nextStepAnswer.wrappedValue == true {
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "arrow.turn.down.right")
+                                .font(.subheadline)
                                 .foregroundStyle(.secondary)
+                            TextField("Next step", text: $task.nextStep, axis: .vertical)
+                                .font(task.nextStep.count > 30 ? .subheadline.weight(.medium) : .body.weight(.medium))
+                                .animation(.easeInOut(duration: 0.1), value: task.nextStep.count > 30)
+                                .focused($focusedField, equals: .nextStep)
+                            // Right next to where you're actually typing —
+                            // easier to find in the moment than the
+                            // accessory Done button riding above the
+                            // keyboard itself.
+                            if focusedField == .nextStep {
+                                Button {
+                                    focusedField = nil
+                                } label: {
+                                    Image(systemName: "keyboard.chevron.compact.down")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
-                        .buttonStyle(.plain)
                     }
                 }
+                .animation(.easeInOut(duration: 0.15), value: nextStepAnswer.wrappedValue)
                 .transition(.opacity)
             }
         }
@@ -2379,17 +2421,16 @@ struct TaskReviewCard: View {
             Toggle("Recurring?", isOn: Binding(
                 get: { task.isRecurring },
                 set: { newValue in
-                    task.isRecurring = newValue
                     if newValue {
                         // Start Date is the anchor here — no separate
                         // date question inside `recurringSection`. Falls
                         // back to today if Start Date was never touched,
-                        // same default its own button already shows.
-                        let anchorDay = task.startDate ?? Calendar.current.startOfDay(for: .now)
-                        task.startDate = anchorDay
-                        task.dueDate = Self.combiningDate(anchorDay, withTimeFrom: task.dueDate)
-                        task.dueDateDecided = true
-                        task.dueDatePicked = true
+                        // same default its own button already shows. See
+                        // `TaskItem.makeRecurring`'s own doc comment for
+                        // why `isRecurring` and the anchor fields are set
+                        // together, atomically, rather than `isRecurring`
+                        // alone here.
+                        task.makeRecurring()
                         // The Recurring Tasks shelf is the only valid move
                         // target once this is on (see
                         // `eligibleShelvesForMove`) — preview it right
@@ -2401,13 +2442,16 @@ struct TaskReviewCard: View {
                             selectedShelf = recurringShelf
                             task.includedSchedulingRuleIDs = (recurringShelf.schedulingRules ?? []).filter(\.isEnabled).map(\.id)
                         }
-                    } else if selectedShelf?.isRecurringTasks == true {
-                        // Flip side — drop the auto-preview so the card
-                        // goes back to reading `task.shelf`'s own settings
-                        // (or whatever the user had actually tapped)
-                        // instead of staying stuck on the Recurring Tasks
-                        // shelf's.
-                        selectedShelf = nil
+                    } else {
+                        task.isRecurring = false
+                        if selectedShelf?.isRecurringTasks == true {
+                            // Drop the auto-preview so the card goes back
+                            // to reading `task.shelf`'s own settings (or
+                            // whatever the user had actually tapped)
+                            // instead of staying stuck on the Recurring
+                            // Tasks shelf's.
+                            selectedShelf = nil
+                        }
                     }
                 }
             ))
