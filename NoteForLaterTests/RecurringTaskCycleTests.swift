@@ -128,6 +128,60 @@ final class RecurringTaskCycleTests: XCTestCase {
         XCTAssertFalse(allPushes.first?.isCompleted ?? true)
     }
 
+    // MARK: - `isPushable == false` suppresses the push machinery entirely
+
+    /// Fail-then-pass target: marking a non-pushable task missed must not
+    /// create a `PushedRecurringOccurrence` — the log still records
+    /// `.missed` (that part is unrelated to pushing and untouched by
+    /// `isPushable`), but nothing carries it forward. It just stays
+    /// missed on its own day and waits for the next natural recurrence.
+    func test_nonPushableTask_markedMissed_createsNoPushRecord() {
+        let day = day(2026, 9, 9)
+        let task = makeUntimedTask(anchor: day)
+        task.isPushable = false
+
+        let status = task.cycleRecurringOccurrence(on: day, context: context, calendar: calendar)
+        XCTAssertEqual(status, .complete)
+        let next = task.cycleRecurringOccurrence(on: day, context: context, calendar: calendar)
+        XCTAssertEqual(next, .missed)
+        XCTAssertEqual(RecurringTaskLog.log(taskID: task.id, on: day, context: context, calendar: calendar)?.status, .missed, "the miss itself is still recorded — isPushable only controls the push")
+
+        let pushed = ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(task: task, missedDay: day, context: context)
+
+        XCTAssertNil(pushed, "a non-pushable task must never get a push record")
+        let allPushes = (try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>())) ?? []
+        XCTAssertTrue(allPushes.isEmpty)
+    }
+
+    /// The commit-time sweep shares the same guarded function, so a
+    /// non-pushable task left incomplete there must also get no push
+    /// record, even though its `RecurringTaskLog` still gets marked
+    /// `.missed`.
+    func test_nonPushableTask_commitTimeSweep_createsNoPushRecord() {
+        let anchor = day(2026, 9, 9)
+        let task = makeSpecificTimeTask(anchor: anchor)
+        task.isPushable = false
+        let block = ScheduledBlock(date: anchor, startTime: anchor, endTime: anchor.addingTimeInterval(900), task: task)
+        context.insert(block)
+
+        let created = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
+            reviewedBlocks: [block], tasks: [task], context: context, cutoff: anchor.addingTimeInterval(86400)
+        )
+
+        XCTAssertTrue(created.isEmpty)
+        XCTAssertEqual(RecurringTaskLog.log(taskID: task.id, on: anchor, context: context, calendar: calendar)?.status, .missed)
+        let allPushes = (try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>())) ?? []
+        XCTAssertTrue(allPushes.isEmpty)
+    }
+
+    /// Default is `true`, matching every task's behavior before this
+    /// field existed — an opt-out, not an opt-in.
+    func test_isPushable_defaultsToTrue() {
+        let task = makeUntimedTask(anchor: day(2026, 9, 9))
+
+        XCTAssertTrue(task.isPushable)
+    }
+
     // MARK: - Contradiction D + fail-then-pass #2: no duplicate push
 
     /// Fail-then-pass target #2 ("no-duplicate-row"): with the
@@ -252,5 +306,123 @@ final class RecurringTaskCycleTests: XCTestCase {
 
         let result = ScheduleReviewViewModel.unresolvedRecurringTaskBlocks([recurringBlock, ordinaryBlock], context: context, calendar: calendar)
         XCTAssertEqual(result.map(\.id), [recurringBlock.id], "an ordinary, non-recurring block must never be gated")
+    }
+
+    // MARK: - Day calendar consolidation (DayTimelineGridView routes through the same cycle)
+
+    /// Fail-then-pass target #1 ("advances through all three states and
+    /// wraps"): `DayTimelineGridView`'s own occurrence-list types
+    /// (`OpenRecurringTaskOccurrence`, private) and the testable
+    /// `ProjectedRecurringTaskOccurrence` both used to carry only a bare
+    /// `isCompleted: Bool` — before this turn, there was no field to put
+    /// `.missed` in at all, so the calendar's own read-path (what a tap's
+    /// resulting state actually renders as) could never represent it
+    /// regardless of what `TaskItem.cycleRecurringOccurrence` produced.
+    /// This exercises the real cycle through `projectedRecurringTaskOccurrences`
+    /// (the Specific-Time read-path real blocks and the calendar's own
+    /// projection both resolve through) at each of the three states.
+    ///
+    /// Verified fail-then-pass by temporarily collapsing the constructed
+    /// `status` back to `status == .complete ? .complete : .none` (the
+    /// exact pre-fix shape — anything but complete reads as untouched) in
+    /// `ScheduleReviewViewModel.projectedRecurringTaskOccurrences`: this
+    /// test failed on the missed-state assertion. Restored and reran:
+    /// green. Both via `xcodebuild test`.
+    func test_projectedRecurringTaskOccurrences_surfacesAllThreeStates_asCycleAdvances() {
+        let today = day(2026, 9, 9)
+        let task = makeSpecificTimeTask(anchor: today)
+
+        func projected() -> ProjectedRecurringTaskOccurrence? {
+            ScheduleReviewViewModel.projectedRecurringTaskOccurrences(
+                tasks: [task], materializedRows: [], targetDate: today, context: context, calendar: calendar, today: today
+            ).first
+        }
+
+        XCTAssertEqual(projected()?.status, OccurrenceStatus.none)
+
+        XCTAssertEqual(task.cycleRecurringOccurrence(on: today, context: context, calendar: calendar), .complete)
+        XCTAssertEqual(projected()?.status, OccurrenceStatus.complete)
+        XCTAssertEqual(projected()?.isCompleted, true)
+        XCTAssertEqual(projected()?.isMissed, false)
+
+        XCTAssertEqual(task.cycleRecurringOccurrence(on: today, context: context, calendar: calendar), .missed)
+        XCTAssertEqual(projected()?.status, OccurrenceStatus.missed, "the calendar's own read-path must be able to represent .missed")
+        XCTAssertEqual(projected()?.isCompleted, false)
+        XCTAssertEqual(projected()?.isMissed, true)
+
+        XCTAssertEqual(task.cycleRecurringOccurrence(on: today, context: context, calendar: calendar), .none, "must wrap back to none — no .excused")
+        XCTAssertEqual(projected()?.status, OccurrenceStatus.none)
+        XCTAssertEqual(projected()?.isCompleted, false)
+        XCTAssertEqual(projected()?.isMissed, false)
+    }
+
+    /// The block path is the one most likely to get missed in this
+    /// consolidation, since it shares `DayTimelineGridView.completeCircle(for:)`
+    /// with every ordinary (non-recurring) task block. Confirms a
+    /// recurring task's block status is readable live (through
+    /// `RecurringTaskLog`, via `recurringTaskOccurrenceStatus` — the same
+    /// function `completeCircle(for:)` calls to decide which branch to
+    /// render), separate from its own `isCompleted` mirror, which stays
+    /// `true` only for `.complete` — while a non-recurring task's block
+    /// keeps its single, unrelated `isCompleted` flag, untouched by any
+    /// of this and with no missed concept of its own at all.
+    func test_recurringTaskBlock_liveStatusCycles_nonRecurringBlockStaysPlainToggle() {
+        let anchor = day(2026, 9, 1)
+        let recurringTask = makeSpecificTimeTask(anchor: anchor)
+        let recurringBlock = ScheduledBlock(date: anchor, startTime: anchor, endTime: anchor.addingTimeInterval(900), task: recurringTask)
+        context.insert(recurringBlock)
+
+        XCTAssertEqual(recurringTask.cycleRecurringOccurrence(on: anchor, context: context, calendar: calendar), .complete)
+        XCTAssertTrue(recurringBlock.isCompleted, "the mirror reflects .complete")
+
+        XCTAssertEqual(recurringTask.cycleRecurringOccurrence(on: anchor, context: context, calendar: calendar), .missed)
+        XCTAssertFalse(recurringBlock.isCompleted, "the mirror is false for anything but .complete — .missed reads the same as .none there")
+        XCTAssertEqual(ScheduleReviewViewModel.recurringTaskOccurrenceStatus(task: recurringTask, on: anchor, context: context, calendar: calendar), .missed, "completeCircle(for:) reads this, not the mirror, to render red/missed")
+
+        let ordinaryTask = TaskItem(title: "Ordinary", estimatedMinutes: 30)
+        context.insert(ordinaryTask)
+        let ordinaryBlock = ScheduledBlock(date: anchor, startTime: anchor, endTime: anchor.addingTimeInterval(1800), task: ordinaryTask)
+        context.insert(ordinaryBlock)
+
+        XCTAssertFalse(ordinaryTask.isRecurring, "confirms this task takes completeCircle(for:)'s plain-toggle branch, not the recurring one")
+        XCTAssertFalse(ordinaryBlock.isCompleted)
+        ordinaryBlock.isCompleted.toggle()
+        XCTAssertTrue(ordinaryBlock.isCompleted, "a non-recurring block only ever has this one plain flag — no cycle, no missed state")
+    }
+
+    /// Fail-then-pass target #2 ("marking missed from the calendar
+    /// creates exactly one push"): replicates the exact sequence
+    /// `DayTimelineGridView.cycleRecurringTaskOccurrence` runs when a tap
+    /// lands on `.missed` — push, then hop immediately — since that
+    /// function is private to a live view and can't be called directly
+    /// here. Unlike Nightly Review's own `pushIfMissed` (which tracks
+    /// what it created in `immediatelyPushedRecurringOccurrenceIDs` and
+    /// defers the hop to its own commit-time `advance()`), the calendar
+    /// has no later commit moment to defer to, so the hop happens right
+    /// away — this is what distinguishes this test from
+    /// `test_missedOccurrence_createsPushedRecurringOccurrence_immediately`
+    /// above, which stops at "the record exists."
+    ///
+    /// Verified fail-then-pass: temporarily changed `PushedRecurringOccurrence
+    /// .advanceOneHop` to return immediately without moving `occurrence
+    /// .currentDate` — this test failed on the "hopped to tomorrow"
+    /// assertion (`currentDate` was still today). Restored and reran:
+    /// green. Both via `xcodebuild test`.
+    func test_markingMissedFromCalendar_createsExactlyOnePush_andHopsItImmediately() {
+        let today = day(2026, 9, 9)
+        let task = makeUntimedTask(anchor: today)
+
+        XCTAssertEqual(task.cycleRecurringOccurrence(on: today, context: context, calendar: calendar), .complete)
+        XCTAssertEqual(task.cycleRecurringOccurrence(on: today, context: context, calendar: calendar), .missed)
+
+        guard let pushed = ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(task: task, missedDay: today, context: context) else {
+            return XCTFail("marking missed must create a push")
+        }
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: today)!
+        PushedRecurringOccurrence.advanceOneHop(pushed, task: task, from: today, to: tomorrow, calendar: calendar, context: context)
+
+        let allPushes = (try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>())) ?? []
+        XCTAssertEqual(allPushes.count, 1, "exactly one push record")
+        XCTAssertEqual(calendar.startOfDay(for: allPushes.first!.currentDate), tomorrow, "hopped immediately to tomorrow — the calendar has no later commit step to defer this to the way Nightly Review does")
     }
 }

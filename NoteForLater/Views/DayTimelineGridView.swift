@@ -96,7 +96,13 @@ struct ProjectedRecurringTaskOccurrence: Identifiable {
     let task: TaskItem
     let startTime: Date
     let endTime: Date
-    let isCompleted: Bool
+    /// The full three-state cycle, not just complete/incomplete — see
+    /// `TaskItem.cycleRecurringOccurrence`. `.excused` never appears (a
+    /// recurring task's cycle never produces it), but the type is shared
+    /// with habits' own `OccurrenceStatus`, so it's representable.
+    let status: OccurrenceStatus
+    var isCompleted: Bool { status == .complete }
+    var isMissed: Bool { status == .missed }
     /// True when this occurrence is showing on `targetDate` only because
     /// it's an incomplete occurrence from on-or-before today being carried
     /// forward (see `ScheduleReviewViewModel.carriedForwardRecurringTaskIDs`)
@@ -399,7 +405,11 @@ struct DayTimelineGridView: View {
     private struct OpenRecurringTaskOccurrence: Identifiable {
         let id: String
         let task: TaskItem
-        let isCompleted: Bool
+        /// The full three-state cycle — see `ProjectedRecurringTaskOccurrence
+        /// .status`'s own doc comment.
+        let status: OccurrenceStatus
+        var isCompleted: Bool { status == .complete }
+        var isMissed: Bool { status == .missed }
         /// True when this occurrence is showing on `targetDate` only
         /// because it's being pushed forward from an earlier miss (see
         /// `PushedRecurringOccurrence`), not because today is actually
@@ -479,9 +489,9 @@ struct DayTimelineGridView: View {
             let isPushed = pushedTaskIDs.contains(task.id) || carriedForwardTaskIDs.contains(task.id)
             guard task.hasRecurringOccurrence(on: targetDate, calendar: calendar) || isPushed else { continue }
             perfFetchCount += 1
-            let isCompleted = RecurringTaskLog.log(taskID: task.id, on: targetDate, context: modelContext, calendar: calendar)?.isCompleted ?? false
-            guard !(isFutureDay && isCompleted) else { continue }
-            result.append(OpenRecurringTaskOccurrence(id: "recurringTask.\(task.id)", task: task, isCompleted: isCompleted, isPushed: isPushed))
+            let status = RecurringTaskLog.log(taskID: task.id, on: targetDate, context: modelContext, calendar: calendar)?.status ?? .none
+            guard !(isFutureDay && status == .complete) else { continue }
+            result.append(OpenRecurringTaskOccurrence(id: "recurringTask.\(task.id)", task: task, status: status, isPushed: isPushed))
         }
         DiagFileLog.write("PERF openRecurringTaskOccurrences mode=\(mode) allTasks=\(allTasks.count) fetches=\(perfFetchCount) dt=\(Date().timeIntervalSince(perfStart))")
         return result
@@ -705,8 +715,8 @@ struct DayTimelineGridView: View {
                         onSaveEvent: onSaveEvent,
                         onDeleteBlock: onDeleteBlock,
                         onPickReplacement: onPickReplacement,
-                        onToggleProjectedRecurringTaskOccurrence: { task, isCompleted in
-                            toggleRecurringTaskOccurrence(task: task, isCompleted: isCompleted)
+                        onCycleRecurringTaskOccurrence: { task in
+                            cycleRecurringTaskOccurrence(task: task)
                         },
                         habitStreaks: cachedHabitStreaks,
                         precedingContentHeight: twoMinuteSectionHeight + amSectionHeight,
@@ -744,8 +754,8 @@ struct DayTimelineGridView: View {
                         onSaveEvent: onSaveEvent,
                         onDeleteBlock: onDeleteBlock,
                         onPickReplacement: onPickReplacement,
-                        onToggleProjectedRecurringTaskOccurrence: { task, isCompleted in
-                            toggleRecurringTaskOccurrence(task: task, isCompleted: isCompleted)
+                        onCycleRecurringTaskOccurrence: { task in
+                            cycleRecurringTaskOccurrence(task: task)
                         },
                         habitStreaks: cachedHabitStreaks,
                         precedingContentHeight: twoMinuteSectionHeight + amSectionHeight + dayHeight(for: morningQuarterRange) + middaySectionHeight,
@@ -770,8 +780,8 @@ struct DayTimelineGridView: View {
                         onSaveEvent: onSaveEvent,
                         onDeleteBlock: onDeleteBlock,
                         onPickReplacement: onPickReplacement,
-                        onToggleProjectedRecurringTaskOccurrence: { task, isCompleted in
-                            toggleRecurringTaskOccurrence(task: task, isCompleted: isCompleted)
+                        onCycleRecurringTaskOccurrence: { task in
+                            cycleRecurringTaskOccurrence(task: task)
                         },
                         habitStreaks: cachedHabitStreaks,
                         precedingContentHeight: twoMinuteSectionHeight + amSectionHeight,
@@ -1025,8 +1035,8 @@ struct DayTimelineGridView: View {
                             toggleHabitOccurrence(habit: occurrence.habit, index: occurrence.index)
                         }
                     case .recurringTask(let occurrence):
-                        occurrenceRow(name: occurrence.task.title, isCompleted: occurrence.isCompleted, isPushed: occurrence.isPushed) {
-                            toggleRecurringTaskOccurrence(task: occurrence.task, isCompleted: occurrence.isCompleted)
+                        occurrenceRow(name: occurrence.task.title, isCompleted: occurrence.isCompleted, isMissed: occurrence.isMissed, isPushed: occurrence.isPushed) {
+                            cycleRecurringTaskOccurrence(task: occurrence.task)
                         }
                     }
                 }
@@ -1154,29 +1164,47 @@ struct DayTimelineGridView: View {
     }
 
     /// Same shape as `toggleHabitOccurrence`, for a recurring task's own
-    /// `RecurringTaskLog` instead of a `HabitLog`. Also upserts/removes a
-    /// `TaskCompletionRecord` on the way — an ordinary task's completion
-    /// already feeds Task Stats through every other "mark complete" entry
-    /// point (see `TaskItem.setCompleted`), and a recurring task shown
-    /// this way has no `ScheduledBlock`/`setCompleted` call of its own to
-    /// do that for it.
-    private func toggleRecurringTaskOccurrence(task: TaskItem, isCompleted: Bool) {
+    /// three-state cycle (`TaskItem.cycleRecurringOccurrence`) —
+    /// consolidated here from what used to be this view's own plain
+    /// complete/incomplete toggle (`toggleRecurringTaskOccurrence`, which
+    /// wrote `RecurringTaskLog.status` directly and could never produce
+    /// `.missed`), so there's one implementation deciding what a tap on a
+    /// recurring task does — Nightly Review's own `cycleRecurringTaskReviewOccurrence`/
+    /// `pushIfMissed` and this call the exact same model method, not two
+    /// that could drift apart. `TaskCompletionRecord`/`block.isCompleted`
+    /// mirroring both happen inside `cycleRecurringOccurrence` itself now,
+    /// not duplicated here.
+    ///
+    /// Landing on `.missed` creates the real `PushedRecurringOccurrence`
+    /// immediately, through the same guarded `pushRecurringOccurrenceIfNeeded`
+    /// the review path uses — a task marked missed from either surface can
+    /// never be double-pushed, since the guard is keyed on the task alone,
+    /// not which caller asked. Unlike the review path, there's no later
+    /// "commit" moment here to hop the fresh push forward from — Nightly
+    /// Review defers that to its own `advance()`, tracking what it created
+    /// via `immediatelyPushedRecurringOccurrenceIDs` so its own commit-time
+    /// walk catches it. The calendar has no equivalent commit step, so the
+    /// hop happens right here, synchronously, the same one hop `advance()`
+    /// would otherwise perform — not a second mechanism, just this
+    /// surface's own version of "immediately," since here that's the only
+    /// chance there is. Without it, a push created by a calendar tap would
+    /// sit at today's date, unmoved, until the next app-launch catch-up
+    /// walk (`NoteForLaterApp.processPushedRecurringOccurrencesIfNeeded`)
+    /// eventually reached it.
+    private func cycleRecurringTaskOccurrence(task: TaskItem) {
         let perfStart = Date()
-        DiagFileLog.write("PERF toggleRecurringTask ENTER task=\(task.title)")
+        DiagFileLog.write("PERF cycleRecurringTask ENTER task=\(task.title)")
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: targetDate)
-        let log = RecurringTaskLog.logOrCreate(taskID: task.id, on: today, context: modelContext, calendar: calendar)
-        DiagFileLog.write("PERF toggleRecurringTask afterLogOrCreate dt=\(Date().timeIntervalSince(perfStart))")
-        log.status = isCompleted ? .none : .complete
-        log.lastModified = .now
-        if log.isCompleted {
-            TaskCompletionRecord.upsert(for: task, in: modelContext)
-        } else {
-            TaskCompletionRecord.remove(for: task, in: modelContext)
+        let next = task.cycleRecurringOccurrence(on: today, context: modelContext, calendar: calendar)
+        if next == .missed, let pushed = ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(task: task, missedDay: today, context: modelContext) {
+            if let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) {
+                PushedRecurringOccurrence.advanceOneHop(pushed, task: task, from: today, to: tomorrow, calendar: calendar, context: modelContext)
+            }
         }
-        DiagFileLog.write("PERF toggleRecurringTask afterCompletionRecord dt=\(Date().timeIntervalSince(perfStart))")
+        DiagFileLog.write("PERF cycleRecurringTask afterWrite dt=\(Date().timeIntervalSince(perfStart))")
         habitOccurrenceRefreshTick += 1
-        DiagFileLog.write("PERF toggleRecurringTask EXIT dt=\(Date().timeIntervalSince(perfStart))")
+        DiagFileLog.write("PERF cycleRecurringTask EXIT dt=\(Date().timeIntervalSince(perfStart))")
     }
 }
 
@@ -1208,13 +1236,16 @@ private struct DayTimelineSegment: View {
     let onSaveEvent: (CalendarEventSummary) -> Void
     let onDeleteBlock: (ScheduledBlock) -> Void
     let onPickReplacement: (ScheduledBlock) -> Void
-    /// Toggles a `.projectedRecurringTask` row's completion — routed back
-    /// up to `DayTimelineGridView.toggleRecurringTaskOccurrence` (the same
-    /// function the AM/Midday/PM rows already use) rather than duplicating
-    /// `RecurringTaskLog` write logic here, since this struct has no
-    /// `modelContext` of its own. Same shape as `onSaveEvent`/
-    /// `onDeleteBlock`/`onPickReplacement` above.
-    let onToggleProjectedRecurringTaskOccurrence: (TaskItem, Bool) -> Void
+    /// Cycles a recurring task's occurrence through complete/missed/none —
+    /// routed back up to `DayTimelineGridView.cycleRecurringTaskOccurrence`
+    /// (the same function the AM/Midday/PM rows already use) rather than
+    /// duplicating the write, the push-on-missed side effect, and the
+    /// immediate hop here. Used both by a `.projectedRecurringTask` row's
+    /// own circle and by a real `.proposed(block)` row's circle when that
+    /// block belongs to a recurring task — see `completeCircle(for:)`.
+    /// Same shape as `onSaveEvent`/`onDeleteBlock`/`onPickReplacement`
+    /// above.
+    let onCycleRecurringTaskOccurrence: (TaskItem) -> Void
     /// `DayTimelineGridView.cachedHabitStreaks`, handed down so a
     /// Specific-Time habit's own calendar block can show its streak too —
     /// see that property's own doc comment for why this is a cache rather
@@ -1272,6 +1303,14 @@ private struct DayTimelineSegment: View {
     /// it onto another entry means "put these side by side" instead of the
     /// default "push that one down" — see `dragGesture`/`commitDrop`.
     private let sideBySideDragThreshold: CGFloat = 40
+
+    /// Read-only — the write itself is always routed back up through
+    /// `onCycleRecurringTaskOccurrence`/other callback closures, never
+    /// straight from this struct. Needed here only to check a recurring
+    /// task's own live status (`RecurringTaskLog`, not `block.isCompleted`)
+    /// when deciding how to render its Specific-Time block's circle — see
+    /// `completeCircle(for:)`.
+    @Environment(\.modelContext) private var modelContext
 
     @State private var draggingRowID: String?
     @State private var dragTranslation: CGFloat = 0
@@ -2023,7 +2062,7 @@ private struct DayTimelineSegment: View {
             // No real block to open an actions sheet for — the whole row
             // just toggles completion, same as tapping the AM/Midday/PM
             // occurrence rows above the grid already does.
-            onToggleProjectedRecurringTaskOccurrence(occurrence.task, occurrence.isCompleted)
+            onCycleRecurringTaskOccurrence(occurrence.task)
         }
     }
 
@@ -2459,6 +2498,16 @@ private struct DayTimelineSegment: View {
                 }
             }
         case .proposed(let block):
+            // `block.isCompleted` alone can't tell "missed" apart from
+            // "untouched" for a recurring task (both read `false` on the
+            // mirror) — read the live status once, purely for the fade
+            // below; `completeCircle(for:)` does its own equivalent read
+            // for the circle itself, since it's built from a different
+            // closure and there's no clean way to thread one read into
+            // both without restructuring this whole case.
+            let isRecurringMissed = block.task.map { task in
+                task.isRecurring && ScheduleReviewViewModel.recurringTaskOccurrenceStatus(task: task, on: block.date, context: modelContext) == .missed
+            } ?? false
             Group {
                 // "(Est Duration)" flags a guessed duration (the task
                 // itself never had one set — see
@@ -2510,7 +2559,7 @@ private struct DayTimelineSegment: View {
             // Locking no longer fades it (only the lock icon itself turns
             // green to show the state). The icon overlay below is outside
             // this `.opacity`, so it stays fully legible regardless.
-            .opacity(block.isCompleted ? 0.5 : 1)
+            .opacity(block.isCompleted || isRecurringMissed ? 0.5 : 1)
             .overlay(alignment: .topTrailing) {
                 HStack(spacing: 8) {
                     // Same circle style as `OverdueBlocksReviewList`'s
@@ -2600,10 +2649,10 @@ private struct DayTimelineSegment: View {
             .frame(height: height, alignment: isCompact ? .center : .top)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.4), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
-            .opacity(occurrence.isCompleted ? 0.5 : 1)
+            .opacity(occurrence.isCompleted || occurrence.isMissed ? 0.5 : 1)
             .overlay(alignment: .topTrailing) {
-                completeCircle(isCompleted: occurrence.isCompleted) {
-                    onToggleProjectedRecurringTaskOccurrence(occurrence.task, occurrence.isCompleted)
+                completeCircle(isCompleted: occurrence.isCompleted, isMissed: occurrence.isMissed) {
+                    onCycleRecurringTaskOccurrence(occurrence.task)
                 }
                 .padding(2)
             }
@@ -2623,8 +2672,26 @@ private struct DayTimelineSegment: View {
             .background(Color.secondary.opacity(0.2), in: Capsule())
     }
 
+    /// Branches for a recurring task's own block — the one row shape
+    /// most likely to get missed in this consolidation, since it
+    /// otherwise shares this exact same plain-toggle circle with every
+    /// ordinary (non-recurring) task block. `block.isCompleted` is kept
+    /// as a mirror by `TaskItem.cycleRecurringOccurrence`, true only for
+    /// `.complete` — accurate for the checkmark, but it can't tell
+    /// `.missed` apart from `.none` (both read `false`), so the live
+    /// status is read directly from `RecurringTaskLog` here rather than
+    /// trusting the mirror alone. A non-recurring task's block (and a
+    /// habit's — `block.habit != nil`, untouched by this whole
+    /// consolidation) keeps the exact plain two-state toggle it always
+    /// had: `viewModel.toggleComplete(block)`, unchanged.
     private func completeCircle(for block: ScheduledBlock) -> some View {
-        completeCircle(isCompleted: block.isCompleted) {
+        if let task = block.task, task.isRecurring {
+            let status = ScheduleReviewViewModel.recurringTaskOccurrenceStatus(task: task, on: block.date, context: modelContext)
+            return completeCircle(isCompleted: status == .complete, isMissed: status == .missed) {
+                onCycleRecurringTaskOccurrence(task)
+            }
+        }
+        return completeCircle(isCompleted: block.isCompleted) {
             // Routed through the view model rather than toggling
             // `isCompleted` directly — a habit-backed block needs its
             // Habit Tracker log kept in sync too (see
@@ -2634,18 +2701,29 @@ private struct DayTimelineSegment: View {
     }
 
     /// Empty outline when incomplete, green fill + white checkmark when
-    /// complete — same look as `OverdueBlocksReviewList`'s selection
-    /// circle, just sized for the card. Generic over `isCompleted`/
-    /// `onToggle` (rather than taking a `ScheduledBlock` directly) so a
-    /// `.projectedRecurringTask` row — which has no block to read or
-    /// write — gets the exact same look and tap behavior as a real one.
-    private func completeCircle(isCompleted: Bool, onToggle: @escaping () -> Void) -> some View {
-        ZStack {
+    /// complete, red fill + white X when missed — same look
+    /// `DayTimelineGridView.occurrenceRow` already uses for an untimed
+    /// habit/recurring-task occurrence, reused here rather than a second
+    /// scheme, just sized for the card. Generic over `isCompleted`/
+    /// `isMissed`/`onToggle` (rather than taking a `ScheduledBlock`
+    /// directly) so a `.projectedRecurringTask` row — which has no block
+    /// to read or write — gets the exact same look and tap behavior as a
+    /// real one. `isMissed` defaults to `false` so every existing caller
+    /// (a habit block, a non-recurring task block) renders exactly as it
+    /// always has — only a recurring task's own circle ever passes it.
+    private func completeCircle(isCompleted: Bool, isMissed: Bool = false, onToggle: @escaping () -> Void) -> some View {
+        let fillColor: Color = isCompleted ? .green : (isMissed ? .red.opacity(0.55) : .clear)
+        let strokeColor: Color = isCompleted || isMissed ? fillColor : .secondary.opacity(0.7)
+        return ZStack {
             Circle()
-                .fill(isCompleted ? Color.green : Color.clear)
-                .overlay(Circle().strokeBorder(isCompleted ? Color.green : Color.secondary.opacity(0.7), lineWidth: 1.5))
+                .fill(fillColor)
+                .overlay(Circle().strokeBorder(strokeColor, lineWidth: 1.5))
             if isCompleted {
                 Image(systemName: "checkmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white)
+            } else if isMissed {
+                Image(systemName: "xmark")
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(.white)
             }

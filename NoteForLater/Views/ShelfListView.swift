@@ -194,13 +194,13 @@ struct ShelfListView: View {
         HStack {
             TextField("Add to \(displayName)", text: $draftTitle, axis: .vertical)
                 .submitLabel(.done)
-                .onSubmit(addTask)
+                .onSubmit { addTask(openCard: false) }
                 .focused($isCaptureFocused)
                 .frame(minHeight: 42)
                 .onChange(of: draftTitle) { _, newValue in
                     guard newValue.hasSuffix("\n") else { return }
                     draftTitle = String(newValue.dropLast())
-                    addTask()
+                    addTask(openCard: false)
                 }
             Button {
                 speechCapture.toggle()
@@ -209,7 +209,9 @@ struct ShelfListView: View {
                     .foregroundStyle(speechCapture.isRecording ? .red : .accentColor)
                     .symbolEffect(.pulse, isActive: speechCapture.isRecording)
             }
-            Button(action: addTask) {
+            Button {
+                addTask(openCard: true)
+            } label: {
                 Image(systemName: "plus.circle.fill")
                     .font(.title)
             }
@@ -220,7 +222,17 @@ struct ShelfListView: View {
         .padding(.vertical, 8)
     }
 
-    private func addTask() {
+    /// Enter (both the keyboard's own submit and the vertical-growing
+    /// field's own newline-in-text handler, since `axis: .vertical` means
+    /// Enter inserts "\n" rather than firing `onSubmit` directly) saves
+    /// silently — `openCard: false`. The plus button saves and opens the
+    /// task straight into the same `TaskCardSheet` tapping an existing
+    /// row already presents (`selectedTask`, below) — one presentation
+    /// path, not a second one bolted on for capture. Dismissing the
+    /// keyboard first (`isCaptureFocused = false`) before setting
+    /// `selectedTask` avoids the two animations — keyboard collapsing,
+    /// sheet rising — competing with each other.
+    private func addTask(openCard: Bool) {
         let trimmed = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let task = TaskItem.makeForDirectCapture(title: trimmed, shelf: shelf)
@@ -233,6 +245,13 @@ struct ShelfListView: View {
         DispatchQueue.main.async {
             withAnimation {
                 scrollProxy?.scrollTo(task.id, anchor: anchor)
+            }
+            // The scroll above is purely cosmetic once the card is about
+            // to cover the screen — still fired so the list is in the
+            // right place underneath/behind the sheet once dismissed,
+            // but the card itself opens without waiting on it.
+            if openCard {
+                selectedTask = task
             }
         }
     }

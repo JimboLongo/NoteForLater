@@ -540,38 +540,28 @@ merits, and if a future reproduction of the lag does implicate this same
 over-invalidation problem, doing Half A first still means opening this
 file only once either way.
 
-### `startDate` cannot be cleared once set — real bug, unreported elsewhere
+### `startDate` cannot be cleared once set — fixed
 
-**The only written record of this bug is this entry** — it was never
-folded into the spec, so removing it here deletes it entirely. Re-verified
-against current code for this rewrite (line numbers below are current, not
-copied from an earlier draft):
+Was: a nil `startDate` rendered as today (`task.startDate ?? .now`) and
+the popover DatePicker bound straight to `task.startDate`, so tapping
+the already-highlighted "today" cell produced no value change and
+SwiftUI's DatePicker never fired its `set` closure — nothing was ever
+written. Only tapping a *different* day (then back) generated a real
+change event.
 
-- `TaskItem.isEligibleToStart` returns `true` when `startDate` is `nil`,
-  but gates packing on it once set (`TaskItem.swift:232`,
-  `guard let startDate else { return true }`).
-- The Start Date row displays `task.startDate ?? .now`
-  (`NightlyReviewView.swift:2007`) — **a nil start date renders as
-  today**, indistinguishable from one deliberately set to today.
-- The picker's binding only ever assigns
-  (`NightlyReviewView.swift:2022-2024`, `set: { task.startDate = newValue }`)
-  — `grep "startDate = nil"` across the whole app still returns nothing.
-
-**Consequence:** opening the picker and touching it sets a start date
-permanently. Pick a date by accident (or just experimentally) and that
-task is unschedulable until it arrives, with no way back through the UI.
-For a recurring task the same setter also rewrites `dueDate`
-(`NightlyReviewView.swift:2031-2035`, since Start Date doubles as the
-recurrence anchor), so the blast radius is larger there.
-
-**First step:** decide the intended semantics before writing code — is "no
-start date" a state the UI should express at all? If yes, this needs a
-clear affordance and a distinguishable empty display, mirroring how
-`TaskReviewCard` handles *"Has due date → No"*
-(`dueDateDecided = true; dueDate = nil; dueDatePicked = false`) — that's
-the existing precedent for how this app represents "explicitly no value"
-as distinct from "never touched." If no, the nil case should be eliminated
-rather than left silently reachable.
+Fixed by adding `TaskItem.startDatePicked: Bool`, mirroring
+`dueDateDecided`/`dueDatePicked` — `startDate == nil && !startDatePicked`
+now means "never touched" (displays "Not Selected"), distinguishable from
+a deliberately-picked today. The tap-registration problem itself needed
+more than the flag: the popover's `DatePicker` now binds to a local
+`pendingStartDate` `@State`, seeded fresh each time the popover opens,
+and an explicit "Set" button commits it via `TaskItem.setStartDate(_:)`
+regardless of whether the calendar's own selection binding ever fired —
+a plain button tap has no "same value, no-op" case the way a `DatePicker`
+binding does. `setStartDate(_:)` also keeps a recurring task's `dueDate`
+in sync (via the same `syncDueDate(toAnchorDay:calendar:)` helper
+`makeRecurring()` uses), so the anchor-sync blast radius the old entry
+flagged is preserved.
 
 ### #5 — 2-Minute Tasks tap-to-edit → `TaskCardSheet`
 

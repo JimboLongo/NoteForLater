@@ -13,7 +13,13 @@ import SwiftData
 /// then stops a duplicate, ordinary occurrence from also being created
 /// for that same day. Never checks `recurrenceEndDate` — an
 /// already-missed occurrence keeps pushing regardless of whether the
-/// recurrence itself has since "ended."
+/// recurrence itself has since "ended." That default *is* overridable
+/// per-task, though: `TaskItem.isPushable` (`true` by default) is
+/// checked upstream, before a record like this ever gets created —
+/// `ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded` and
+/// `.carriedForwardRecurringTaskIDs` both no-op for a task with
+/// `isPushable == false`, so "keeps pushing regardless of `recurrenceEndDate`"
+/// only describes a record that was allowed to exist in the first place.
 ///
 /// `taskID` is a copied `TaskItem.id`, not a `@Relationship` — same
 /// "survive the original being edited or deleted" reasoning

@@ -2340,10 +2340,10 @@ final class ScheduleReviewViewModel {
             guard task.hasRecurringOccurrence(on: targetDate, calendar: calendar) || isCarriedForward,
                   let startTime = task.recurringOccurrenceTime(on: targetDate, calendar: calendar)
             else { continue }
-            let isCompleted = RecurringTaskLog.log(taskID: task.id, on: targetDate, context: context, calendar: calendar)?.isCompleted ?? false
-            guard !(isFutureDay && isCompleted) else { continue }
+            let status = RecurringTaskLog.log(taskID: task.id, on: targetDate, context: context, calendar: calendar)?.status ?? .none
+            guard !(isFutureDay && status == .complete) else { continue }
             let endTime = calendar.date(byAdding: .minute, value: max(task.estimatedMinutes, 15), to: startTime) ?? startTime
-            result.append(ProjectedRecurringTaskOccurrence(id: "projectedRecurringTask.\(task.id)", task: task, startTime: startTime, endTime: endTime, isCompleted: isCompleted, isPushed: isCarriedForward))
+            result.append(ProjectedRecurringTaskOccurrence(id: "projectedRecurringTask.\(task.id)", task: task, startTime: startTime, endTime: endTime, status: status, isPushed: isCarriedForward))
         }
         return result
     }
@@ -2374,13 +2374,17 @@ final class ScheduleReviewViewModel {
     /// real `ScheduledBlock` there) is the caller's job to supply, since
     /// both callers already have that data for their own reasons — this
     /// only excludes what it's told to, so a task never gets a duplicate
-    /// row alongside its own real one.
+    /// row alongside its own real one. Excludes `!task.isPushable` tasks
+    /// outright — this is a display stand-in for a real
+    /// `PushedRecurringOccurrence` (see `pushRecurringOccurrenceIfNeeded`,
+    /// which never creates one for such a task either), so it must not
+    /// show a carry-forward that the real mechanism would never produce.
     static func carriedForwardRecurringTaskIDs(tasks: [TaskItem], targetDate: Date, alreadyCoveredTaskIDs: Set<UUID>, context: ModelContext, calendar: Calendar = .current, today: Date = .now) -> Set<UUID> {
         let targetDay = calendar.startOfDay(for: targetDate)
         let todayDay = calendar.startOfDay(for: today)
         guard targetDay > todayDay else { return [] }
         var result: Set<UUID> = []
-        for task in tasks where task.isRecurring {
+        for task in tasks where task.isRecurring && task.isPushable {
             guard !alreadyCoveredTaskIDs.contains(task.id) else { continue }
             guard !task.hasRecurringOccurrence(on: targetDay, calendar: calendar) else { continue }
             guard let lastDay = task.previousRecurringOccurrenceDate(onOrBefore: todayDay, calendar: calendar) else { continue }
@@ -2621,7 +2625,25 @@ final class ScheduleReviewViewModel {
     /// (or by an interactive tap moments before Next) is visible here too.
     /// Returns `nil` when a push was already active — the caller does
     /// nothing further in that case, same as before this was extracted.
+    /// Also returns `nil` outright when `task.isPushable` is `false` — a
+    /// missed occurrence of that task just stays missed on its own day
+    /// (whatever already wrote `.missed` to its log did so before this
+    /// runs; this function only ever controls the *push*), waiting for
+    /// the next natural recurrence instead of carrying forward.
+    ///
+    /// **This one `guard` is load-bearing for all three of `isPushable`'s
+    /// suppression behaviors, not just this function's own:** the
+    /// commit-time sweep (`pushMissedRecurringOccurrences`) and the
+    /// interactive missed-tap both create a push only by calling this
+    /// function, and the display-only carry-forward projection
+    /// (`carriedForwardRecurringTaskIDs`) checks `task.isPushable` itself
+    /// purely so it never shows a projection this function would refuse
+    /// to back with a real record. If a future fourth creation path calls
+    /// `context.insert(PushedRecurringOccurrence(...))` directly instead
+    /// of routing through here, `isPushable == false` will silently stop
+    /// working for it — there is no other enforcement point.
     static func pushRecurringOccurrenceIfNeeded(task: TaskItem, missedDay: Date, context: ModelContext) -> PushedRecurringOccurrence? {
+        guard task.isPushable else { return nil }
         let taskID = task.id
         let alreadyPushed = (try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>(
             predicate: #Predicate { $0.taskID == taskID && !$0.isCompleted }

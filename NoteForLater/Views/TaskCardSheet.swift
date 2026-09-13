@@ -141,8 +141,14 @@ struct TaskEditSnapshot: Equatable {
     let isRecurring: Bool
     let recurrenceIntervalCount: Int
     let recurrenceUnitRaw: String
+    let recurrenceIntervalPicked: Bool
+    let recurrenceTimeModeRaw: String
+    let recurrenceTimeModePicked: Bool
+    let recurrenceTimeOfDayMinutes: Int?
     let recurrenceEndDate: Date?
+    let isPushable: Bool
     let startDate: Date?
+    let startDatePicked: Bool
 
     init(_ task: TaskItem) {
         title = task.title
@@ -168,8 +174,18 @@ struct TaskEditSnapshot: Equatable {
         isRecurring = task.isRecurring
         recurrenceIntervalCount = task.recurrenceIntervalCount
         recurrenceUnitRaw = task.recurrenceUnitRaw
+        recurrenceIntervalPicked = task.recurrenceIntervalPicked
+        // `recurrenceTimeModeRaw` was missing from this snapshot before
+        // now — a pre-existing gap (Cancel wouldn't roll back a Time-mode
+        // change) noticed while adding `recurrenceTimeModePicked`, which
+        // needs the same rollback treatment for the same reason.
+        recurrenceTimeModeRaw = task.recurrenceTimeModeRaw
+        recurrenceTimeModePicked = task.recurrenceTimeModePicked
+        recurrenceTimeOfDayMinutes = task.recurrenceTimeOfDayMinutes
         recurrenceEndDate = task.recurrenceEndDate
+        isPushable = task.isPushable
         startDate = task.startDate
+        startDatePicked = task.startDatePicked
     }
 
     func restore(into task: TaskItem) {
@@ -197,8 +213,14 @@ struct TaskEditSnapshot: Equatable {
         task.isRecurring = isRecurring
         task.recurrenceIntervalCount = recurrenceIntervalCount
         task.recurrenceUnitRaw = recurrenceUnitRaw
+        task.recurrenceIntervalPicked = recurrenceIntervalPicked
+        task.recurrenceTimeModeRaw = recurrenceTimeModeRaw
+        task.recurrenceTimeModePicked = recurrenceTimeModePicked
+        task.recurrenceTimeOfDayMinutes = recurrenceTimeOfDayMinutes
         task.recurrenceEndDate = recurrenceEndDate
+        task.isPushable = isPushable
         task.startDate = startDate
+        task.startDatePicked = startDatePicked
         // A duration edit already live-resized any scheduled block behind
         // this task (see `TaskItem.syncScheduledBlockDuration`) — restoring
         // the old `estimatedMinutes` here without also re-syncing would

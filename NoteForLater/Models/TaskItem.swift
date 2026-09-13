@@ -41,6 +41,13 @@ final class TaskItem {
     /// one, the same way `isScheduled` already excludes an already-placed
     /// task.
     var startDate: Date?
+    /// True once Start Date has actually been set through `setStartDate(_:)`
+    /// — `startDate == nil` alone can't tell "never touched" apart from a
+    /// hypothetical "explicitly cleared," and more importantly the Start
+    /// Date control's own display previously fell back to showing today
+    /// for an untouched task, making a deliberate choice of today
+    /// indistinguishable from no choice at all. See `setStartDate(_:)`.
+    var startDatePicked: Bool = false
     var nextStep: String = ""
     /// Whether "Has next step" has actually been answered (either way) —
     /// same shape as `dueDateDecided`: a bare `nextStep == ""` can't tell
@@ -176,11 +183,20 @@ final class TaskItem {
     /// The "every X" in "every X days/weeks/months" — always >= 1.
     var recurrenceIntervalCount: Int = 1
     var recurrenceUnitRaw: String = RecurrenceUnit.days.rawValue
+    /// Whether "Every" (the interval count + unit pair above) has
+    /// actually been deliberately set — same "picked" shape
+    /// `startDatePicked`/`dueDatePicked` already use. `recurrenceIntervalCount`/
+    /// `recurrenceUnitRaw` start on real, storable defaults ("every 1
+    /// day"), not an obviously-incomplete placeholder, so without this a
+    /// fresh recurring task would silently sit on that default forever
+    /// with nothing prompting it to be confirmed. See `startDateMissing`'s
+    /// doc comment for the same reasoning applied to Start Date.
+    var recurrenceIntervalPicked: Bool = false
     /// nil means "indefinitely."
     var recurrenceEndDate: Date?
     /// Reuses `HabitOccurrenceTimeMode` rather than a second, parallel
     /// enum — `.specific` means exactly today's existing behavior (placed
-    /// on the calendar at `dueDate`'s own time-of-day, via
+    /// on the calendar at its own clock time, via
     /// `recurringOccurrenceTime`); `.am`/`.midday`/`.pm` means this
     /// occurrence never gets a `ScheduledBlock` at all (see
     /// `AISchedulingService.placeHabitsAndRecurringTasks`'s skip, mirrored
@@ -193,6 +209,36 @@ final class TaskItem {
     /// this. Defaults to `.specific` so every recurring task that existed
     /// before this field did keeps behaving exactly as it always has.
     var recurrenceTimeModeRaw: String = HabitOccurrenceTimeMode.specific.rawValue
+    /// Whether "Time" (AM/Midday/PM/Specific, above) has actually been
+    /// deliberately set — `.specific` is `recurrenceTimeModeRaw`'s real
+    /// stored default, not evidence anyone chose it. Same "picked" shape
+    /// as `recurrenceIntervalPicked`.
+    var recurrenceTimeModePicked: Bool = false
+    /// Whether a missed occurrence of this recurring task gets carried
+    /// forward onto future days at all — default `true` matches every
+    /// task's behavior before this existed (an opt-out, not an opt-in).
+    /// `false` means a missed occurrence just stays missed on its own day
+    /// and waits for the next natural recurrence: no
+    /// `PushedRecurringOccurrence` gets created for it
+    /// (`ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded` no-ops),
+    /// and it's excluded from the display-only carry-forward projection
+    /// (`.carriedForwardRecurringTaskIDs`) too. See
+    /// `PushedRecurringOccurrence`'s own doc comment for how this
+    /// interacts with `recurrenceEndDate`.
+    var isPushable: Bool = true
+    /// The Specific-Time occurrence's own clock time, minutes since
+    /// midnight — same representation `Habit.idealTimesOfDay` already
+    /// uses for the identical concept. `nil` means "never explicitly
+    /// set" (a recurring task created before this field existed, or one
+    /// that's never opened the Specific Time picker) — `recurringOccurrenceTime`
+    /// falls back to `dueDate`'s own time-of-day for those, so nothing
+    /// already placed moves until this is actually touched. Deliberately
+    /// separate from `dueDate`: before this existed, the time picker
+    /// would have had nowhere else to write except the recurrence
+    /// anchor itself, silently repurposing a date field as a time store
+    /// and coupling two questions ("which day does this pattern start
+    /// on" and "what time does it land at") that don't need to be one.
+    var recurrenceTimeOfDayMinutes: Int?
 
     var recurrenceUnit: RecurrenceUnit {
         get { RecurrenceUnit(rawValue: recurrenceUnitRaw) ?? .days }
@@ -202,6 +248,21 @@ final class TaskItem {
     var recurrenceTimeMode: HabitOccurrenceTimeMode {
         get { HabitOccurrenceTimeMode(rawValue: recurrenceTimeModeRaw) ?? .specific }
         set { recurrenceTimeModeRaw = newValue.rawValue }
+    }
+
+    /// `recurrenceTimeOfDayMinutes` if explicitly set, else derived from
+    /// `dueDate`'s own time-of-day (the pre-picker behavior, kept as a
+    /// fallback so an existing recurring task keeps placing exactly
+    /// where it always has), else 9am if there's no anchor at all yet
+    /// (mirrors `makeRecurring`'s own default anchor time). This is what
+    /// the Specific Time picker actually displays and what
+    /// `recurringOccurrenceTime` reads — one fallback chain, not two
+    /// copies of it.
+    var effectiveRecurrenceTimeOfDayMinutes: Int {
+        if let recurrenceTimeOfDayMinutes { return recurrenceTimeOfDayMinutes }
+        guard let dueDate else { return 9 * 60 }
+        let components = Calendar.current.dateComponents([.hour, .minute], from: dueDate)
+        return (components.hour ?? 9) * 60 + (components.minute ?? 0)
     }
 
     /// Whether an occurrence of this recurring task lands on `date`'s
@@ -247,12 +308,55 @@ final class TaskItem {
     }
 
     /// The time an occurrence landing on `date` should actually be placed
-    /// at — always the anchor (`dueDate`)'s own time-of-day, applied onto
-    /// `date`'s calendar day.
+    /// at — `effectiveRecurrenceTimeOfDayMinutes`, applied onto `date`'s
+    /// calendar day. Still requires an anchor (`dueDate`) to exist at
+    /// all, same as before this had its own field — a recurring task
+    /// with no anchor yet has nothing to place regardless of what time
+    /// it would land at (see `hasRecurringOccurrence`, which every real
+    /// caller already checks first).
     func recurringOccurrenceTime(on date: Date, calendar: Calendar = .current) -> Date? {
-        guard let anchor = dueDate else { return nil }
-        let anchorComponents = calendar.dateComponents([.hour, .minute], from: anchor)
-        return calendar.date(bySettingHour: anchorComponents.hour ?? 9, minute: anchorComponents.minute ?? 0, second: 0, of: date)
+        guard dueDate != nil else { return nil }
+        let minutes = effectiveRecurrenceTimeOfDayMinutes
+        return calendar.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: date)
+    }
+
+    /// Moves every future, not-yet-completed block already generated for
+    /// this task's Specific-Time occurrence onto its current time-of-day
+    /// — called whenever the time picker changes, so an edit follows
+    /// through to what's already on the calendar instead of only
+    /// applying to occurrences placed from here on. Keeps each block's
+    /// own date, just updates its clock time (preserving duration).
+    ///
+    /// Updates in place rather than deleting and re-placing
+    /// (`HabitEditView.removeStaleBlocks`'s approach for the identical
+    /// habit-side question): a recurring task's real blocks can already
+    /// be generated up to ~44 days out
+    /// (`AISchedulingService`'s own population horizon), and deleting
+    /// all of them would need a full regenerate to refill anything past
+    /// today — changing one field shouldn't require that. Doesn't
+    /// collision-check against anything else already on those days,
+    /// same as a manual drag-to-retime of a single block wouldn't
+    /// either — this is a deliberate, explicit edit, not a placement
+    /// decision. A past or already-completed block is left alone (it's
+    /// history). An approved block drops back to "proposed" so the next
+    /// Approve All actually pushes the corrected time to Google
+    /// Calendar, same reasoning `syncScheduledBlockDuration` already
+    /// uses for a duration edit. `today` is a parameter (defaulting to
+    /// `.now`) purely for testability — production callers never
+    /// override it.
+    func retimeFutureSpecificOccurrences(today: Date = .now, calendar: Calendar = .current) {
+        guard recurrenceTimeMode == .specific else { return }
+        let today = calendar.startOfDay(for: today)
+        let minutes = effectiveRecurrenceTimeOfDayMinutes
+        for block in (scheduledBlocks ?? []) where !block.isCompleted && block.date >= today {
+            guard let newStart = calendar.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: block.date) else { continue }
+            let duration = block.endTime.timeIntervalSince(block.startTime)
+            block.startTime = newStart
+            block.endTime = newStart.addingTimeInterval(duration)
+            if block.approvalStatus == .approved {
+                block.approvalStatus = .proposed
+            }
+        }
     }
 
     /// The recurring-task counterpart to `Habit.cycleOccurrence` — same
@@ -366,47 +470,79 @@ final class TaskItem {
         return summary
     }
 
-    /// Turns this task recurring and seeds the anchor fields
-    /// (`startDate`/`dueDate`/`dueDateDecided`/`dueDatePicked`) together,
-    /// atomically — exactly what `TaskReviewCard`'s own "Recurring?"
-    /// toggle already does the moment it's switched on, extracted here so
-    /// a task created directly on the Recurring Tasks shelf (see
-    /// `Shelf.isRecurringTasks`) starts in that same fully-consistent
-    /// state instead of `isRecurring == true` with no anchor at all.
+    /// Turns this task recurring — deliberately *without* auto-filling an
+    /// anchor (`startDate`/`dueDate`) anymore. A new recurring task starts
+    /// with Start Date at "Not Selected," so it has to be consciously set
+    /// before this can actually place anywhere: `hasRecurringOccurrence`/
+    /// `recurringOccurrenceTime`/`nextRecurringOccurrenceDate` all require
+    /// `dueDate` and simply return false/nil without it (no crash — a
+    /// recurring task with no anchor just never places on the calendar
+    /// and never shows a next-occurrence date, which `ShelfListView`'s own
+    /// `recurrenceLine` already falls back to the frequency alone for).
+    /// `dueDateMissing` excludes a recurring task outright (it asks Start
+    /// Date instead, never "Due Date"), so leaving the anchor unset here
+    /// doesn't mislabel it as missing something it was never asked.
     ///
-    /// That combination — recurring, but no anchor — isn't otherwise
-    /// reachable (the toggle always sets both together), and leaving it
-    /// reachable has a real consequence: `hasRecurringOccurrence`/
-    /// `recurringOccurrenceTime`/`nextRecurringOccurrenceDate` all
-    /// require `dueDate` and simply return false/nil without it (no
-    /// crash — a recurring task with no anchor just never places on the
-    /// calendar and never shows a next-occurrence date, which
-    /// `ShelfListView`'s own `recurrenceLine` already falls back to the
-    /// frequency alone for), but `missingAttributeNames` doesn't know
-    /// this task is recurring at all when it checks `dueDateMissing` —
-    /// so without this, the task would silently read as "missing Due
-    /// Date" in the attribute review queue, the wrong question for a
-    /// recurring task, which asks for Start Date instead.
-    ///
-    /// Preserves an already-set `startDate` (don't clobber a date the
-    /// user already picked) and an already-set `dueDate`'s own time-of-
-    /// day (don't reset a chosen time back to the 9am default) — see
-    /// `combiningDate`'s original inline version this replaces.
+    /// If `startDate` is *already* set — a task that had one before
+    /// recurring was turned on, or an already-recurring task cycling
+    /// through this again — that's kept and synced onto `dueDate` (same
+    /// "preserve the existing time-of-day, don't reset it to 9am" logic
+    /// `combiningDate`'s inline version originally had), rather than
+    /// silently losing it.
     ///
     /// **This is the only way `isRecurring` should ever be set to
     /// `true`.** Setting `task.isRecurring = true` directly, without
-    /// this, produces a task that looks fine at a glance — it has a
-    /// title, it's on a shelf — but silently never places on the
-    /// calendar (see above) and asks the wrong question in the attribute
-    /// review queue ("Due Date," not Start Date). Nothing crashes and
-    /// nothing looks obviously broken, which is exactly what makes this
-    /// easy to reach for by accident: the next new task-creation path
-    /// that needs a recurring default should call this, not set the flag
-    /// on its own.
-    func makeRecurring(anchorDay: Date = Calendar.current.startOfDay(for: .now), calendar: Calendar = .current) {
+    /// this, skips the `dueDateDecided`/`dueDatePicked` sync above for a
+    /// task that already has a `startDate` — a small inconsistency, but
+    /// the next new task-creation path that needs a recurring default
+    /// should still call this rather than the bare flag, so there's one
+    /// place this logic lives.
+    func makeRecurring(calendar: Calendar = .current) {
         isRecurring = true
-        let day = startDate ?? anchorDay
+        guard let day = startDate else { return }
+        syncDueDate(toAnchorDay: day, calendar: calendar)
+    }
+
+    /// Single entry point for setting Start Date from the UI — writes
+    /// `startDate` and marks it `startDatePicked`, distinguishing "the
+    /// user deliberately chose this day (even if it's today)" from "never
+    /// touched" (`startDatePicked == false`), which is what lets the
+    /// Start Date control display "Not Selected" instead of silently
+    /// showing today for an untouched task. For a recurring task, Start
+    /// Date doubles as the recurrence anchor, so this keeps `dueDate` in
+    /// sync exactly the way `makeRecurring()` already does when a
+    /// `startDate` is already present — same shared helper, so the two
+    /// paths can't drift apart.
+    func setStartDate(_ date: Date, calendar: Calendar = .current) {
+        let day = calendar.startOfDay(for: date)
         startDate = day
+        startDatePicked = true
+        guard isRecurring else { return }
+        syncDueDate(toAnchorDay: day, calendar: calendar)
+    }
+
+    /// Clears Start Date back to "never touched" — the popover's explicit
+    /// "Clear" affordance, symmetric with `setStartDate(_:)`. For a
+    /// recurring task, since Start Date doubles as the recurrence anchor,
+    /// this also clears `dueDate` back to unset rather than leaving a
+    /// stale anchor behind: an already-recurring task loses its
+    /// placement on the calendar entirely until Start Date is picked
+    /// again, same as a brand new one that's never had it set.
+    func clearStartDate() {
+        startDate = nil
+        startDatePicked = false
+        guard isRecurring else { return }
+        dueDate = nil
+        dueDateDecided = false
+        dueDatePicked = false
+    }
+
+    /// Folds `day` onto `dueDate`'s existing time-of-day (or 9am if there
+    /// isn't one yet) and marks the due date as decided/picked — the
+    /// anchor-sync body shared by `makeRecurring()` and `setStartDate(_:)`
+    /// so a recurring task's `dueDate` stays consistent regardless of
+    /// which of those two paths last touched `startDate`.
+    private func syncDueDate(toAnchorDay day: Date, calendar: Calendar) {
         var components = calendar.dateComponents([.year, .month, .day], from: day)
         let timeSource = dueDate ?? (calendar.date(bySettingHour: 9, minute: 0, second: 0, of: day) ?? day)
         let timeComponents = calendar.dateComponents([.hour, .minute], from: timeSource)
@@ -922,9 +1058,45 @@ final class TaskItem {
     /// Takes an explicit shelf (rather than always reading `self.shelf`) so
     /// `TaskReviewCard` can ask "what would still be missing on the shelf
     /// I'm previewing" before a move actually commits.
+    ///
+    /// Also false outright for a recurring task — it's never asked "Has
+    /// due date" at all (`recurringSection` replaces that whole question
+    /// with Start Date, a deliberately-optional anchor now that
+    /// `makeRecurring()` no longer auto-fills one — see its own doc
+    /// comment). Without this exclusion, a fresh recurring task with no
+    /// anchor yet would read as "missing Due Date," a question it was
+    /// never actually shown. See `startDateMissing` for the question a
+    /// recurring task is asked instead.
     private func dueDateMissing(on shelf: Shelf?) -> Bool {
         guard shelf?.effectiveTracksDueDates ?? true else { return false }
+        guard !isRecurring else { return false }
         return !dueDateDecided || (dueDate != nil && !dueDatePicked)
+    }
+
+    /// The inverse of `dueDateMissing` — only ever applies to a recurring
+    /// task, which is asked Start Date instead of "Has due date." Without
+    /// this, a fresh recurring task with no anchor set (the deliberate
+    /// starting state — see `TaskItem.makeRecurring`'s doc comment) would
+    /// silently sit unscheduled forever with nothing prompting it to be
+    /// finished, rather than surfacing in the attribute review the way an
+    /// ordinary task's missing due date does.
+    private func startDateMissing(on shelf: Shelf?) -> Bool {
+        isRecurring && !startDatePicked
+    }
+
+    /// Same reasoning as `startDateMissing`, for "Every" — a recurring
+    /// task's interval/unit pair starts on a real, storable default
+    /// ("every 1 day"), not a placeholder, so only `recurrenceIntervalPicked`
+    /// can tell "never touched" apart from "deliberately every 1 day."
+    private func recurrenceIntervalMissing(on shelf: Shelf?) -> Bool {
+        isRecurring && !recurrenceIntervalPicked
+    }
+
+    /// Same reasoning again, for "Time" (AM/Midday/PM/Specific) — `.specific`
+    /// is `recurrenceTimeModeRaw`'s real stored default, not evidence
+    /// anyone chose it.
+    private func recurrenceTimeModeMissing(on shelf: Shelf?) -> Bool {
+        isRecurring && !recurrenceTimeModePicked
     }
 
     /// True if "Has next step" is Yes but nothing's actually been typed,
@@ -943,10 +1115,25 @@ final class TaskItem {
     }
 
     /// True if Priority is unset, unless `shelf` doesn't track it at all —
-    /// matching where the Priority section is shown/faded.
+    /// matching where the Priority section is shown/faded. Also false
+    /// outright for a recurring task: High Priority isn't offered to a
+    /// repeating task at all (see `TaskReviewCard`'s Priority row), same
+    /// shelf-level short-circuit shape as the untracked-attribute case
+    /// above, just gated on the task instead of the shelf.
     private func priorityMissing(on shelf: Shelf?) -> Bool {
         guard shelf?.effectiveTracksPriority ?? true else { return false }
+        guard !isRecurring else { return false }
         return priority == .unset
+    }
+
+    /// True for a recurring task using AM/Midday/PM instead of Specific
+    /// Time — an untimed occurrence never gets a calendar block, so
+    /// Duration and Divisible are meaningless for it, not just
+    /// unanswered. Shared by `durationMissing`/`divisibleMissing` so
+    /// neither flags a question the card itself greys out and offers no
+    /// way to answer (see `TaskReviewCard.durationAllowed`).
+    private var recurringAndUntimed: Bool {
+        isRecurring && recurrenceTimeMode != .specific
     }
 
     /// True if "Has duration" is Yes but nothing's been picked from the
@@ -955,6 +1142,7 @@ final class TaskItem {
     /// "No" (`durationAnsweredYes == false`).
     private func durationMissing(on shelf: Shelf?) -> Bool {
         guard shelf?.effectiveTracksDuration ?? true else { return false }
+        guard !recurringAndUntimed else { return false }
         return !durationDecided || (durationAnsweredYes && estimatedMinutes == 0)
     }
 
@@ -973,6 +1161,7 @@ final class TaskItem {
     /// Divisible row itself is shown.
     private func divisibleMissing(on shelf: Shelf?) -> Bool {
         guard shelf?.effectiveTracksDuration ?? true else { return false }
+        guard !recurringAndUntimed else { return false }
         return !isDivisibleDecided || (isDivisible && minimumSegmentMinutes == 0)
     }
 
@@ -1000,10 +1189,44 @@ final class TaskItem {
         var missing: [String] = []
         if nextStepMissing(on: shelf) { missing.append("Next Step") }
         if dueDateMissing(on: shelf) { missing.append("Due Date") }
+        if startDateMissing(on: shelf) { missing.append("Start Date") }
+        if recurrenceIntervalMissing(on: shelf) { missing.append("Every") }
+        if recurrenceTimeModeMissing(on: shelf) { missing.append("Time") }
         if priorityMissing(on: shelf) { missing.append("Priority") }
         if durationMissing(on: shelf) { missing.append("Duration") }
         if divisibleMissing(on: shelf) { missing.append("Divisible") }
         if eligibleSchedulesMissing(on: shelf) { missing.append("Eligible Schedules") }
         return missing
+    }
+}
+
+/// The Occurrence Time wheels' own conversion between minutes-since-
+/// midnight (what `recurrenceTimeOfDayMinutes` actually stores) and
+/// hour(1–12)/minute(one of 0/15/30/45)/AM-or-PM (what three plain
+/// `Picker(.wheel)`s actually show) — pulled out as its own value type so
+/// that conversion is testable independent of SwiftUI, rather than living
+/// only inside the wheel picker view's private bindings.
+struct QuarterHourClockTime: Equatable {
+    var hour12: Int
+    var minute: Int
+    var isPM: Bool
+
+    init(hour12: Int, minute: Int, isPM: Bool) {
+        self.hour12 = hour12
+        self.minute = minute
+        self.isPM = isPM
+    }
+
+    init(minutesSinceMidnight: Int) {
+        let hour24 = (minutesSinceMidnight / 60) % 24
+        let hour = hour24 % 12
+        hour12 = hour == 0 ? 12 : hour
+        minute = minutesSinceMidnight % 60
+        isPM = hour24 >= 12
+    }
+
+    var minutesSinceMidnight: Int {
+        let hour24 = (hour12 % 12) + (isPM ? 12 : 0)
+        return hour24 * 60 + minute
     }
 }

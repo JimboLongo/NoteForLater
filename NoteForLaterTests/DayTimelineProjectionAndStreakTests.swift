@@ -279,6 +279,25 @@ final class DayTimelineProjectionAndStreakTests: XCTestCase {
         XCTAssertTrue(result.contains(task.id))
     }
 
+    /// Fail-then-pass target: a non-pushable task's incomplete occurrence
+    /// must never carry forward onto a future day — this projection is a
+    /// display stand-in for a real `PushedRecurringOccurrence`
+    /// (`ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded`, which
+    /// itself never creates one for such a task), so it must agree.
+    func test_carriedForward_nonPushableTask_neverProjectsForward() {
+        let anchor = day(2026, 8, 10)
+        let fixedToday = day(2026, 9, 10)
+        let notAPatternDay = day(2026, 9, 20)
+        let task = makeMonthlyTask(anchor: anchor)
+        task.isPushable = false
+
+        let result = ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
+            tasks: [task], targetDate: notAPatternDay, alreadyCoveredTaskIDs: [], context: context, calendar: calendar, today: fixedToday
+        )
+
+        XCTAssertFalse(result.contains(task.id), "a non-pushable task's miss must stay on its own day, never carried forward")
+    }
+
     /// The bound: projection stops the moment the task's own next real
     /// pattern day arrives — never past it, never indefinitely.
     func test_carriedForward_stopsOnAndAfterNextRealPatternDay() {

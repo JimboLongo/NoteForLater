@@ -1829,6 +1829,7 @@ struct TaskReviewCard: View {
     @State private var isShowingDatePicker = false
     @State private var isShowingStartDatePicker = false
     @State private var isShowingRecurrenceEndDatePicker = false
+    @State private var isShowingOccurrenceTimePicker = false
     @State private var isShowingSnoozeWheel = false
     @State private var snoozeDays = 1
     /// Captured once this card's edits settle in after appearing (past any
@@ -1947,6 +1948,36 @@ struct TaskReviewCard: View {
         )
     }
 
+    /// Backs the Occurrence Time wheels directly with minutes-since-
+    /// midnight — `HourMinutePeriodPicker` works in hour/minute/period
+    /// terms, not `Date`, so there's no `DatePicker`-carrier round trip
+    /// needed here at all. Reads `effectiveRecurrenceTimeOfDayMinutes`
+    /// (not the raw field) so an existing recurring task that's never
+    /// touched this picker shows its actual current placement time
+    /// (derived from `dueDate`) rather than a misleading default the
+    /// moment the card opens. Retimes every future block on `set` — see
+    /// `TaskItem.retimeFutureSpecificOccurrences`'s own doc comment for
+    /// why this updates in place instead of deferring to the next
+    /// regenerate.
+    private var recurrenceTimeMinutesBinding: Binding<Int> {
+        Binding(
+            get: { task.effectiveRecurrenceTimeOfDayMinutes },
+            set: { newValue in
+                task.recurrenceTimeOfDayMinutes = newValue
+                task.retimeFutureSpecificOccurrences()
+            }
+        )
+    }
+
+    /// Formats minutes-since-midnight (e.g. `570` → "9:30 AM") for the
+    /// Occurrence Time button's label — routes through `Date` purely
+    /// because `DateFormatter`/`.formatted(time:)` only know how to
+    /// format a `Date`, not a raw minute count.
+    private static func formattedTime(minutesSinceMidnight: Int) -> String {
+        let date = Calendar.current.date(bySettingHour: minutesSinceMidnight / 60, minute: minutesSinceMidnight % 60, second: 0, of: .now) ?? .now
+        return date.formatted(date: .omitted, time: .shortened)
+    }
+
     var body: some View {
         VStack(spacing: 14) {
             card
@@ -2000,6 +2031,23 @@ struct TaskReviewCard: View {
             if !task.nextStep.isEmpty, !task.nextStepDecided {
                 task.nextStepDecided = true
                 task.nextStepAnsweredYes = true
+            }
+            // Same idea for tasks that already had a real start date set
+            // before `startDatePicked` existed — otherwise it'd suddenly
+            // read as "Not Selected" despite already having one.
+            if task.startDate != nil, !task.startDatePicked {
+                task.startDatePicked = true
+            }
+            // Same idea for a recurring task that already had a real
+            // anchor (`dueDate`) before `recurrenceIntervalPicked`/
+            // `recurrenceTimeModePicked` existed — `dueDate` only gets
+            // set once a task is genuinely placing on the calendar (see
+            // `TaskItem.makeRecurring`), so its presence is proof "Every"
+            // and "Time" were already meaningfully configured, not just
+            // sitting on their stored defaults.
+            if task.isRecurring, task.dueDate != nil {
+                if !task.recurrenceIntervalPicked { task.recurrenceIntervalPicked = true }
+                if !task.recurrenceTimeModePicked { task.recurrenceTimeModePicked = true }
             }
             if originalSnapshot == nil {
                 originalSnapshot = TaskEditSnapshot(task)
@@ -2089,9 +2137,30 @@ struct TaskReviewCard: View {
         previewedShelf?.effectiveTracksDueDates ?? true
     }
 
-    /// Same idea as `dueDatesAllowed`, for Duration and Divisible.
+    /// Same idea as `dueDatesAllowed`, for Duration and Divisible —
+    /// shelf-level only (greyed, not hidden, since the preview could
+    /// still be cancelled). See `durationApplicable` for the separate,
+    /// task-level "hide entirely" gate.
     private var durationAllowed: Bool {
         previewedShelf?.effectiveTracksDuration ?? true
+    }
+
+    /// Whether Duration and Divisible apply to this task *at all* — false
+    /// for a recurring task using AM/Midday/PM instead of Specific Time.
+    /// An untimed occurrence never gets a calendar block (it shows as a
+    /// plain check-off item instead — see `TaskItem.recurrenceTimeMode`'s
+    /// own doc comment), so there's nothing for a duration to size or a
+    /// divisible split to carve up; both questions are meaningless there,
+    /// not just unanswered. Unlike `durationAllowed`, this hides the
+    /// section entirely rather than greying it out — a shelf preview can
+    /// be cancelled (so fading, not hiding, avoids losing the real
+    /// stored answer's visibility), but switching Time away from
+    /// Specific is a real, immediate edit to this same task, and the
+    /// values underneath are retained untouched either way (see
+    /// `TaskItem.recurringAndUntimed`) — switching back to Specific
+    /// shows them again exactly as they were.
+    private var durationApplicable: Bool {
+        !task.isRecurring || task.recurrenceTimeMode == .specific
     }
 
     /// Same idea as `dueDatesAllowed`, for the Next Step field.
@@ -2216,7 +2285,35 @@ struct TaskReviewCard: View {
     /// below. No *user-picked* time-of-day question for Specific Time —
     /// that occurrence still lands at a fixed time on the calendar (see
     /// `TaskItem.recurringOccurrenceTime`), taken from Start Date rather
-    /// than asked separately here; see `combiningDate(_:withTimeFrom:)`.
+    /// than asked separately here; see `TaskItem.setStartDate(_:)` and
+    /// `TaskItem.makeRecurring()`, which both fold a newly-picked/synced
+    /// Start Date onto the anchor's existing time-of-day.
+    /// The "Not Selected" pill shown in place of a control that starts
+    /// unselected (Every, Time — both real, always-has-a-value enum/int
+    /// controls that can't natively render "nothing chosen" the way a
+    /// popover-gated field like Start Date can). Tapping runs `onTap`
+    /// (setting the relevant "picked" flag) and the real control takes
+    /// its place inline, already showing whatever's currently stored —
+    /// same "reveal a real, editable default the moment you opt in" shape
+    /// the Duration wheel already uses, just without a Yes/No gate.
+    private func notSelectedButton(onTap: @escaping () -> Void) -> some View {
+        Button {
+            focusedField = nil
+            onTap()
+        } label: {
+            Text("Not Selected")
+                .font(.headline)
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.secondary.opacity(0.15))
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
     private var recurringSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             if task.isRecurring {
@@ -2226,33 +2323,49 @@ struct TaskReviewCard: View {
                         .lineLimit(1)
                         .fixedSize()
                     Spacer()
-                    // Same +/- Stepper + dropdown shape as "Remind In" —
-                    // `.fixedSize()` keeps both compact on the trailing
-                    // side instead of each expanding to fill the row.
-                    Stepper(
-                        value: Binding(
-                            get: { task.recurrenceIntervalCount },
-                            set: { task.recurrenceIntervalCount = max(1, $0) }
-                        ),
-                        in: 1...365
-                    ) {
-                        Text("\(task.recurrenceIntervalCount)")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(minWidth: 20)
-                    }
-                    .fixedSize()
+                    if task.recurrenceIntervalPicked {
+                        // Same +/- Stepper + dropdown shape as "Remind In" —
+                        // `.fixedSize()` keeps both compact on the trailing
+                        // side instead of each expanding to fill the row.
+                        Stepper(
+                            value: Binding(
+                                get: { task.recurrenceIntervalCount },
+                                set: { task.recurrenceIntervalCount = max(1, $0) }
+                            ),
+                            in: 1...365
+                        ) {
+                            Text("\(task.recurrenceIntervalCount)")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(minWidth: 20)
+                        }
+                        .fixedSize()
 
-                    Picker("Repeat every", selection: Binding(
-                        get: { task.recurrenceUnit },
-                        set: { task.recurrenceUnit = $0 }
-                    )) {
-                        ForEach(RecurrenceUnit.allCases) { unit in
-                            Text(unit.label(for: task.recurrenceIntervalCount).capitalized).tag(unit)
+                        Picker("Repeat every", selection: Binding(
+                            get: { task.recurrenceUnit },
+                            set: { task.recurrenceUnit = $0 }
+                        )) {
+                            ForEach(RecurrenceUnit.allCases) { unit in
+                                Text(unit.label(for: task.recurrenceIntervalCount).capitalized).tag(unit)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .fixedSize()
+                    } else {
+                        // Starts unselected — `recurrenceIntervalCount`/
+                        // `recurrenceUnit` already have real, storable
+                        // defaults ("every 1 day"), so without this gate
+                        // a fresh recurring task would silently sit on
+                        // that default with no prompt to actually confirm
+                        // it (see `TaskItem.recurrenceIntervalMissing`).
+                        // Tapping reveals the real controls above, already
+                        // showing whatever's currently stored — same
+                        // "reveal a real, editable default the moment you
+                        // opt in" shape the Duration wheel already uses.
+                        notSelectedButton {
+                            task.recurrenceIntervalPicked = true
                         }
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .fixedSize()
                 }
 
                 // Same AM/Midday/PM/Specific Time choice
@@ -2266,16 +2379,68 @@ struct TaskReviewCard: View {
                 HStack {
                     Text("Time")
                     Spacer()
-                    Picker("Time", selection: Binding(
-                        get: { task.recurrenceTimeMode },
-                        set: { task.recurrenceTimeMode = $0 }
-                    )) {
-                        ForEach(HabitOccurrenceTimeMode.allCases) { mode in
-                            Text(mode.label).tag(mode)
+                    if task.recurrenceTimeModePicked {
+                        Picker("Time", selection: Binding(
+                            get: { task.recurrenceTimeMode },
+                            set: { task.recurrenceTimeMode = $0 }
+                        )) {
+                            ForEach(HabitOccurrenceTimeMode.allCases) { mode in
+                                Text(mode.label).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                    } else {
+                        // Starts unselected, same reasoning/shape as
+                        // "Every" above — `.specific` is a real stored
+                        // default, not evidence anyone chose it (see
+                        // `TaskItem.recurrenceTimeModeMissing`).
+                        notSelectedButton {
+                            task.recurrenceTimeModePicked = true
                         }
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
+                }
+
+                // Directly below the Time mode picker, since that's the
+                // picker that reveals this row — only for Specific Time;
+                // AM/Midday/PM never places a calendar block, so there's
+                // no clock time to set (and the whole Duration section is
+                // greyed out in that case too, see `durationAllowed`).
+                // Writes to `recurrenceTimeOfDayMinutes`, a field of its
+                // own (see that property's doc comment for why this
+                // doesn't just write into `dueDate`'s time-of-day the way
+                // placement used to silently derive it) — switching to
+                // AM/Midday/PM and back leaves it untouched, so the time
+                // picked here survives the round trip. `HourMinutePeriodPicker`
+                // is three plain `Picker(.wheel)`s (hour 1–12, minute in
+                // 15-minute steps, AM/PM) rather than a `DatePicker` —
+                // see its own doc comment for why.
+                if task.recurrenceTimeMode == .specific {
+                    HStack {
+                        Text("Occurrence Time")
+                        Spacer()
+                        Button {
+                            focusedField = nil
+                            isShowingOccurrenceTimePicker = true
+                        } label: {
+                            Text(Self.formattedTime(minutesSinceMidnight: recurrenceTimeMinutesBinding.wrappedValue))
+                                .font(.headline)
+                                .foregroundStyle(Color.accentColor)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .fill(Color.secondary.opacity(0.15))
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .popover(isPresented: $isShowingOccurrenceTimePicker) {
+                            HourMinutePeriodPicker(minutesSinceMidnight: recurrenceTimeMinutesBinding)
+                                .padding(8)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .presentationCompactAdaptation(.popover)
+                        }
+                    }
                 }
 
                 Toggle("Ends on a date", isOn: Binding(
@@ -2329,34 +2494,20 @@ struct TaskReviewCard: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                // Default true — matches every recurring task's behavior
+                // before this existed. Turning it off doesn't change
+                // anything about a *missed* day itself (still logged
+                // `.missed`, same as always); it only stops
+                // `PushedRecurringOccurrence` from carrying that miss
+                // forward onto future days — see `TaskItem.isPushable`'s
+                // own doc comment.
+                Toggle("Pushable?", isOn: $task.isPushable)
+                    .padding(.top, 4)
             }
         }
     }
 
-    /// The stand-in time-of-day a recurring task's anchor gets the first
-    /// time it needs one (turning "Recurring?" on, or opening the Date
-    /// picker before that's happened) — there's no time picker to ask the
-    /// user directly anymore, so this is just a reasonable default rather
-    /// than whatever second `.now` happens to land on.
-    private static func defaultRecurringAnchorTime(asOf referenceDate: Date = .now) -> Date {
-        Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: referenceDate) ?? referenceDate
-    }
-
-    /// Folds a newly-picked day (from the date-only picker in
-    /// `recurringSection`, which only ever returns midnight of that day)
-    /// onto whatever time-of-day the anchor already carried — so picking
-    /// a new date never silently resets the time every future occurrence
-    /// reuses (see `TaskItem.recurringOccurrenceTime`) back to midnight.
-    private static func combiningDate(_ newDay: Date, withTimeFrom existing: Date?) -> Date {
-        let calendar = Calendar.current
-        var components = calendar.dateComponents([.year, .month, .day], from: newDay)
-        let timeSource = existing ?? defaultRecurringAnchorTime(asOf: newDay)
-        let timeComponents = calendar.dateComponents([.hour, .minute], from: timeSource)
-        components.hour = timeComponents.hour
-        components.minute = timeComponents.minute
-        components.second = 0
-        return calendar.date(from: components) ?? newDay
-    }
 
     /// Everything past Next step — due date through Eligible Schedules —
     /// in its own scroll region so a task with a lot filled in never pushes
@@ -2374,7 +2525,7 @@ struct TaskReviewCard: View {
                     focusedField = nil
                     isShowingStartDatePicker = true
                 } label: {
-                    Text((task.startDate ?? .now).formatted(date: .complete, time: .omitted))
+                    Text(task.startDatePicked ? (task.startDate ?? .now).formatted(date: .complete, time: .omitted) : "Not Selected")
                         .font(.headline)
                         .foregroundStyle(Color.accentColor)
                         .padding(.horizontal, 12)
@@ -2386,31 +2537,41 @@ struct TaskReviewCard: View {
                 }
                 .buttonStyle(.plain)
                 .popover(isPresented: $isShowingStartDatePicker) {
-                    DatePicker(
-                        "Start",
-                        selection: Binding(
-                            get: { task.startDate ?? .now },
-                            set: { newValue in
-                                task.startDate = newValue
-                                // While recurring, Start Date doubles as
-                                // the anchor every occurrence steps
-                                // forward from — see the "Recurring?"
-                                // toggle below — so it stays synced live
-                                // if tweaked after the fact, rather than
-                                // needing a second date picker.
-                                if task.isRecurring {
-                                    task.dueDate = Self.combiningDate(newValue, withTimeFrom: task.dueDate)
-                                    task.dueDateDecided = true
-                                    task.dueDatePicked = true
-                                }
+                    VStack(spacing: 12) {
+                        // `StartDateCalendarPicker` wraps `UICalendarView`
+                        // rather than SwiftUI's own `DatePicker` — a
+                        // `DatePicker` binds to a non-optional `Date`, so
+                        // it can't show *nothing* highlighted, and its
+                        // selection binding only fires `set` on an actual
+                        // value change, so a tap that lands on whatever
+                        // it's already (falsely) showing as selected is a
+                        // silent no-op. `UICalendarSelectionSingleDate`
+                        // has neither problem: its selection can be
+                        // genuinely nil, and its delegate fires on every
+                        // discrete tap regardless of what was selected
+                        // before — see that type's own doc comment.
+                        // `initialSelection` is computed fresh from the
+                        // model each time this popover opens (a fresh
+                        // `StartDateCalendarPicker` value, since the
+                        // popover's content is only built while
+                        // presented) — nil whenever `startDatePicked` is
+                        // false, so an untouched task opens with nothing
+                        // highlighted.
+                        StartDateCalendarPicker(
+                            initialSelection: task.startDatePicked ? task.startDate : nil,
+                            minimumDate: Calendar.current.startOfDay(for: .now)
+                        ) { selectedDate in
+                            task.setStartDate(selectedDate)
+                            isShowingStartDatePicker = false
+                        }
+
+                        if task.startDatePicked {
+                            Button("Clear", role: .destructive) {
+                                task.clearStartDate()
                                 isShowingStartDatePicker = false
                             }
-                        ),
-                        in: Calendar.current.startOfDay(for: .now)...,
-                        displayedComponents: [.date]
-                    )
-                    .datePickerStyle(.graphical)
-                    .labelsHidden()
+                        }
+                    }
                     .padding(8)
                     .frame(width: 320)
                     .fixedSize(horizontal: false, vertical: true)
@@ -2423,13 +2584,15 @@ struct TaskReviewCard: View {
                 set: { newValue in
                     if newValue {
                         // Start Date is the anchor here — no separate
-                        // date question inside `recurringSection`. Falls
-                        // back to today if Start Date was never touched,
-                        // same default its own button already shows. See
-                        // `TaskItem.makeRecurring`'s own doc comment for
-                        // why `isRecurring` and the anchor fields are set
-                        // together, atomically, rather than `isRecurring`
-                        // alone here.
+                        // date question inside `recurringSection`. Left
+                        // unset (Not Selected) if Start Date was never
+                        // touched — `makeRecurring()` no longer auto-fills
+                        // it, so this has to be set explicitly afterward
+                        // before the task actually places on the calendar.
+                        // See `TaskItem.makeRecurring`'s own doc comment
+                        // for why `isRecurring` and the anchor fields are
+                        // set together, atomically, rather than
+                        // `isRecurring` alone here.
                         task.makeRecurring()
                         // The Recurring Tasks shelf is the only valid move
                         // target once this is on (see
@@ -2507,11 +2670,19 @@ struct TaskReviewCard: View {
                 }
             }
 
-            YesNoToggle(title: "High Priority?", answer: priorityAllowed ? highPriorityAnswer : .constant(false))
-                .padding(.top, 4)
-                .disabled(!priorityAllowed)
-                .opacity(priorityAllowed ? 1 : 0.4)
-                .animation(.easeInOut(duration: 0.15), value: priorityAllowed)
+            // Hidden entirely (not just greyed) for a recurring task —
+            // High Priority isn't offered to a repeating task at all, so
+            // there's no "disabled" state to show, the same way this
+            // section doesn't render at all for a shelf that doesn't
+            // track priority. See `TaskItem.priorityMissing`'s matching
+            // short-circuit.
+            if !task.isRecurring {
+                YesNoToggle(title: "High Priority?", answer: priorityAllowed ? highPriorityAnswer : .constant(false))
+                    .padding(.top, 4)
+                    .disabled(!priorityAllowed)
+                    .opacity(priorityAllowed ? 1 : 0.4)
+                    .animation(.easeInOut(duration: 0.15), value: priorityAllowed)
+            }
 
             if futureReminderAllowed {
                 HStack(spacing: 8) {
@@ -2562,6 +2733,7 @@ struct TaskReviewCard: View {
                 .padding(.top, 4)
             }
 
+            if durationApplicable {
             VStack(alignment: .leading, spacing: 6) {
                 // Forced to "No" (and disabled below) whenever the
                 // previewed/actual shelf doesn't track duration — the
@@ -2758,6 +2930,7 @@ struct TaskReviewCard: View {
             .opacity(durationAllowed ? 1 : 0.4)
             .animation(.easeInOut(duration: 0.15), value: task.isDivisibleDecided)
             .animation(.easeInOut(duration: 0.15), value: durationAllowed)
+            }
 
             // Grouped under one stable id (rather than tagging the
             // suggestions row itself, which only exists conditionally) so
@@ -3237,6 +3410,181 @@ struct TaskReviewCard: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             action()
         }
+    }
+}
+
+/// A `UICalendarView` with `UICalendarSelectionSingleDate` rather than
+/// SwiftUI's own `DatePicker(.graphical)` — the Start Date popover needs
+/// a genuine "nothing selected" state, which a `DatePicker` structurally
+/// can't express (it binds to a non-optional `Date`, so it always
+/// highlights *something*), and needs every tap to register immediately,
+/// including a tap on the day that's already highlighted — which a
+/// `DatePicker`'s selection `Binding` won't do, since it only calls its
+/// `set` closure on an actual value change. `UICalendarSelectionSingleDate`
+/// has neither limitation: `selectedDate` is a genuine `DateComponents?`
+/// (`setSelected(nil, animated:)` shows no highlight at all, not a fake
+/// stand-in value), and `UICalendarSelectionSingleDateDelegate
+/// .dateSelection(_:didSelectDate:)` fires on every discrete tap
+/// regardless of prior selection — it's an event callback, not a diffed
+/// binding, so re-tapping the same date still fires.
+private struct StartDateCalendarPicker: UIViewRepresentable {
+    /// nil shows no date highlighted at all — the caller passes this only
+    /// when the task's Start Date has actually been picked before (see
+    /// `TaskItem.startDatePicked`), never `.now` as a stand-in.
+    let initialSelection: Date?
+    let minimumDate: Date
+    let onSelect: (Date) -> Void
+
+    func makeUIView(context: Context) -> UICalendarView {
+        let calendarView = UICalendarView()
+        calendarView.calendar = Calendar.current
+        calendarView.availableDateRange = DateInterval(start: minimumDate, end: .distantFuture)
+        let selection = UICalendarSelectionSingleDate(delegate: context.coordinator)
+        // `setSelected` only sets state — unlike a real tap, it never
+        // invokes the delegate — so seeding an existing Start Date here
+        // can't itself trigger `onSelect` and write anything back.
+        if let initialSelection {
+            selection.setSelected(
+                Calendar.current.dateComponents([.year, .month, .day], from: initialSelection),
+                animated: false
+            )
+        }
+        calendarView.selectionBehavior = selection
+        return calendarView
+    }
+
+    // Selection state lives inside the `UICalendarView`/coordinator once
+    // created, not re-driven from SwiftUI on every re-render — the
+    // popover's content is only built while it's presented, so a fresh
+    // `makeUIView` call (with the then-current `initialSelection`) is
+    // exactly what happens each time it opens anyway.
+    func updateUIView(_ uiView: UICalendarView, context: Context) {}
+
+    // Reports `UICalendarView`'s own real content size back to SwiftUI
+    // instead of forcing a guessed `.frame(height:)` — measured, this is
+    // a *constant* height regardless of which month is showing (a 6-row
+    // month like August 2026 and a 5-row month like February 2026 both
+    // measure identically), since `UICalendarView` already reserves
+    // max-row space internally to avoid resizing as someone pages
+    // between months. A hardcoded height either clips a 6-row month or
+    // leaves dead space under a 5-row one; querying the real value here
+    // gets both a correct fit *and* "every month renders identically"
+    // for free, and keeps adapting correctly if Dynamic Type changes the
+    // row height later.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UICalendarView, context: Context) -> CGSize? {
+        let width = proposal.width ?? UIScreen.main.bounds.width
+        return uiView.systemLayoutSizeFitting(
+            CGSize(width: width, height: UIView.layoutFittingCompressedSize.height),
+            withHorizontalFittingPriority: .required,
+            verticalFittingPriority: .fittingSizeLevel
+        )
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSelect: onSelect)
+    }
+
+    final class Coordinator: NSObject, UICalendarSelectionSingleDateDelegate {
+        let onSelect: (Date) -> Void
+
+        init(onSelect: @escaping (Date) -> Void) {
+            self.onSelect = onSelect
+        }
+
+        func dateSelection(_ selection: UICalendarSelectionSingleDate, didSelectDate dateComponents: DateComponents?) {
+            guard let dateComponents, let date = Calendar.current.date(from: dateComponents) else { return }
+            onSelect(date)
+        }
+    }
+}
+
+/// Three plain SwiftUI `Picker(.wheel)`s — hour (1–12), minute (in
+/// 15-minute steps: 0/15/30/45), AM/PM — rather than a `DatePicker` of
+/// any kind. This used to be `QuarterHourTimePicker`, a `UIDatePicker`
+/// (`.time` mode) wrapped in `UIViewRepresentable`, built to get
+/// `minuteInterval = 15` since SwiftUI's own time `DatePicker` has no
+/// such knob. But `UIDatePicker` in `.time` mode spins its wheels
+/// infinitely regardless — that's standard UIKit behavior for a time
+/// picker, not something `minuteInterval` changes — so it never actually
+/// stopped at 12/45 the way a bounded picker should. A plain
+/// `Picker(.wheel)` over a finite, explicit set of tags (`1...12`,
+/// `[0, 15, 30, 45]`) doesn't wrap: SwiftUI's wheel picker only spins
+/// forever when its `ForEach` content is unbounded or synthetically
+/// looped, neither of which applies here. `HabitEditView`'s own
+/// `WrappingTimePicker` isn't reused either — that's a single continuous
+/// wheel with its own formatted-label rows on a fixed 10-minute grid, a
+/// different interaction shape from the three-wheel hour/minute/period
+/// layout every other time-of-day question in this app already presents.
+private struct HourMinutePeriodPicker: View {
+    @Binding var minutesSinceMidnight: Int
+
+    // Each wheel reads/writes through `QuarterHourClockTime` rather than
+    // doing its own hour/minute/period arithmetic inline — same
+    // conversion `RecurringTaskTimePickerTests` exercises directly, so
+    // there's one implementation, not a tested copy and a second
+    // untested one living here.
+    private var hour12: Binding<Int> {
+        Binding(
+            get: { QuarterHourClockTime(minutesSinceMidnight: minutesSinceMidnight).hour12 },
+            set: { newHour12 in
+                var clock = QuarterHourClockTime(minutesSinceMidnight: minutesSinceMidnight)
+                clock.hour12 = newHour12
+                minutesSinceMidnight = clock.minutesSinceMidnight
+            }
+        )
+    }
+
+    private var minuteComponent: Binding<Int> {
+        Binding(
+            get: { QuarterHourClockTime(minutesSinceMidnight: minutesSinceMidnight).minute },
+            set: { newMinute in
+                var clock = QuarterHourClockTime(minutesSinceMidnight: minutesSinceMidnight)
+                clock.minute = newMinute
+                minutesSinceMidnight = clock.minutesSinceMidnight
+            }
+        )
+    }
+
+    private var isPM: Binding<Bool> {
+        Binding(
+            get: { QuarterHourClockTime(minutesSinceMidnight: minutesSinceMidnight).isPM },
+            set: { newIsPM in
+                var clock = QuarterHourClockTime(minutesSinceMidnight: minutesSinceMidnight)
+                clock.isPM = newIsPM
+                minutesSinceMidnight = clock.minutesSinceMidnight
+            }
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Picker("Hour", selection: hour12) {
+                ForEach(1...12, id: \.self) { hour in
+                    Text("\(hour)").tag(hour)
+                }
+            }
+            .pickerStyle(.wheel)
+            .frame(width: 60)
+
+            Text(":")
+                .font(.title3.weight(.semibold))
+
+            Picker("Minute", selection: minuteComponent) {
+                ForEach([0, 15, 30, 45], id: \.self) { minute in
+                    Text(String(format: "%02d", minute)).tag(minute)
+                }
+            }
+            .pickerStyle(.wheel)
+            .frame(width: 60)
+
+            Picker("Period", selection: isPM) {
+                Text("AM").tag(false)
+                Text("PM").tag(true)
+            }
+            .pickerStyle(.wheel)
+            .frame(width: 70)
+        }
+        .frame(height: 150)
     }
 }
 
