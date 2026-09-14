@@ -20,6 +20,8 @@
 		192DEB70A6CEDB480BB5F1B1 /* RecurringTaskTimePickerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14DA2C5F29F485C08672519A /* RecurringTaskTimePickerTests.swift */; };
 		8FDAAEA685149A9BAC25081E /* RelativeRecurrenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F1B53BEDBCA833695FE89AD /* RelativeRecurrenceTests.swift */; };
 		058A3BF0C8B790FE9C6966CF /* NightlyReviewHabitsStepTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BC481722B7D049BC0E12E2E /* NightlyReviewHabitsStepTests.swift */; };
+		67CF12D4B083E695CC2F9E2E /* RecurringTaskCardLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68C1C01C8168B734E7A2733E /* RecurringTaskCardLayoutTests.swift */; };
+		0AA5C56B0523A0333E08A388 /* RecurringTaskCardRenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD3913BF8DE0C4E6FFFCDC18 /* RecurringTaskCardRenderTests.swift */; };
 		11C9C180B9449F181FC4A6EA /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1FE8D30E50874F1CFBC6C2DA /* Foundation.framework */; };
 		5020DD4813CD545554230040 /* OpenFoodFactsServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09BD699B348D80CB6806E2B9 /* OpenFoodFactsServiceTests.swift */; };
 		69161A13195235691F23449B /* PantryDeductionServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DACE29CB1AB1502A34BCD4F0 /* PantryDeductionServiceTests.swift */; };
@@ -68,6 +70,8 @@
 		14DA2C5F29F485C08672519A /* RecurringTaskTimePickerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecurringTaskTimePickerTests.swift; sourceTree = "<group>"; };
 		0F1B53BEDBCA833695FE89AD /* RelativeRecurrenceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RelativeRecurrenceTests.swift; sourceTree = "<group>"; };
 		9BC481722B7D049BC0E12E2E /* NightlyReviewHabitsStepTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NightlyReviewHabitsStepTests.swift; sourceTree = "<group>"; };
+		68C1C01C8168B734E7A2733E /* RecurringTaskCardLayoutTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecurringTaskCardLayoutTests.swift; sourceTree = "<group>"; };
+		BD3913BF8DE0C4E6FFFCDC18 /* RecurringTaskCardRenderTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecurringTaskCardRenderTests.swift; sourceTree = "<group>"; };
 		DACE29CB1AB1502A34BCD4F0 /* PantryDeductionServiceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PantryDeductionServiceTests.swift; sourceTree = "<group>"; };
 		90FF46E7544F4142BA6ABA3C /* RecurringTaskReviewTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecurringTaskReviewTests.swift; sourceTree = "<group>"; };
 		CC96AD75D7A2490F81BD3A53 /* NightlyReviewAutoSkipTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NightlyReviewAutoSkipTests.swift; sourceTree = "<group>"; };
@@ -143,6 +147,8 @@
 				14DA2C5F29F485C08672519A /* RecurringTaskTimePickerTests.swift */,
 				0F1B53BEDBCA833695FE89AD /* RelativeRecurrenceTests.swift */,
 				9BC481722B7D049BC0E12E2E /* NightlyReviewHabitsStepTests.swift */,
+				68C1C01C8168B734E7A2733E /* RecurringTaskCardLayoutTests.swift */,
+				BD3913BF8DE0C4E6FFFCDC18 /* RecurringTaskCardRenderTests.swift */,
 				09BD699B348D80CB6806E2B9 /* OpenFoodFactsServiceTests.swift */,
 				1EEEA0F8829F20DBDC58BF32 /* MealSuggestionServiceTests.swift */,
 				8CEFFCE3E6ACC74FC7D7BF6A /* RecipeIngredientParserTests.swift */,
@@ -293,6 +299,8 @@
 				192DEB70A6CEDB480BB5F1B1 /* RecurringTaskTimePickerTests.swift in Sources */,
 				8FDAAEA685149A9BAC25081E /* RelativeRecurrenceTests.swift in Sources */,
 				058A3BF0C8B790FE9C6966CF /* NightlyReviewHabitsStepTests.swift in Sources */,
+				67CF12D4B083E695CC2F9E2E /* RecurringTaskCardLayoutTests.swift in Sources */,
+				0AA5C56B0523A0333E08A388 /* RecurringTaskCardRenderTests.swift in Sources */,
 				5020DD4813CD545554230040 /* OpenFoodFactsServiceTests.swift in Sources */,
 				A85A179B079F60FD5A4043E9 /* MealSuggestionServiceTests.swift in Sources */,
 				6B282F81F54E6AE9014E0FE8 /* RecipeIngredientParserTests.swift in Sources */,

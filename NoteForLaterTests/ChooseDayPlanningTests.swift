@@ -84,4 +84,60 @@ final class ChooseDayPlanningTests: XCTestCase {
         let planDate = date(2026, 9, 7) // reviewDate (Sep 6) + 1 day
         XCTAssertEqual(ChooseDayPlanning.planRelativeDayLabel(planDate: planDate, now: now, calendar: calendar), "Tomorrow")
     }
+
+    // MARK: - Habits step day header
+
+    /// Fail-then-pass target. The long date form plus the bare relative
+    /// suffix, for the boundary cases explicitly named in the request.
+    func test_habitsStepDayLabel_today() {
+        let now = date(2026, 9, 13, hour: 21)
+        XCTAssertEqual(
+            ChooseDayPlanning.habitsStepDayLabel(day: date(2026, 9, 13), now: now, calendar: calendar),
+            "Sunday, September 13, 2026 (Today)"
+        )
+    }
+
+    func test_habitsStepDayLabel_yesterday() {
+        let now = date(2026, 9, 13, hour: 21)
+        XCTAssertEqual(
+            ChooseDayPlanning.habitsStepDayLabel(day: date(2026, 9, 12), now: now, calendar: calendar),
+            "Saturday, September 12, 2026 (Yesterday)"
+        )
+    }
+
+    func test_habitsStepDayLabel_threeDaysAgo() {
+        let now = date(2026, 9, 13, hour: 21)
+        XCTAssertEqual(
+            ChooseDayPlanning.habitsStepDayLabel(day: date(2026, 9, 10), now: now, calendar: calendar),
+            "Thursday, September 10, 2026 (3 days ago)"
+        )
+    }
+
+    /// Fail-then-pass target. "Today" here must track the actual current
+    /// date, not any notion of `reviewDate` — this function doesn't even
+    /// take a `reviewDate` parameter, so there's nothing for it to read,
+    /// but the scenario is worth pinning explicitly: planning tomorrow
+    /// night (`reviewDate` = today, per `reviewDateForPlanningTomorrow`
+    /// above) must still label real-today's own habit occurrences
+    /// "(Today)", not something derived from which day is being reviewed.
+    func test_habitsStepDayLabel_isRelativeToNow_notToAnyReviewDateNotion() {
+        let now = date(2026, 9, 6, hour: 20) // matches test_reviewDateForPlanningTomorrow_setsToday's `now`
+        let realToday = date(2026, 9, 6)
+
+        let label = ChooseDayPlanning.habitsStepDayLabel(day: realToday, now: now, calendar: calendar)
+
+        XCTAssertTrue(label.hasSuffix("(Today)"), "real-today's habits must read (Today) regardless of what reviewDate happens to be set to elsewhere")
+    }
+
+    /// A future day is not reachable through any path this app offers
+    /// (see the function's own doc comment), but must still produce a
+    /// sensible, explicit label rather than a nonsensical negative
+    /// "N days ago" if that invariant is ever violated.
+    func test_habitsStepDayLabel_futureDay_namesItExplicitly_notNegativeDaysAgo() {
+        let now = date(2026, 9, 13, hour: 21)
+        let label = ChooseDayPlanning.habitsStepDayLabel(day: date(2026, 9, 16), now: now, calendar: calendar)
+
+        XCTAssertTrue(label.hasSuffix("(in 3 days)"), "got: \(label)")
+        XCTAssertFalse(label.contains("-"), "must never render a negative day count")
+    }
 }

@@ -628,6 +628,54 @@ final class TaskItem {
         return summary
     }
 
+    /// "Monthly · 4th Saturday" / "Every 2 months · last day" / "Daily" /
+    /// "Every 3 days" — a genuinely separate property from
+    /// `recurrenceSummary`, not a "short" flag on it: `TaskReviewCard`'s
+    /// collapsed "Repeats" row needs this one line-limited to fit inside
+    /// a fixed-height row (a wrapped value there breaks the layout, not
+    /// just looks bad), while `ShelfListView.recurrenceLine` keeps
+    /// showing the long form on the shelf card, where wrapping isn't a
+    /// hazard — a shared formatter with a "short" toggle would couple two
+    /// call sites that should be free to reword independently. Never
+    /// includes the end-date suffix `recurrenceSummary` appends — "Ends"
+    /// is its own row now, so repeating that here would be redundant, not
+    /// just long. Ordinals are numerals ("4th"), not words ("fourth") —
+    /// `RelativeRecurrenceOrdinal.shortOrdinalLabel`, not `.label`, which
+    /// stays full words for the Position picker's own menu.
+    var recurrenceShortSummary: String? {
+        guard isRecurring else { return nil }
+        switch recurrenceMode {
+        case .specificDate:
+            return recurrenceIntervalCount == 1
+                ? Self.shortFrequencyWord(for: recurrenceUnit)
+                : "Every \(recurrenceIntervalCount) \(recurrenceUnit.label(for: recurrenceIntervalCount))"
+        case .relativeDate:
+            let frequency = recurrenceIntervalCount == 1 ? "Monthly" : "Every \(recurrenceIntervalCount) months"
+            let detail: String
+            switch relativeRecurrenceScope {
+            case .dayOfMonth:
+                detail = relativeRecurrenceOrdinal == .last ? "last day" : "1st"
+            case .weekdayOfMonth:
+                let weekdayName = Self.weekdaySymbol(for: relativeRecurrenceWeekday ?? 1)
+                detail = "\(relativeRecurrenceOrdinal.shortOrdinalLabel) \(weekdayName)"
+            }
+            return "\(frequency) · \(detail)"
+        }
+    }
+
+    /// "Daily"/"Weekly"/"Monthly" — the 1x-interval word
+    /// `recurrenceShortSummary` uses for Specific Date; a >1 interval
+    /// uses "Every N \(unit)" instead (`RecurrenceUnit.label(for:)`
+    /// already has the singular/plural noun, no separate short word
+    /// needed there).
+    private static func shortFrequencyWord(for unit: RecurrenceUnit) -> String {
+        switch unit {
+        case .days: return "Daily"
+        case .weeks: return "Weekly"
+        case .months: return "Monthly"
+        }
+    }
+
     /// "Sunday"..."Saturday" for `Calendar.Component.weekday`'s own
     /// numbering (1 = Sunday ... 7 = Saturday) — `weekdaySymbols` is
     /// indexed the same way starting at 0, so `weekday - 1` lines up

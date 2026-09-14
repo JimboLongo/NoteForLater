@@ -66,10 +66,16 @@ enum RelativeRecurrenceScope: String, Codable, CaseIterable, Identifiable {
     case weekdayOfMonth
     var id: String { rawValue }
 
+    /// Just "Day"/"Weekday," not "Day of month"/"Weekday of month" — this
+    /// is its only caller (`TaskReviewCard`'s "Pattern" row), and even the
+    /// shortened "Weekday of month" still wrapped next to the row's label
+    /// and chevron. "Of month" is redundant there anyway: the row is
+    /// nested under "Pattern" alongside Position and Weekday rows that
+    /// already establish every relative pattern is monthly.
     var label: String {
         switch self {
-        case .dayOfMonth: return "Day of Month"
-        case .weekdayOfMonth: return "Weekday of Month"
+        case .dayOfMonth: return "Day"
+        case .weekdayOfMonth: return "Weekday"
         }
     }
 }
@@ -89,6 +95,19 @@ enum RelativeRecurrenceOrdinal: Int, Codable, CaseIterable, Identifiable {
         case .third: return "Third"
         case .fourth: return "Fourth"
         case .last: return "Last"
+        }
+    }
+
+    /// "1st"/"2nd"/"3rd"/"4th"/"last" — for `TaskItem.recurrenceShortSummary`
+    /// only; the Position picker's own menu still shows `.label`'s full
+    /// words.
+    var shortOrdinalLabel: String {
+        switch self {
+        case .first: return "1st"
+        case .second: return "2nd"
+        case .third: return "3rd"
+        case .fourth: return "4th"
+        case .last: return "last"
         }
     }
 }

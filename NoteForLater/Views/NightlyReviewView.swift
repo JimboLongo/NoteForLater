@@ -1087,17 +1087,15 @@ struct NightlyReviewView: View {
         }.sorted { $0.day < $1.day }
     }
 
-    private static let habitsStepDayFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "EEE, MMM d"
-        return formatter
-    }()
-
+    /// "Sunday, September 13, 2026 (Today)" — see `ChooseDayPlanning
+    /// .habitsStepDayLabel`'s own doc comment for the full reasoning
+    /// (always relative to real `.now`, never `reviewDate`; why this
+    /// isn't a shared formatter with `ShelfListView.relativeDayLabel`;
+    /// why a future `day` can't actually reach here). Thin wrapper so the
+    /// actual logic is a pure, directly testable function rather than
+    /// living only in this `@Query`-bearing view.
     private func habitsStepDayLabel(_ day: Date) -> String {
-        let calendar = Calendar.current
-        if calendar.isDateInToday(day) { return "Today" }
-        if calendar.isDateInYesterday(day) { return "Yesterday" }
-        return Self.habitsStepDayFormatter.string(from: day)
+        ChooseDayPlanning.habitsStepDayLabel(day: day, now: .now, calendar: Calendar.current)
     }
 
     /// The dedicated Nightly Review step for habits — split out of the old
@@ -1125,7 +1123,7 @@ struct NightlyReviewView: View {
                     .foregroundStyle(.secondary)
             }
             ForEach(groupedHabitOccurrencesForReview) { group in
-                Section(habitsStepDayLabel(group.day)) {
+                Section {
                     ForEach(group.rows) { row in
                         HStack {
                             Text(row.habit.name)
@@ -1139,7 +1137,28 @@ struct NightlyReviewView: View {
                                 }
                             }
                         }
+                        // Tighter vertical rhythm than the system default
+                        // row — the circle itself (36pt, `HabitOccurrenceCircleView`)
+                        // is untouched, still a comfortable tap target;
+                        // this only trims the padding *around* it. 4pt
+                        // top/bottom keeps the row height at 36 + 4 + 4 =
+                        // 44pt, right at Apple's own minimum tap-target
+                        // guidance, not below it.
+                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                     }
+                } header: {
+                    // Bigger and visually distinct from the rows beneath
+                    // it — `Section(String)`'s own default header style
+                    // (small, uppercased, secondary-colored) reads as just
+                    // another row at a glance; this is a real heading.
+                    // `.textCase(nil)` overrides the system's automatic
+                    // uppercasing of Section headers, which would
+                    // otherwise mangle the day-of-week/month names.
+                    Text(habitsStepDayLabel(group.day))
+                        .font(.title3.weight(.bold))
+                        .foregroundStyle(.primary)
+                        .textCase(nil)
+                        .padding(.vertical, 4)
                 }
             }
         }
@@ -2026,10 +2045,22 @@ struct TaskReviewCard: View {
     @State private var toastVisible = false
     @State private var isShowingDatePicker = false
     @State private var isShowingStartDatePicker = false
-    @State private var isShowingRecurrenceEndDatePicker = false
-    @State private var isShowingOccurrenceTimePicker = false
     @State private var isShowingSnoozeWheel = false
     @State private var snoozeDays = 1
+    /// Whether each collapsed recurring-task row (`recurringSection`) is
+    /// showing its real controls — everything starts collapsed each time
+    /// the card opens (session-local, never persisted; recurring tasks
+    /// are configured once and read many times, so the default view
+    /// should be the compact summary, not the editing controls), except
+    /// a row is seeded open if it's unconfigured — see `init`'s own
+    /// comment for why that check has to happen there, not here.
+    @State private var isRepeatsExpanded: Bool
+    @State private var isStartsExpanded: Bool
+    @State private var isTimeExpanded: Bool
+    /// `recurrenceEndDate == nil` ("Never") is a real, fully-decided
+    /// state, not an unconfigured one — unlike the other three rows,
+    /// "Ends" never auto-expands, so this always starts `false`.
+    @State private var isEndsExpanded = false
     /// Captured once this card's edits settle in after appearing (past any
     /// one-time backfill), so the action button can tell "nothing's been
     /// touched" (Skip) apart from "something's actually been edited" (Save
@@ -2074,6 +2105,50 @@ struct TaskReviewCard: View {
         return (options + [task.estimatedMinutes]).sorted()
     }
 
+    /// Whether "Repeats" (Mode + Every + Pattern) has enough answered to
+    /// show a real summary instead of "Not Selected" — reads
+    /// `missingAttributeNames` (the same canonical source
+    /// `TaskItem.recurrenceIntervalMissing`/`.relativeRecurrenceMissing`
+    /// back) rather than re-deriving the picked-flags by hand, so this
+    /// can never drift from what the attribute review actually flags as
+    /// missing. `static` (taking `task`/`shelf` explicitly) so `init` can
+    /// call it before `self` exists, to seed `isRepeatsExpanded`.
+    ///
+    /// `internal`, not `private` — loosened specifically so
+    /// `RecurringTaskCardLayoutTests` can exercise the real predicate
+    /// directly, same reasoning `NightlyReviewView.Step.autoSkipEligible`
+    /// was already loosened for: this view's `@Query` properties make
+    /// constructing a live `TaskReviewCard` impractical in a unit test,
+    /// but the logic itself takes plain `TaskItem`/`Shelf` values and has
+    /// no view state dependency at all.
+    static func isRepeatsConfigured(task: TaskItem, shelf: Shelf?) -> Bool {
+        let missing = task.missingAttributeNames(consideringShelf: shelf)
+        if missing.contains("Every") { return false }
+        if task.recurrenceMode == .relativeDate, missing.contains("Pattern") { return false }
+        return true
+    }
+
+    static func isStartsConfigured(task: TaskItem, shelf: Shelf?) -> Bool {
+        !task.missingAttributeNames(consideringShelf: shelf).contains("Start Date")
+    }
+
+    /// Same reasoning as `isRepeatsConfigured`, including why this is
+    /// `internal` rather than `private`. For Specific Time, "Time" now
+    /// also answers for Duration (and Divisible, when a duration long
+    /// enough to split is actually set — same `segmentOptions`/
+    /// `TaskItem.validSegmentOptions(for:)` check that decides whether
+    /// the Divisible row even appears at all, see `recurringSection`),
+    /// since both moved inside this row's expanded content instead of
+    /// standing as their own peers.
+    static func isTimeConfigured(task: TaskItem, shelf: Shelf?, segmentOptions: [Int]) -> Bool {
+        let missing = task.missingAttributeNames(consideringShelf: shelf)
+        if missing.contains("Time") { return false }
+        guard task.recurrenceTimeMode == .specific else { return true }
+        if missing.contains("Duration") { return false }
+        if !segmentOptions.isEmpty, missing.contains("Divisible") { return false }
+        return true
+    }
+
     init(
         task: TaskItem,
         shelves: [Shelf],
@@ -2093,6 +2168,17 @@ struct TaskReviewCard: View {
         self.onSnooze = onSnooze
         self.entersFromLeft = entersFromLeft
         _dragOffset = State(initialValue: entersFromLeft ? CGSize(width: -500, height: 0) : .zero)
+        // Seeded from `task.shelf` directly, not `previewedShelf` —
+        // `selectedShelf` (what `previewedShelf` would otherwise prefer)
+        // is itself `@State` with no value yet at this point in `init`,
+        // and nothing's been previewed before the card has even
+        // appeared, so `task.shelf` is exactly what `previewedShelf`
+        // would evaluate to here anyway.
+        _isRepeatsExpanded = State(initialValue: !Self.isRepeatsConfigured(task: task, shelf: task.shelf))
+        _isStartsExpanded = State(initialValue: !Self.isStartsConfigured(task: task, shelf: task.shelf))
+        _isTimeExpanded = State(initialValue: !Self.isTimeConfigured(
+            task: task, shelf: task.shelf, segmentOptions: TaskItem.validSegmentOptions(for: task.estimatedMinutes)
+        ))
     }
 
     /// nil until "Has due date" is actually answered either way — see
@@ -2343,22 +2429,255 @@ struct TaskReviewCard: View {
         previewedShelf?.effectiveTracksDuration ?? true
     }
 
-    /// Whether Duration and Divisible apply to this task *at all* — false
-    /// for a recurring task using AM/Midday/PM instead of Specific Time.
-    /// An untimed occurrence never gets a calendar block (it shows as a
-    /// plain check-off item instead — see `TaskItem.recurrenceTimeMode`'s
-    /// own doc comment), so there's nothing for a duration to size or a
-    /// divisible split to carve up; both questions are meaningless there,
-    /// not just unanswered. Unlike `durationAllowed`, this hides the
-    /// section entirely rather than greying it out — a shelf preview can
-    /// be cancelled (so fading, not hiding, avoids losing the real
-    /// stored answer's visibility), but switching Time away from
-    /// Specific is a real, immediate edit to this same task, and the
-    /// values underneath are retained untouched either way (see
-    /// `TaskItem.recurringAndUntimed`) — switching back to Specific
-    /// shows them again exactly as they were.
+    /// Whether the shared, standalone Duration/Divisible section
+    /// (`cardScrollBody`, below `Divisible`'s own VStack) applies at all —
+    /// non-recurring tasks only now. A recurring task gets its own copy
+    /// of the identical `durationControl`/`divisibleControl` content
+    /// embedded directly inside its "Time" row instead (see
+    /// `recurringSection`) — folded in as a qualifier on the time, not a
+    /// peer section, and only ever relevant for Specific Time in the
+    /// first place (an AM/Midday/PM occurrence never gets a calendar
+    /// block — see `TaskItem.recurrenceTimeMode`'s own doc comment — so
+    /// there's nothing for a duration to size or a divisible split to
+    /// carve up). Values are retained untouched either way when Time mode
+    /// changes (see `TaskItem.recurringAndUntimed`) — switching back to
+    /// Specific shows them again exactly as they were.
     private var durationApplicable: Bool {
-        !task.isRecurring || task.recurrenceTimeMode == .specific
+        !task.isRecurring
+    }
+
+    /// Instance wrappers around the `static` configured-checks above,
+    /// reading live view state (`previewedShelf`, `segmentOptions`) —
+    /// `init` calls the `static` versions directly since `self` isn't
+    /// available yet there. See those functions' own doc comments.
+    private var isRepeatsConfigured: Bool {
+        Self.isRepeatsConfigured(task: task, shelf: previewedShelf)
+    }
+
+    private var isStartsConfigured: Bool {
+        Self.isStartsConfigured(task: task, shelf: previewedShelf)
+    }
+
+    private var isTimeConfigured: Bool {
+        Self.isTimeConfigured(task: task, shelf: previewedShelf, segmentOptions: segmentOptions)
+    }
+
+    /// The Duration Yes/No + wheel — extracted out of `cardScrollBody` so
+    /// it's reusable both there (non-recurring tasks, under
+    /// `durationApplicable`) and embedded directly inside a recurring
+    /// task's "Time" row (`recurringSection`) once Duration folded into
+    /// it as a qualifier rather than a peer section. Identical content,
+    /// identical interaction, in both places — no behavior change from
+    /// before the extraction.
+    @ViewBuilder
+    private var durationControl: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Forced to "No" (and disabled below) whenever the
+            // previewed/actual shelf doesn't track duration — the
+            // real stored answer is untouched so it comes back if
+            // the shelf preview is cancelled.
+            let isYesSelected = durationAllowed && task.durationDecided && task.durationAnsweredYes
+            let isNoSelected = !durationAllowed || (task.durationDecided && !task.durationAnsweredYes)
+
+            HStack(spacing: 8) {
+                Text("Duration")
+
+                Spacer()
+
+                Button {
+                    focusedField = nil
+                    if isYesSelected {
+                        // Untapping Yes clears back to unanswered
+                        // and resets the picker to Not Selected.
+                        task.durationDecided = false
+                        task.durationAnsweredYes = false
+                        task.estimatedMinutes = 0
+                    } else {
+                        task.durationDecided = true
+                        task.durationAnsweredYes = true
+                        // The wheel needs a value actually in its own
+                        // range to show a real selection instead of
+                        // landing on nothing.
+                        if task.estimatedMinutes <= 0 {
+                            task.estimatedMinutes = 2
+                        }
+                    }
+                } label: {
+                    Text("Yes")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(minWidth: 48)
+                        .padding(.vertical, 9)
+                        .background(isYesSelected ? Color.accentColor : Color.secondary.opacity(0.15))
+                        .foregroundStyle(isYesSelected ? Color.white : Color.primary)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    focusedField = nil
+                    if isNoSelected {
+                        task.durationDecided = false
+                    } else {
+                        task.durationDecided = true
+                        task.durationAnsweredYes = false
+                        task.estimatedMinutes = 0
+                    }
+                } label: {
+                    Text("No")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(minWidth: 48)
+                        .padding(.vertical, 9)
+                        .background(isNoSelected ? Color.accentColor : Color.secondary.opacity(0.15))
+                        .foregroundStyle(isNoSelected ? Color.white : Color.primary)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+
+                if isYesSelected {
+                    Picker("Duration", selection: $task.estimatedMinutes) {
+                        ForEach(durationWheelOptions, id: \.self) { minutes in
+                            Text(minutes == 2 ? "≤2 min" : TaskItem.durationLabel(for: minutes))
+                                .font(.subheadline.weight(.semibold))
+                                .tag(minutes)
+                        }
+                    }
+                    .pickerStyle(.wheel)
+                    .labelsHidden()
+                    .frame(width: 110, height: 40)
+                    .clipped()
+                    .onChange(of: task.estimatedMinutes) { _, _ in
+                        task.durationDecided = true
+                        task.syncScheduledBlockDuration()
+                    }
+                }
+            }
+
+            // `estimatedMinutes` itself never changes from a partial
+            // placement (see `TaskItem.remainingMinutes`) — this is
+            // the one place that surfaces the difference, rather than
+            // the duration silently reading as the task's full size
+            // while some of it is actually still sitting unplaced.
+            if isYesSelected, task.remainingMinutes < task.estimatedMinutes {
+                Text("\(TaskItem.durationLabel(for: task.estimatedMinutes - task.remainingMinutes)) of \(TaskItem.durationLabel(for: task.estimatedMinutes)) scheduled")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.top, 4)
+        .disabled(!durationAllowed)
+        .opacity(durationAllowed ? 1 : 0.4)
+        .animation(.easeInOut(duration: 0.15), value: task.durationDecided)
+        .animation(.easeInOut(duration: 0.15), value: durationAllowed)
+    }
+
+    /// Same extraction as `durationControl`, for Divisible. In the
+    /// recurring "Time" row, the caller wraps this in its own
+    /// `estimatedMinutes > 0 && !segmentOptions.isEmpty` condition so the
+    /// row doesn't appear at all when there's nothing splittable yet
+    /// (requirement: "Divisible only appears when a duration is set and
+    /// long enough to split") — here, for a non-recurring task, it stays
+    /// unconditionally visible (disabled + explained instead), unchanged
+    /// from before the extraction.
+    @ViewBuilder
+    private var divisibleControl: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            let isDivisibleYesSelected = durationAllowed && task.isDivisibleDecided && task.isDivisible
+            let isDivisibleNoSelected = !durationAllowed || (task.isDivisibleDecided && !task.isDivisible)
+
+            HStack(spacing: 8) {
+                Text("Divisible")
+
+                Spacer()
+
+                Button {
+                    focusedField = nil
+                    if isDivisibleYesSelected {
+                        // Untapping Yes clears back to unanswered
+                        // and resets the picker to Not Selected.
+                        task.isDivisibleDecided = false
+                        task.isDivisible = false
+                        task.minimumSegmentMinutes = 0
+                    } else {
+                        task.isDivisibleDecided = true
+                        task.isDivisible = true
+                        // Same reasoning as the Duration wheel above —
+                        // needs a value actually in its own range, and
+                        // now also one that evenly divides the task's
+                        // duration (see `validSegmentOptions(for:)`).
+                        if !segmentOptions.contains(task.minimumSegmentMinutes) {
+                            task.minimumSegmentMinutes = segmentOptions.first ?? 0
+                        }
+                    }
+                } label: {
+                    Text("Yes")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(minWidth: 48)
+                        .padding(.vertical, 9)
+                        .background(isDivisibleYesSelected ? Color.accentColor : Color.secondary.opacity(0.15))
+                        .foregroundStyle(isDivisibleYesSelected ? Color.white : Color.primary)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(segmentOptions.isEmpty)
+                .opacity(segmentOptions.isEmpty ? 0.4 : 1)
+
+                Button {
+                    focusedField = nil
+                    if isDivisibleNoSelected {
+                        task.isDivisibleDecided = false
+                    } else {
+                        task.isDivisibleDecided = true
+                        task.isDivisible = false
+                        task.minimumSegmentMinutes = 0
+                    }
+                } label: {
+                    Text("No")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(minWidth: 48)
+                        .padding(.vertical, 9)
+                        .background(isDivisibleNoSelected ? Color.accentColor : Color.secondary.opacity(0.15))
+                        .foregroundStyle(isDivisibleNoSelected ? Color.white : Color.primary)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+
+                if isDivisibleYesSelected, !segmentOptions.isEmpty {
+                    Picker("Minimum Segment", selection: $task.minimumSegmentMinutes) {
+                        ForEach(segmentOptions, id: \.self) { minutes in
+                            Text(TaskItem.durationLabel(for: minutes))
+                                .font(.subheadline.weight(.semibold))
+                                .tag(minutes)
+                        }
+                    }
+                    .pickerStyle(.wheel)
+                    .labelsHidden()
+                    .frame(width: 110, height: 40)
+                    .clipped()
+                }
+            }
+            if segmentOptions.isEmpty, task.estimatedMinutes > 0 {
+                // Stated rather than left as a toggle that silently
+                // refuses to turn on — a disabled control with no
+                // reason reads as broken.
+                Text("A \(TaskItem.durationLabel(for: task.estimatedMinutes)) task can't be split into even segments.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.top, 4)
+        .onChange(of: task.estimatedMinutes) {
+            // Duration edits can invalidate a segment size chosen
+            // earlier, including clearing divisibility entirely when
+            // the new duration has no divisor at all. Re-validating
+            // here (not only on save) means the controls above show
+            // that consequence at the moment it happens, rather than
+            // the user discovering it later.
+            task.validateDivisibility()
+        }
+        .disabled(!durationAllowed)
+        .opacity(durationAllowed ? 1 : 0.4)
+        .animation(.easeInOut(duration: 0.15), value: task.isDivisibleDecided)
+        .animation(.easeInOut(duration: 0.15), value: durationAllowed)
     }
 
     /// Same idea as `dueDatesAllowed`, for the Next Step field.
@@ -2472,46 +2791,6 @@ struct TaskReviewCard: View {
         .padding(.bottom, 0)
     }
 
-    /// Replaces the normal Yes/No Due Date section whenever the top-level
-    /// "Recurring?" toggle is on — there's no separate "Has due date"
-    /// question, a recurring task always has one, by definition. No date
-    /// question here either: Start Date doubles as the anchor every
-    /// occurrence steps forward from (`task.dueDate`, kept in sync with
-    /// `task.startDate` — see the "Recurring?" toggle and Start Date
-    /// picker in `cardScrollBody`), so there's nothing left for this
-    /// section to ask beyond the interval/time-mode/end-date questions
-    /// below. No *user-picked* time-of-day question for Specific Time —
-    /// that occurrence still lands at a fixed time on the calendar (see
-    /// `TaskItem.recurringOccurrenceTime`), taken from Start Date rather
-    /// than asked separately here; see `TaskItem.setStartDate(_:)` and
-    /// `TaskItem.makeRecurring()`, which both fold a newly-picked/synced
-    /// Start Date onto the anchor's existing time-of-day.
-    /// The "Not Selected" pill shown in place of a control that starts
-    /// unselected (Every, Time — both real, always-has-a-value enum/int
-    /// controls that can't natively render "nothing chosen" the way a
-    /// popover-gated field like Start Date can). Tapping runs `onTap`
-    /// (setting the relevant "picked" flag) and the real control takes
-    /// its place inline, already showing whatever's currently stored —
-    /// same "reveal a real, editable default the moment you opt in" shape
-    /// the Duration wheel already uses, just without a Yes/No gate.
-    private func notSelectedButton(onTap: @escaping () -> Void) -> some View {
-        Button {
-            focusedField = nil
-            onTap()
-        } label: {
-            Text("Not Selected")
-                .font(.headline)
-                .foregroundStyle(Color.accentColor)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.secondary.opacity(0.15))
-                )
-        }
-        .buttonStyle(.plain)
-    }
-
     /// Only `.first`/`.last` for Day of Month (see
     /// `RelativeRecurrenceScope.dayOfMonth`'s own doc comment for why any
     /// other day-of-month is deliberately left to Specific Date) — all
@@ -2520,286 +2799,386 @@ struct TaskReviewCard: View {
         task.relativeRecurrenceScope == .dayOfMonth ? [.first, .last] : RelativeRecurrenceOrdinal.allCases
     }
 
-    private var recurringSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if task.isRecurring {
-                Picker("Recurrence Mode", selection: Binding(
-                    get: { task.recurrenceMode },
-                    set: { task.recurrenceMode = $0 }
-                )) {
-                    ForEach(RecurrenceMode.allCases) { mode in
-                        Text(mode.label).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .padding(.bottom, 2)
+    /// "Monthly · 4th Saturday" / "Not Selected" — `TaskItem
+    /// .recurrenceShortSummary`, the compact form built specifically so
+    /// this row fits on one line (see that property's own doc comment for
+    /// why it's a genuinely separate property from `recurrenceSummary`,
+    /// not a "short" flag on it — the long form is still exactly what
+    /// `ShelfListView.recurrenceLine` shows on the shelf card, untouched
+    /// by this). Gating on "not yet configured" belongs at this call
+    /// site, same as every other "Not Selected" field on this card — not
+    /// inside the model's own formatter.
+    private var repeatsSummaryText: String {
+        isRepeatsConfigured ? (task.recurrenceShortSummary ?? "Not Selected") : "Not Selected"
+    }
 
-                HStack(spacing: 8) {
-                    Text("Every")
-                        .font(.body)
-                        .lineLimit(1)
-                        .fixedSize()
-                    Spacer()
-                    if task.recurrenceIntervalPicked {
-                        // Same +/- Stepper + dropdown shape as "Remind In" —
-                        // `.fixedSize()` keeps both compact on the trailing
-                        // side instead of each expanding to fill the row.
-                        Stepper(
-                            value: Binding(
-                                get: { task.recurrenceIntervalCount },
-                                set: { task.recurrenceIntervalCount = max(1, $0) }
-                            ),
-                            in: 1...365
-                        ) {
-                            Text("\(task.recurrenceIntervalCount)")
-                                .font(.subheadline.weight(.semibold))
-                                .frame(minWidth: 20)
-                        }
-                        .fixedSize()
+    /// "Thu, Sep 17, 2026" — abbreviated weekday, abbreviated month, no
+    /// full spelled-out names, unlike the previous `.complete` style
+    /// ("Thursday, September 17, 2026"), which fit only by luck: a longer
+    /// weekday/month pair would wrap the row. `Self.abbreviatedDateFormatter`
+    /// is shared with `endsSummaryText` — both date-only rows want the
+    /// identical compact form, and both are inherently bounded (`EEE`/
+    /// `MMM` are fixed-width 3-letter abbreviations in English), so
+    /// there's no plausible weekday/month pair that wraps.
+    private var startsSummaryText: String {
+        task.startDatePicked ? Self.abbreviatedDateFormatter.string(from: task.startDate ?? .now) : "Not Selected"
+    }
 
-                        if task.recurrenceMode == .specificDate {
-                            Picker("Repeat every", selection: Binding(
-                                get: { task.recurrenceUnit },
-                                set: { task.recurrenceUnit = $0 }
-                            )) {
-                                ForEach(RecurrenceUnit.allCases) { unit in
-                                    Text(unit.label(for: task.recurrenceIntervalCount).capitalized).tag(unit)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                            .labelsHidden()
-                            .fixedSize()
-                        } else {
-                            // Relative Date is always month-scoped — "the
-                            // first Saturday" only means something once a
-                            // month, so there's no unit to choose. `recurrenceUnit`
-                            // itself is never read by `hasRelativeDateOccurrence`
-                            // — retained untouched, just not shown, so
-                            // switching back to Specific Date sees whatever
-                            // was there before.
-                            Text(task.recurrenceIntervalCount == 1 ? "month" : "months")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                    } else {
-                        // Starts unselected — `recurrenceIntervalCount`/
-                        // `recurrenceUnit` already have real, storable
-                        // defaults ("every 1 day"), so without this gate
-                        // a fresh recurring task would silently sit on
-                        // that default with no prompt to actually confirm
-                        // it (see `TaskItem.recurrenceIntervalMissing`).
-                        // Tapping reveals the real controls above, already
-                        // showing whatever's currently stored — same
-                        // "reveal a real, editable default the moment you
-                        // opt in" shape the Duration wheel already uses.
-                        notSelectedButton {
-                            task.recurrenceIntervalPicked = true
-                        }
-                    }
-                }
+    /// "9:00 AM · 30 min" for Specific Time with a real duration set,
+    /// "9:00 AM" alone if Duration hasn't been answered yet (still
+    /// prompts via `isTimeConfigured`'s own "Duration" check, just
+    /// doesn't fabricate a size to show), or the bare mode label
+    /// ("AM"/"Midday"/"PM") for an untimed occurrence, which never has a
+    /// duration to combine with.
+    private var timeSummaryText: String {
+        guard task.recurrenceTimeModePicked else { return "Not Selected" }
+        switch task.recurrenceTimeMode {
+        case .am, .midday, .pm:
+            return task.recurrenceTimeMode.label
+        case .specific:
+            let timeText = Self.formattedTime(minutesSinceMidnight: recurrenceTimeMinutesBinding.wrappedValue)
+            guard task.durationDecided, task.durationAnsweredYes, task.estimatedMinutes > 0 else { return timeText }
+            return "\(timeText) · \(TaskItem.durationLabel(for: task.estimatedMinutes))"
+        }
+    }
 
-                // Relative Date's own pattern question — "the 1st"/"the
-                // last day" of the month, or "the first/second/third/
-                // fourth/last <weekday>." Starts unselected same as
-                // Every/Time (`TaskItem.relativeRecurrenceMissing`) —
-                // "Day of Month, First" is a real stored default, not
-                // evidence anyone chose it.
-                if task.recurrenceMode == .relativeDate {
-                    HStack {
-                        Text("Pattern")
-                        Spacer()
-                        if !task.relativeRecurrencePicked {
-                            notSelectedButton {
-                                task.relativeRecurrencePicked = true
-                            }
-                        }
-                    }
+    /// "Never" is a real, fully-decided answer (see `isEndsExpanded`'s
+    /// own doc comment) — never "Not Selected". Same bounded, weekday-
+    /// inclusive short date form as `startsSummaryText` — see that
+    /// property's own doc comment for why it's safe from wrapping.
+    private var endsSummaryText: String {
+        task.recurrenceEndDate.map { Self.abbreviatedDateFormatter.string(from: $0) } ?? "Never"
+    }
 
-                    if task.relativeRecurrencePicked {
-                        HStack {
-                            Text("Scope")
-                            Spacer()
-                            Picker("Scope", selection: Binding(
-                                get: { task.relativeRecurrenceScope },
-                                set: { newScope in
-                                    task.relativeRecurrenceScope = newScope
-                                    // Day of Month only ever offers
-                                    // First/Last — snap back to First so
-                                    // the picker never shows a selection
-                                    // that scope doesn't actually offer.
-                                    if newScope == .dayOfMonth, task.relativeRecurrenceOrdinal != .last {
-                                        task.relativeRecurrenceOrdinal = .first
-                                    }
-                                }
-                            )) {
-                                ForEach(RelativeRecurrenceScope.allCases) { scope in
-                                    Text(scope.label).tag(scope)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                            .labelsHidden()
-                        }
+    /// "Thu, Sep 17, 2026" — shared by `startsSummaryText`/`endsSummaryText`,
+    /// the two date-only collapsed-row summaries.
+    private static let abbreviatedDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE, MMM d, yyyy"
+        return formatter
+    }()
 
-                        HStack {
-                            Text(task.relativeRecurrenceScope == .dayOfMonth ? "Day" : "Position")
-                            Spacer()
-                            Picker("Position", selection: Binding(
-                                get: { task.relativeRecurrenceOrdinal },
-                                set: { task.relativeRecurrenceOrdinal = $0 }
-                            )) {
-                                ForEach(relativeRecurrenceOrdinalOptions) { ordinal in
-                                    Text(task.relativeRecurrenceScope == .dayOfMonth && ordinal == .first ? "1st" : ordinal.label)
-                                        .tag(ordinal)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                            .labelsHidden()
-                        }
+    /// Recurrence Mode + Every + (for Relative Date) Scope/Position/
+    /// Weekday — all five controls this card used to show as five
+    /// separate peer rows, now revealed together the moment "Repeats" is
+    /// expanded. Each control marks its own "picked" flag directly in its
+    /// `set` closure on first edit, rather than requiring a separate
+    /// "Not Selected" tap first — the row-level expand/collapse already
+    /// does that reveal job now, so a second layer of it here would just
+    /// be redundant. Values already stored (even if never "picked")
+    /// display live, same "show a real, editable default" precedent
+    /// `durationControl`'s wheel already set.
+    @ViewBuilder
+    private var repeatsExpandedContent: some View {
+        Picker("Recurrence Mode", selection: Binding(
+            get: { task.recurrenceMode },
+            set: { task.recurrenceMode = $0 }
+        )) {
+            ForEach(RecurrenceMode.allCases) { mode in
+                Text(mode.label).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .padding(.bottom, 2)
 
-                        if task.relativeRecurrenceScope == .weekdayOfMonth {
-                            HStack {
-                                Text("Weekday")
-                                Spacer()
-                                Picker("Weekday", selection: Binding(
-                                    get: { task.relativeRecurrenceWeekday ?? 1 },
-                                    set: { task.relativeRecurrenceWeekday = $0 }
-                                )) {
-                                    ForEach(1...7, id: \.self) { weekday in
-                                        Text(Calendar.current.weekdaySymbols[weekday - 1]).tag(weekday)
-                                    }
-                                }
-                                .pickerStyle(.menu)
-                                .labelsHidden()
-                            }
-                        }
-                    }
-                }
-
-                // Same AM/Midday/PM/Specific Time choice
-                // `HabitEditView`'s own "Times" section offers, reusing
-                // the identical `HabitOccurrenceTimeMode` enum — Specific
-                // Time is what keeps today's exact behavior (placed on the
-                // calendar at Start Date's own time); AM/Midday/PM instead
-                // shows this as a plain check-off item alongside habits in
-                // that part of the day (see `DayTimelineGridView`,
-                // `RecurringTaskLog`), with no calendar block at all.
-                HStack {
-                    Text("Time")
-                    Spacer()
-                    if task.recurrenceTimeModePicked {
-                        Picker("Time", selection: Binding(
-                            get: { task.recurrenceTimeMode },
-                            set: { task.recurrenceTimeMode = $0 }
-                        )) {
-                            ForEach(HabitOccurrenceTimeMode.allCases) { mode in
-                                Text(mode.label).tag(mode)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
-                    } else {
-                        // Starts unselected, same reasoning/shape as
-                        // "Every" above — `.specific` is a real stored
-                        // default, not evidence anyone chose it (see
-                        // `TaskItem.recurrenceTimeModeMissing`).
-                        notSelectedButton {
-                            task.recurrenceTimeModePicked = true
-                        }
-                    }
-                }
-
-                // Directly below the Time mode picker, since that's the
-                // picker that reveals this row — only for Specific Time;
-                // AM/Midday/PM never places a calendar block, so there's
-                // no clock time to set (and the whole Duration section is
-                // greyed out in that case too, see `durationAllowed`).
-                // Writes to `recurrenceTimeOfDayMinutes`, a field of its
-                // own (see that property's doc comment for why this
-                // doesn't just write into `dueDate`'s time-of-day the way
-                // placement used to silently derive it) — switching to
-                // AM/Midday/PM and back leaves it untouched, so the time
-                // picked here survives the round trip. `HourMinutePeriodPicker`
-                // is three plain `Picker(.wheel)`s (hour 1–12, minute in
-                // 15-minute steps, AM/PM) rather than a `DatePicker` —
-                // see its own doc comment for why.
-                if task.recurrenceTimeMode == .specific {
-                    HStack {
-                        Text("Occurrence Time")
-                        Spacer()
-                        Button {
-                            focusedField = nil
-                            isShowingOccurrenceTimePicker = true
-                        } label: {
-                            Text(Self.formattedTime(minutesSinceMidnight: recurrenceTimeMinutesBinding.wrappedValue))
-                                .font(.headline)
-                                .foregroundStyle(Color.accentColor)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 10)
-                                        .fill(Color.secondary.opacity(0.15))
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .popover(isPresented: $isShowingOccurrenceTimePicker) {
-                            HourMinutePeriodPicker(minutesSinceMidnight: recurrenceTimeMinutesBinding)
-                                .padding(8)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .presentationCompactAdaptation(.popover)
-                        }
-                    }
-                }
-
-                Toggle("Ends on a date", isOn: Binding(
-                    get: { task.recurrenceEndDate != nil },
+        HStack(spacing: 8) {
+            Text("Every")
+                .font(.body)
+                .lineLimit(1)
+                .fixedSize()
+            Spacer()
+            Stepper(
+                value: Binding(
+                    get: { task.recurrenceIntervalCount },
                     set: { newValue in
-                        task.recurrenceEndDate = newValue
-                            ? (task.recurrenceEndDate ?? Calendar.current.date(byAdding: .month, value: 1, to: task.dueDate ?? .now))
-                            : nil
+                        task.recurrenceIntervalCount = max(1, newValue)
+                        task.recurrenceIntervalPicked = true
                     }
-                ))
+                ),
+                in: 1...365
+            ) {
+                Text("\(task.recurrenceIntervalCount)")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(minWidth: 20)
+            }
+            .fixedSize()
 
-                if task.recurrenceEndDate != nil {
-                    HStack {
-                        Text("Until")
-                        Spacer()
-                        Button {
-                            focusedField = nil
-                            isShowingRecurrenceEndDatePicker = true
-                        } label: {
-                            Text((task.recurrenceEndDate ?? .now).formatted(date: .abbreviated, time: .omitted))
-                                .font(.headline)
-                                .foregroundStyle(Color.accentColor)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 10)
-                                        .fill(Color.secondary.opacity(0.15))
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .popover(isPresented: $isShowingRecurrenceEndDatePicker) {
-                            DatePicker(
-                                "Until",
-                                selection: Binding(
-                                    get: { task.recurrenceEndDate ?? .now },
-                                    set: { task.recurrenceEndDate = $0 }
-                                ),
-                                in: (task.dueDate ?? .now)...,
-                                displayedComponents: [.date]
-                            )
-                            .datePickerStyle(.graphical)
-                            .labelsHidden()
-                            .padding(8)
-                            .frame(width: 320)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .presentationCompactAdaptation(.popover)
+            if task.recurrenceMode == .specificDate {
+                Picker("Repeat every", selection: Binding(
+                    get: { task.recurrenceUnit },
+                    set: { newValue in
+                        task.recurrenceUnit = newValue
+                        task.recurrenceIntervalPicked = true
+                    }
+                )) {
+                    ForEach(RecurrenceUnit.allCases) { unit in
+                        Text(unit.label(for: task.recurrenceIntervalCount).capitalized).tag(unit)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+            } else {
+                // Relative Date is always month-scoped — "the first
+                // Saturday" only means something once a month, so
+                // there's no unit to choose. `recurrenceUnit` itself is
+                // never read by `hasRelativeDateOccurrence` — retained
+                // untouched, just not shown, so switching back to
+                // Specific Date sees whatever was there before.
+                Text(task.recurrenceIntervalCount == 1 ? "month" : "months")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if task.recurrenceMode == .relativeDate {
+            // Every row here got the same "wraps at the widest value"
+            // treatment as `CollapsibleAnswerRow`: the row label can't
+            // compress, and the picker's own displayed value truncates
+            // instead of wrapping. This was tightened twice on the
+            // Pattern row specifically — first the row label ("Scope" →
+            // "Pattern"), then the picker's own values ("Weekday of
+            // month" → "Weekday") — before it actually fit on-device, so
+            // Position and Weekday get the belt-and-braces protection
+            // even though their current worst-case values ("Fourth" /
+            // "Wednesday") already measured as fitting.
+            HStack {
+                Text("Pattern")
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                Spacer()
+                Picker("Pattern", selection: Binding(
+                    get: { task.relativeRecurrenceScope },
+                    set: { newScope in
+                        task.relativeRecurrenceScope = newScope
+                        task.relativeRecurrencePicked = true
+                        // "Day of month" only ever offers First/Last —
+                        // snap back to First so the picker never shows
+                        // a selection that pattern doesn't actually offer.
+                        if newScope == .dayOfMonth, task.relativeRecurrenceOrdinal != .last {
+                            task.relativeRecurrenceOrdinal = .first
                         }
                     }
-                } else {
-                    Text("Repeats indefinitely.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                )) {
+                    ForEach(RelativeRecurrenceScope.allCases) { scope in
+                        Text(scope.label).tag(scope)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .lineLimit(1)
+                .truncationMode(.tail)
+            }
+
+            HStack {
+                Text(task.relativeRecurrenceScope == .dayOfMonth ? "Day" : "Position")
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                Spacer()
+                Picker("Position", selection: Binding(
+                    get: { task.relativeRecurrenceOrdinal },
+                    set: { newValue in
+                        task.relativeRecurrenceOrdinal = newValue
+                        task.relativeRecurrencePicked = true
+                    }
+                )) {
+                    ForEach(relativeRecurrenceOrdinalOptions) { ordinal in
+                        Text(task.relativeRecurrenceScope == .dayOfMonth && ordinal == .first ? "1st" : ordinal.label)
+                            .tag(ordinal)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .lineLimit(1)
+                .truncationMode(.tail)
+            }
+
+            if task.relativeRecurrenceScope == .weekdayOfMonth {
+                HStack {
+                    Text("Weekday")
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Spacer()
+                    Picker("Weekday", selection: Binding(
+                        get: { task.relativeRecurrenceWeekday ?? 1 },
+                        set: { newValue in
+                            task.relativeRecurrenceWeekday = newValue
+                            task.relativeRecurrencePicked = true
+                        }
+                    )) {
+                        ForEach(1...7, id: \.self) { weekday in
+                            Text(Calendar.current.weekdaySymbols[weekday - 1]).tag(weekday)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                }
+            }
+        }
+    }
+
+    /// `StartDateCalendarPicker` embedded directly rather than behind its
+    /// own further popover tap — expanding "Starts" should reveal the
+    /// real control immediately, not gate it behind one more reveal.
+    /// Picking a date auto-collapses the row (`isStartsExpanded = false`)
+    /// — a calendar tap is a discrete, one-shot "I'm done" action, unlike
+    /// the Stepper/wheel controls in the other rows, which stay open
+    /// through an exploratory adjustment instead of snapping shut after
+    /// the first touch.
+    @ViewBuilder
+    private var startsExpandedContent: some View {
+        StartDateCalendarPicker(
+            initialSelection: task.startDatePicked ? task.startDate : nil,
+            minimumDate: Calendar.current.startOfDay(for: .now)
+        ) { selectedDate in
+            task.setStartDate(selectedDate)
+            isStartsExpanded = false
+        }
+
+        if task.startDatePicked {
+            Button("Clear", role: .destructive) {
+                task.clearStartDate()
+            }
+        }
+    }
+
+    /// Mode picker, then — for Specific Time only — the clock wheel,
+    /// Duration, and Divisible together, exactly the set requirement 2
+    /// asks to fold into this row. `durationControl`/`divisibleControl`
+    /// are the identical extracted content `cardScrollBody` still shows
+    /// for a non-recurring task (see `durationApplicable`) — no second
+    /// copy of that Yes/No-pill-plus-wheel logic. Divisible is wrapped in
+    /// its own condition here (unlike the standalone version, which
+    /// always renders disabled+explained) so it doesn't appear at all
+    /// until there's an actual duration long enough to split — the same
+    /// `segmentOptions`/`TaskItem.validSegmentOptions(for:)` check that
+    /// already decides whether the Divisible *control* accepts "Yes" is
+    /// what decides whether the *row* shows up here at all.
+    @ViewBuilder
+    private var timeExpandedContent: some View {
+        HStack {
+            Text("Mode")
+            Spacer()
+            Picker("Time", selection: Binding(
+                get: { task.recurrenceTimeMode },
+                set: { newValue in
+                    task.recurrenceTimeMode = newValue
+                    task.recurrenceTimeModePicked = true
+                }
+            )) {
+                ForEach(HabitOccurrenceTimeMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+        }
+
+        if task.recurrenceTimeMode == .specific {
+            // `HourMinutePeriodPicker` writes to `recurrenceTimeOfDayMinutes`,
+            // a field of its own (see that property's doc comment for why
+            // this doesn't just write into `dueDate`'s time-of-day the
+            // way placement used to silently derive it) — three plain
+            // `Picker(.wheel)`s (hour 1–12, minute in 15-minute steps,
+            // AM/PM) rather than a `DatePicker`, see that type's own doc
+            // comment for why.
+            HourMinutePeriodPicker(minutesSinceMidnight: recurrenceTimeMinutesBinding)
+
+            durationControl
+
+            if task.estimatedMinutes > 0, !segmentOptions.isEmpty {
+                divisibleControl
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var endsExpandedContent: some View {
+        Toggle("Ends on a date", isOn: Binding(
+            get: { task.recurrenceEndDate != nil },
+            set: { newValue in
+                task.recurrenceEndDate = newValue
+                    ? (task.recurrenceEndDate ?? Calendar.current.date(byAdding: .month, value: 1, to: task.dueDate ?? .now))
+                    : nil
+            }
+        ))
+
+        if task.recurrenceEndDate != nil {
+            DatePicker(
+                "Until",
+                selection: Binding(
+                    get: { task.recurrenceEndDate ?? .now },
+                    set: { task.recurrenceEndDate = $0 }
+                ),
+                in: (task.dueDate ?? .now)...,
+                displayedComponents: [.date]
+            )
+            .datePickerStyle(.graphical)
+            .labelsHidden()
+        }
+    }
+
+    /// Replaces the normal Yes/No Due Date section whenever the top-level
+    /// "Recurring?" toggle is on — there's no separate "Has due date"
+    /// question, a recurring task always has one, by definition. No date
+    /// question here either: Start Date doubles as the anchor every
+    /// occurrence steps forward from (`task.dueDate`, kept in sync with
+    /// `task.startDate` — see `TaskItem.setStartDate(_:)`), so there's
+    /// nothing left for this section to ask beyond Repeats/Time/Ends.
+    ///
+    /// Each row shows its answer, not its controls — the organizing
+    /// principle behind this whole layout: a recurring task is
+    /// configured once and read many times, so the default (compact,
+    /// collapsed) view should optimize for reading, not editing.
+    /// `CollapsibleAnswerRow` is the shared shape all four rows use;
+    /// `isRepeatsExpanded`/`isStartsExpanded`/`isTimeExpanded` start
+    /// collapsed unless that row is unconfigured (seeded in `init`,
+    /// since expand state is session-local — never persisted, and never
+    /// re-evaluated after the card opens); `isEndsExpanded` always starts
+    /// collapsed, since "Never" is itself a complete answer.
+    private var recurringSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if task.isRecurring {
+                CollapsibleAnswerRow(
+                    label: "Repeats",
+                    summary: repeatsSummaryText,
+                    isNotSelected: !isRepeatsConfigured,
+                    isExpanded: $isRepeatsExpanded,
+                    onTapHeader: { focusedField = nil }
+                ) {
+                    repeatsExpandedContent
+                }
+
+                CollapsibleAnswerRow(
+                    label: "Starts",
+                    summary: startsSummaryText,
+                    isNotSelected: !task.startDatePicked,
+                    isExpanded: $isStartsExpanded,
+                    onTapHeader: { focusedField = nil }
+                ) {
+                    startsExpandedContent
+                }
+
+                CollapsibleAnswerRow(
+                    label: "Time",
+                    summary: timeSummaryText,
+                    isNotSelected: !task.recurrenceTimeModePicked,
+                    isExpanded: $isTimeExpanded,
+                    onTapHeader: { focusedField = nil }
+                ) {
+                    timeExpandedContent
+                }
+
+                CollapsibleAnswerRow(
+                    label: "Ends",
+                    summary: endsSummaryText,
+                    isNotSelected: false,
+                    isExpanded: $isEndsExpanded,
+                    onTapHeader: { focusedField = nil }
+                ) {
+                    endsExpandedContent
                 }
 
                 // Default true — matches every recurring task's behavior
@@ -2808,8 +3187,9 @@ struct TaskReviewCard: View {
                 // `.missed`, same as always); it only stops
                 // `PushedRecurringOccurrence` from carrying that miss
                 // forward onto future days — see `TaskItem.isPushable`'s
-                // own doc comment.
-                Toggle("Pushable?", isOn: $task.isPushable)
+                // own doc comment. Renamed from "Pushable?" — same field,
+                // clearer wording.
+                Toggle("Push if missed", isOn: $task.isPushable)
                     .padding(.top, 4)
             }
         }
@@ -2825,6 +3205,14 @@ struct TaskReviewCard: View {
             VStack(alignment: .leading, spacing: 10) {
             Divider()
 
+            // Recurring tasks get their own "Starts" row instead (see
+            // `recurringSection`) — same underlying `task.startDate`/
+            // `.setStartDate(_:)`/`.clearStartDate()`, just presented as
+            // one of the four collapsed answer rows rather than this
+            // always-visible popover-triggering button, which stays
+            // exactly as it was for non-recurring tasks (the only
+            // remaining caller of `isShowingStartDatePicker`).
+            if !task.isRecurring {
             HStack {
                 Text("Start Date")
                 Spacer()
@@ -2884,6 +3272,7 @@ struct TaskReviewCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .presentationCompactAdaptation(.popover)
                 }
+            }
             }
 
             Toggle("Recurring?", isOn: Binding(
@@ -3041,202 +3430,8 @@ struct TaskReviewCard: View {
             }
 
             if durationApplicable {
-            VStack(alignment: .leading, spacing: 6) {
-                // Forced to "No" (and disabled below) whenever the
-                // previewed/actual shelf doesn't track duration — the
-                // real stored answer is untouched so it comes back if
-                // the shelf preview is cancelled.
-                let isYesSelected = durationAllowed && task.durationDecided && task.durationAnsweredYes
-                let isNoSelected = !durationAllowed || (task.durationDecided && !task.durationAnsweredYes)
-
-                HStack(spacing: 8) {
-                    Text("Duration")
-
-                    Spacer()
-
-                    Button {
-                        focusedField = nil
-                        if isYesSelected {
-                            // Untapping Yes clears back to unanswered
-                            // and resets the picker to Not Selected.
-                            task.durationDecided = false
-                            task.durationAnsweredYes = false
-                            task.estimatedMinutes = 0
-                        } else {
-                            task.durationDecided = true
-                            task.durationAnsweredYes = true
-                            // The wheel needs a value actually in its own
-                            // range to show a real selection instead of
-                            // landing on nothing.
-                            if task.estimatedMinutes <= 0 {
-                                task.estimatedMinutes = 2
-                            }
-                        }
-                    } label: {
-                        Text("Yes")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(minWidth: 48)
-                            .padding(.vertical, 9)
-                            .background(isYesSelected ? Color.accentColor : Color.secondary.opacity(0.15))
-                            .foregroundStyle(isYesSelected ? Color.white : Color.primary)
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        focusedField = nil
-                        if isNoSelected {
-                            task.durationDecided = false
-                        } else {
-                            task.durationDecided = true
-                            task.durationAnsweredYes = false
-                            task.estimatedMinutes = 0
-                        }
-                    } label: {
-                        Text("No")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(minWidth: 48)
-                            .padding(.vertical, 9)
-                            .background(isNoSelected ? Color.accentColor : Color.secondary.opacity(0.15))
-                            .foregroundStyle(isNoSelected ? Color.white : Color.primary)
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-
-                    if isYesSelected {
-                        Picker("Duration", selection: $task.estimatedMinutes) {
-                            ForEach(durationWheelOptions, id: \.self) { minutes in
-                                Text(minutes == 2 ? "≤2 min" : TaskItem.durationLabel(for: minutes))
-                                    .font(.subheadline.weight(.semibold))
-                                    .tag(minutes)
-                            }
-                        }
-                        .pickerStyle(.wheel)
-                        .labelsHidden()
-                        .frame(width: 110, height: 40)
-                        .clipped()
-                        .onChange(of: task.estimatedMinutes) { _, _ in
-                            task.durationDecided = true
-                            task.syncScheduledBlockDuration()
-                        }
-                    }
-                }
-
-                // `estimatedMinutes` itself never changes from a partial
-                // placement (see `TaskItem.remainingMinutes`) — this is
-                // the one place that surfaces the difference, rather than
-                // the duration silently reading as the task's full size
-                // while some of it is actually still sitting unplaced.
-                if isYesSelected, task.remainingMinutes < task.estimatedMinutes {
-                    Text("\(TaskItem.durationLabel(for: task.estimatedMinutes - task.remainingMinutes)) of \(TaskItem.durationLabel(for: task.estimatedMinutes)) scheduled")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.top, 4)
-            .disabled(!durationAllowed)
-            .opacity(durationAllowed ? 1 : 0.4)
-            .animation(.easeInOut(duration: 0.15), value: task.durationDecided)
-            .animation(.easeInOut(duration: 0.15), value: durationAllowed)
-
-            VStack(alignment: .leading, spacing: 6) {
-                let isDivisibleYesSelected = durationAllowed && task.isDivisibleDecided && task.isDivisible
-                let isDivisibleNoSelected = !durationAllowed || (task.isDivisibleDecided && !task.isDivisible)
-
-                HStack(spacing: 8) {
-                    Text("Divisible")
-
-                    Spacer()
-
-                    Button {
-                        focusedField = nil
-                        if isDivisibleYesSelected {
-                            // Untapping Yes clears back to unanswered
-                            // and resets the picker to Not Selected.
-                            task.isDivisibleDecided = false
-                            task.isDivisible = false
-                            task.minimumSegmentMinutes = 0
-                        } else {
-                            task.isDivisibleDecided = true
-                            task.isDivisible = true
-                            // Same reasoning as the Duration wheel above —
-                            // needs a value actually in its own range, and
-                            // now also one that evenly divides the task's
-                            // duration (see `validSegmentOptions(for:)`).
-                            if !segmentOptions.contains(task.minimumSegmentMinutes) {
-                                task.minimumSegmentMinutes = segmentOptions.first ?? 0
-                            }
-                        }
-                    } label: {
-                        Text("Yes")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(minWidth: 48)
-                            .padding(.vertical, 9)
-                            .background(isDivisibleYesSelected ? Color.accentColor : Color.secondary.opacity(0.15))
-                            .foregroundStyle(isDivisibleYesSelected ? Color.white : Color.primary)
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(segmentOptions.isEmpty)
-                    .opacity(segmentOptions.isEmpty ? 0.4 : 1)
-
-                    Button {
-                        focusedField = nil
-                        if isDivisibleNoSelected {
-                            task.isDivisibleDecided = false
-                        } else {
-                            task.isDivisibleDecided = true
-                            task.isDivisible = false
-                            task.minimumSegmentMinutes = 0
-                        }
-                    } label: {
-                        Text("No")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(minWidth: 48)
-                            .padding(.vertical, 9)
-                            .background(isDivisibleNoSelected ? Color.accentColor : Color.secondary.opacity(0.15))
-                            .foregroundStyle(isDivisibleNoSelected ? Color.white : Color.primary)
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-
-                    if isDivisibleYesSelected, !segmentOptions.isEmpty {
-                        Picker("Minimum Segment", selection: $task.minimumSegmentMinutes) {
-                            ForEach(segmentOptions, id: \.self) { minutes in
-                                Text(TaskItem.durationLabel(for: minutes))
-                                    .font(.subheadline.weight(.semibold))
-                                    .tag(minutes)
-                            }
-                        }
-                        .pickerStyle(.wheel)
-                        .labelsHidden()
-                        .frame(width: 110, height: 40)
-                        .clipped()
-                    }
-                }
-                if segmentOptions.isEmpty, task.estimatedMinutes > 0 {
-                    // Stated rather than left as a toggle that silently
-                    // refuses to turn on — a disabled control with no
-                    // reason reads as broken.
-                    Text("A \(TaskItem.durationLabel(for: task.estimatedMinutes)) task can't be split into even segments.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.top, 4)
-            .onChange(of: task.estimatedMinutes) {
-                // Duration edits can invalidate a segment size chosen
-                // earlier, including clearing divisibility entirely when
-                // the new duration has no divisor at all. Re-validating
-                // here (not only on save) means the controls above show
-                // that consequence at the moment it happens, rather than
-                // the user discovering it later.
-                task.validateDivisibility()
-            }
-            .disabled(!durationAllowed)
-            .opacity(durationAllowed ? 1 : 0.4)
-            .animation(.easeInOut(duration: 0.15), value: task.isDivisibleDecided)
-            .animation(.easeInOut(duration: 0.15), value: durationAllowed)
+                durationControl
+                divisibleControl
             }
 
             // Grouped under one stable id (rather than tagging the
@@ -3717,6 +3912,72 @@ struct TaskReviewCard: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             action()
         }
+    }
+}
+
+/// One row in the compact recurring-task card (`TaskReviewCard
+/// .recurringSection`): a label, its composed answer (or "Not Selected"
+/// in muted/italic styling when unconfigured), and a chevron — tapping
+/// the row expands/collapses `content` inline beneath it. The shared
+/// shape behind "Repeats"/"Starts"/"Time"/"Ends" so all four behave
+/// identically rather than each row inventing its own reveal mechanics.
+/// `onTapHeader` is a small escape hatch for side effects the tap itself
+/// should also trigger (`TaskReviewCard` uses it to dismiss the keyboard,
+/// same as every other tap target on this card already does) — separate
+/// from `isExpanded`'s own toggle so callers with nothing extra to do
+/// can just omit it.
+///
+/// **Belt and braces against wrapping**, on top of every caller already
+/// keeping `summary` itself short (`TaskItem.recurrenceShortSummary`, the
+/// abbreviated date form, etc.): `label` is `.fixedSize(horizontal:
+/// vertical:)` so it always renders at its natural width and never
+/// compresses to make room for `summary`, and `summary` gets
+/// `.lineLimit(1)` + `.truncationMode(.tail)` so if some future value is
+/// ever longer than expected despite that, it ellipsizes instead of
+/// wrapping. A clipped value is recoverable — tap the row, the real
+/// control underneath still shows the full thing — a wrapped one breaks
+/// the row's height and the whole card's rhythm with it.
+private struct CollapsibleAnswerRow<Content: View>: View {
+    let label: String
+    let summary: String
+    let isNotSelected: Bool
+    @Binding var isExpanded: Bool
+    var onTapHeader: (() -> Void)? = nil
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                onTapHeader?()
+                isExpanded.toggle()
+            } label: {
+                HStack {
+                    Text(label)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: 8)
+                    Text(summary)
+                        .foregroundStyle(isNotSelected ? .secondary : .primary)
+                        .italic(isNotSelected)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                content()
+                    .padding(.leading, 4)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.15), value: isExpanded)
     }
 }
 
