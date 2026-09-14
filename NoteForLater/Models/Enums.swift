@@ -34,6 +34,65 @@ enum RecurrenceUnit: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// Which recurrence evaluator a recurring `TaskItem` uses — see
+/// `TaskItem.hasRecurringOccurrence`'s own doc comment for how the two
+/// branch from one shared entry point. `.specificDate` is the original
+/// interval+unit+anchor behavior (unchanged); `.relativeDate` is pattern
+/// based ("the last day of the month," "the first Saturday"). Defaults
+/// to `.specificDate` so every recurring task that existed before this
+/// field did keeps behaving exactly as it always has.
+enum RecurrenceMode: String, Codable, CaseIterable, Identifiable {
+    case specificDate, relativeDate
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .specificDate: return "Specific Date"
+        case .relativeDate: return "Relative Date"
+        }
+    }
+}
+
+/// The two shapes a Relative Date pattern can take — see
+/// `TaskItem.relativeRecurrenceOrdinal`/`.relativeRecurrenceWeekday` for
+/// the parameters each one reads.
+enum RelativeRecurrenceScope: String, Codable, CaseIterable, Identifiable {
+    /// "The 1st" / "the last day" of the month — only
+    /// `.first`/`.last` are ever offered for this scope (see
+    /// `TaskItem.hasRelativeDateOccurrence`'s doc comment for why any
+    /// other day-of-month is deliberately left to Specific Date instead).
+    case dayOfMonth
+    /// "The first/second/third/fourth/last <weekday>" of the month.
+    case weekdayOfMonth
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .dayOfMonth: return "Day of Month"
+        case .weekdayOfMonth: return "Weekday of Month"
+        }
+    }
+}
+
+/// The position within the month a Relative Date pattern names.
+/// Deliberately stops at `.fourth`/`.last` — no `.fifth` — see
+/// `TaskItem.hasRelativeDateOccurrence`'s doc comment for why that's load-
+/// bearing, not just a smaller feature set.
+enum RelativeRecurrenceOrdinal: Int, Codable, CaseIterable, Identifiable {
+    case first = 1, second = 2, third = 3, fourth = 4, last = -1
+    var id: Int { rawValue }
+
+    var label: String {
+        switch self {
+        case .first: return "First"
+        case .second: return "Second"
+        case .third: return "Third"
+        case .fourth: return "Fourth"
+        case .last: return "Last"
+        }
+    }
+}
+
 /// How a single habit occurrence lands on the day — `specific` places it
 /// on the calendar at its own `idealTimesOfDay` slot, the way every
 /// occurrence used to work; the other three surface it instead as an

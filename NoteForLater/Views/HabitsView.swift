@@ -353,19 +353,9 @@ private struct HabitsTodayDayList: View {
     /// future day — see `canEdit`.
     private func occurrenceCircle(habit: Habit, index: Int, log: HabitLog?) -> some View {
         let status = log?.occurrenceStatus(index) ?? .none
-        return Button {
+        return HabitOccurrenceCircleView(status: status, canEdit: canEdit) {
             toggleOccurrence(habit: habit, index: index)
-        } label: {
-            Circle()
-                .fill(fillColor(for: status))
-                .frame(width: 36, height: 36)
-                .overlay {
-                    occurrenceIcon(for: status)
-                }
         }
-        .buttonStyle(.plain)
-        .disabled(!canEdit)
-        .opacity(canEdit ? 1 : 0.5)
     }
 
     /// Cycles one occurrence to its next state, keeping its matching
@@ -383,37 +373,6 @@ private struct HabitsTodayDayList: View {
         HabitStatsRefreshCoordinator.shared.habitLogsChanged()
     }
 
-    private func fillColor(for status: OccurrenceStatus) -> Color {
-        switch status {
-        case .none: return Color.secondary.opacity(0.15)
-        case .complete: return .green.opacity(0.6)
-        case .missed: return .red.opacity(0.55)
-        case .excused: return .gray.opacity(0.4)
-        }
-    }
-
-    @ViewBuilder
-    private func occurrenceIcon(for status: OccurrenceStatus) -> some View {
-        switch status {
-        case .none:
-            EmptyView()
-        case .complete:
-            Image(systemName: "checkmark")
-                .font(.callout)
-                .fontWeight(.semibold)
-                .foregroundStyle(.white)
-        case .missed:
-            Image(systemName: "xmark")
-                .font(.callout)
-                .fontWeight(.semibold)
-                .foregroundStyle(.white)
-        case .excused:
-            Image(systemName: "xmark")
-                .font(.callout)
-                .fontWeight(.semibold)
-                .foregroundStyle(.secondary)
-        }
-    }
 
     private func deleteHabits(at offsets: IndexSet) {
         for index in offsets {

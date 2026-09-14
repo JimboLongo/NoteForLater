@@ -240,6 +240,34 @@ final class TaskItem {
     /// on" and "what time does it land at") that don't need to be one.
     var recurrenceTimeOfDayMinutes: Int?
 
+    /// Which evaluator `hasRecurringOccurrence` uses for this task — see
+    /// `RecurrenceMode`'s own doc comment. Defaults to `.specificDate`,
+    /// so every recurring task that existed before this field did keeps
+    /// running through the exact same, unmodified date math.
+    var recurrenceModeRaw: String = RecurrenceMode.specificDate.rawValue
+    /// The Relative Date pattern's shape — only meaningful when
+    /// `recurrenceMode == .relativeDate`. See `RelativeRecurrenceScope`.
+    var relativeRecurrenceScopeRaw: String = RelativeRecurrenceScope.dayOfMonth.rawValue
+    /// The Relative Date pattern's position within the month — only
+    /// meaningful when `recurrenceMode == .relativeDate`. For
+    /// `.dayOfMonth` only `.first`/`.last` are ever offered in the UI;
+    /// `.weekdayOfMonth` offers all five. See `RelativeRecurrenceOrdinal`.
+    var relativeRecurrenceOrdinalRaw: Int = RelativeRecurrenceOrdinal.first.rawValue
+    /// The Relative Date pattern's weekday, `Calendar.Component.weekday`
+    /// numbering (1 = Sunday ... 7 = Saturday) — only meaningful when
+    /// `relativeRecurrenceScope == .weekdayOfMonth`. `nil` until the
+    /// weekday picker is actually touched.
+    var relativeRecurrenceWeekday: Int?
+    /// Whether the Relative Date pattern (scope/ordinal/weekday above)
+    /// has actually been deliberately configured — same "picked" shape
+    /// `recurrenceIntervalPicked`/`recurrenceTimeModePicked` already use.
+    /// `relativeRecurrenceScopeRaw`/`relativeRecurrenceOrdinalRaw` start
+    /// on real, storable defaults ("Day of Month, First" — i.e. "the 1st
+    /// of the month"), not an obviously-incomplete placeholder, so
+    /// without this a fresh Relative Date task would silently sit on
+    /// that default with nothing prompting it to be confirmed.
+    var relativeRecurrencePicked: Bool = false
+
     var recurrenceUnit: RecurrenceUnit {
         get { RecurrenceUnit(rawValue: recurrenceUnitRaw) ?? .days }
         set { recurrenceUnitRaw = newValue.rawValue }
@@ -248,6 +276,21 @@ final class TaskItem {
     var recurrenceTimeMode: HabitOccurrenceTimeMode {
         get { HabitOccurrenceTimeMode(rawValue: recurrenceTimeModeRaw) ?? .specific }
         set { recurrenceTimeModeRaw = newValue.rawValue }
+    }
+
+    var recurrenceMode: RecurrenceMode {
+        get { RecurrenceMode(rawValue: recurrenceModeRaw) ?? .specificDate }
+        set { recurrenceModeRaw = newValue.rawValue }
+    }
+
+    var relativeRecurrenceScope: RelativeRecurrenceScope {
+        get { RelativeRecurrenceScope(rawValue: relativeRecurrenceScopeRaw) ?? .dayOfMonth }
+        set { relativeRecurrenceScopeRaw = newValue.rawValue }
+    }
+
+    var relativeRecurrenceOrdinal: RelativeRecurrenceOrdinal {
+        get { RelativeRecurrenceOrdinal(rawValue: relativeRecurrenceOrdinalRaw) ?? .first }
+        set { relativeRecurrenceOrdinalRaw = newValue.rawValue }
     }
 
     /// `recurrenceTimeOfDayMinutes` if explicitly set, else derived from
@@ -266,11 +309,20 @@ final class TaskItem {
     }
 
     /// Whether an occurrence of this recurring task lands on `date`'s
-    /// calendar day — stepping forward from the anchor (`dueDate`'s own
-    /// day) by `recurrenceIntervalCount` `recurrenceUnit`s at a time,
-    /// forever unless `recurrenceEndDate` cuts it off. `date` is compared
-    /// by calendar day only; see `recurringOccurrenceTime` for the actual
-    /// time an occurrence should land at.
+    /// calendar day. One public entry point regardless of
+    /// `recurrenceMode` — every real caller (`AISchedulingService`,
+    /// `ScheduleReviewViewModel`'s projection/carry-forward/sweep code,
+    /// `PushedRecurringOccurrence.advanceOneHop`, `DayTimelineGridView`,
+    /// `ShelfListView`, and this type's own
+    /// `next`/`previousRecurringOccurrenceDate` walks) only ever calls
+    /// this, never `hasSpecificDateOccurrence`/`hasRelativeDateOccurrence`
+    /// directly — so there is exactly one "is today an occurrence"
+    /// answer per task, not two implementations that could silently
+    /// disagree. The guards here (anchor exists, interval positive, floor,
+    /// end-date cutoff) are mode-agnostic and apply before either branch
+    /// runs; `date` is compared by calendar day only — see
+    /// `recurringOccurrenceTime` for the actual time an occurrence lands
+    /// at.
     func hasRecurringOccurrence(on date: Date, calendar: Calendar = .current) -> Bool {
         guard isRecurring, recurrenceIntervalCount > 0, let anchor = dueDate else { return false }
         let day = calendar.startOfDay(for: date)
@@ -278,6 +330,20 @@ final class TaskItem {
         guard day >= anchorDay else { return false }
         if let end = recurrenceEndDate, day > calendar.startOfDay(for: end) { return false }
 
+        switch recurrenceMode {
+        case .specificDate:
+            return hasSpecificDateOccurrence(day: day, anchorDay: anchorDay, calendar: calendar)
+        case .relativeDate:
+            return hasRelativeDateOccurrence(day: day, anchorDay: anchorDay, calendar: calendar)
+        }
+    }
+
+    /// The original interval+unit+anchor evaluator — stepping forward
+    /// from `anchorDay` by `recurrenceIntervalCount` `recurrenceUnit`s at
+    /// a time. Unmodified body from before `RecurrenceMode` existed,
+    /// just extracted out of `hasRecurringOccurrence` so it sits behind
+    /// the mode switch instead of being the only behavior.
+    private func hasSpecificDateOccurrence(day: Date, anchorDay: Date, calendar: Calendar) -> Bool {
         switch recurrenceUnit {
         case .days:
             guard let deltaDays = calendar.dateComponents([.day], from: anchorDay, to: day).day else { return false }
@@ -295,6 +361,83 @@ final class TaskItem {
             // behavior), so e.g. a Jan 31 anchor lands on Feb 28/29
             // rather than never firing that month at all.
             return calendar.isDate(expected, inSameDayAs: day)
+        }
+    }
+
+    /// The Relative Date evaluator — "the 1st"/"the last day" of the
+    /// month, or "the first/second/third/fourth/last <weekday>" of the
+    /// month, every `recurrenceIntervalCount` months (unit is implicitly
+    /// months here; `recurrenceUnit` itself is never read by this
+    /// branch). Month-interval check first, then a pattern check scoped
+    /// to `day`'s own month.
+    ///
+    /// The month-interval check counts **month buckets** (year×12 +
+    /// month), not `calendar.dateComponents([.month], from:to:).month`
+    /// the way `hasSpecificDateOccurrence`'s `.months` case does — that
+    /// only works there because a Specific Date candidate always shares
+    /// the anchor's exact day-of-month by construction, so there's no
+    /// partial-month ambiguity. A Relative Date candidate's day-of-month
+    /// is whatever the pattern lands on and is usually *different* from
+    /// the anchor's, and `dateComponents([.month], from:to:)` computes
+    /// *whole elapsed months* (age-in-months style) — e.g. Jan 3 2026 to
+    /// Jan 2 2027 comes back as 11, not 12, because the day-of-month
+    /// hasn't yet reached the anniversary. Bucket-counting instead
+    /// treats every January as month-bucket 0 (mod 12) regardless of
+    /// which day within it, which is the actual "every N months, on this
+    /// pattern" meaning.
+    ///
+    /// **Invariant this relies on: every pattern this function can
+    /// express resolves to exactly one real day in every month, with no
+    /// skip or fallback logic anywhere below.** "The 1st" and "the last
+    /// day" always exist — `Calendar.range(of:in:for:)` already accounts
+    /// for month length and leap years, so there's nothing to special-
+    /// case for February. First through Fourth `<weekday>` always exist
+    /// too: every month is at least 28 days (4 full weeks), so every
+    /// weekday occurs at least 4 times in every month, no exceptions.
+    /// Only a hypothetical "5th `<weekday>`" would sometimes be missing
+    /// (some months have 5 Saturdays, most don't) — that ordinal is
+    /// deliberately not offered (`RelativeRecurrenceOrdinal` stops at
+    /// `.fourth`/`.last`) specifically so this invariant holds. Anyone
+    /// adding a new `RelativeRecurrenceScope`, or extending the ordinal
+    /// range, must keep this invariant holding or this function needs
+    /// real skip/fallback logic it doesn't have today.
+    ///
+    /// The `.weekOfMonth` trick: consecutive occurrences of the same
+    /// weekday are always exactly 7 days apart, which always crosses
+    /// exactly one week boundary — so they land in consecutive
+    /// `weekOfMonth` values (1, 2, 3, 4, sometimes 5) regardless of
+    /// `calendar.firstWeekday`. That's what makes "the Nth `<weekday>`
+    /// of the month" an O(1) component read rather than a scan.
+    private func hasRelativeDateOccurrence(day: Date, anchorDay: Date, calendar: Calendar) -> Bool {
+        let anchorParts = calendar.dateComponents([.year, .month], from: anchorDay)
+        let dayParts = calendar.dateComponents([.year, .month], from: day)
+        guard let anchorYear = anchorParts.year, let anchorMonth = anchorParts.month,
+              let dayYear = dayParts.year, let dayMonth = dayParts.month
+        else { return false }
+        let deltaMonths = (dayYear - anchorYear) * 12 + (dayMonth - anchorMonth)
+        guard deltaMonths >= 0, deltaMonths % recurrenceIntervalCount == 0 else { return false }
+
+        switch relativeRecurrenceScope {
+        case .dayOfMonth:
+            let dayOfMonth = calendar.component(.day, from: day)
+            if relativeRecurrenceOrdinal == .last {
+                let daysInMonth = calendar.range(of: .day, in: .month, for: day)?.count ?? dayOfMonth
+                return dayOfMonth == daysInMonth
+            }
+            // Only `.first`/`.last` are ever offered for this scope (see
+            // `RelativeRecurrenceScope.dayOfMonth`'s own doc comment) —
+            // anything else collapses to "the 1st" rather than matching
+            // nothing, in case an invalid combination ever slips through.
+            return dayOfMonth == 1
+        case .weekdayOfMonth:
+            guard let weekday = relativeRecurrenceWeekday,
+                  calendar.component(.weekday, from: day) == weekday
+            else { return false }
+            if relativeRecurrenceOrdinal == .last {
+                guard let weekLater = calendar.date(byAdding: .day, value: 7, to: day) else { return false }
+                return calendar.component(.month, from: weekLater) != calendar.component(.month, from: day)
+            }
+            return calendar.component(.weekOfMonth, from: day) == relativeRecurrenceOrdinal.rawValue
         }
     }
 
@@ -463,11 +606,37 @@ final class TaskItem {
     var recurrenceSummary: String? {
         guard isRecurring else { return nil }
         let countPrefix = recurrenceIntervalCount == 1 ? "" : "\(recurrenceIntervalCount) "
-        var summary = "Every \(countPrefix)\(recurrenceUnit.label(for: recurrenceIntervalCount))"
+        var summary: String
+        switch recurrenceMode {
+        case .specificDate:
+            summary = "Every \(countPrefix)\(recurrenceUnit.label(for: recurrenceIntervalCount))"
+        case .relativeDate:
+            let unitWord = recurrenceIntervalCount == 1 ? "month" : "months"
+            let patternPhrase: String
+            switch relativeRecurrenceScope {
+            case .dayOfMonth:
+                patternPhrase = relativeRecurrenceOrdinal == .last ? "the last day" : "the 1st"
+            case .weekdayOfMonth:
+                let weekdayName = Self.weekdaySymbol(for: relativeRecurrenceWeekday ?? 1)
+                patternPhrase = "the \(relativeRecurrenceOrdinal.label.lowercased()) \(weekdayName)"
+            }
+            summary = "Every \(countPrefix)\(unitWord) on \(patternPhrase)"
+        }
         if let recurrenceEndDate {
             summary += " until \(Self.recurrenceEndDateFormatter.string(from: recurrenceEndDate))"
         }
         return summary
+    }
+
+    /// "Sunday"..."Saturday" for `Calendar.Component.weekday`'s own
+    /// numbering (1 = Sunday ... 7 = Saturday) — `weekdaySymbols` is
+    /// indexed the same way starting at 0, so `weekday - 1` lines up
+    /// directly. Clamped defensively since this only ever backs display
+    /// text, never a control flow decision.
+    private static func weekdaySymbol(for weekday: Int, calendar: Calendar = .current) -> String {
+        let symbols = calendar.weekdaySymbols
+        let index = max(0, min(symbols.count - 1, weekday - 1))
+        return symbols[index]
     }
 
     /// Turns this task recurring — deliberately *without* auto-filling an
@@ -1099,6 +1268,16 @@ final class TaskItem {
         isRecurring && !recurrenceTimeModePicked
     }
 
+    /// Only applies when `recurrenceMode == .relativeDate` — a Specific
+    /// Date task is never asked this question at all. Same reasoning as
+    /// `recurrenceIntervalMissing`: "Day of Month, First" (i.e. "the 1st
+    /// of the month") is a real, storable default, not a placeholder, so
+    /// only `relativeRecurrencePicked` can tell "never touched" apart
+    /// from "deliberately the 1st."
+    private func relativeRecurrenceMissing(on shelf: Shelf?) -> Bool {
+        isRecurring && recurrenceMode == .relativeDate && !relativeRecurrencePicked
+    }
+
     /// True if "Has next step" is Yes but nothing's actually been typed,
     /// unless `shelf` doesn't track it at all — matching where the Next
     /// Step field is shown/hidden. Same shape as `durationMissing`: false
@@ -1192,6 +1371,7 @@ final class TaskItem {
         if startDateMissing(on: shelf) { missing.append("Start Date") }
         if recurrenceIntervalMissing(on: shelf) { missing.append("Every") }
         if recurrenceTimeModeMissing(on: shelf) { missing.append("Time") }
+        if relativeRecurrenceMissing(on: shelf) { missing.append("Pattern") }
         if priorityMissing(on: shelf) { missing.append("Priority") }
         if durationMissing(on: shelf) { missing.append("Duration") }
         if divisibleMissing(on: shelf) { missing.append("Divisible") }

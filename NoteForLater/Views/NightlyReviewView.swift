@@ -162,7 +162,24 @@ struct NightlyReviewView: View {
     /// `NightlyReviewView.Step` from outside this file — nothing about it
     /// is meant for use elsewhere.
     enum Step: Int, CaseIterable, Hashable {
-        case chooseDay, twoMinuteTasks, today, inbox, atRisk, meals, tomorrow
+        // `.habits` sits right after `.chooseDay` deliberately — the habit
+        // list it shows depends on `reviewDate`, which Choose Day sets, so
+        // it can't be literally first, but nothing else in this list
+        // depends on anything `.habits` itself produces, so there's no
+        // reason to place it any later. This is an `Int`-rawValue enum
+        // with no explicit values — inserting a case here renumbers every
+        // case declared after it automatically; `advance()`/`back()` do
+        // `rawValue +/- 1` arithmetic off whatever the current declaration
+        // order is, never a hardcoded number, so that's the only edit this
+        // insertion needs. Confirmed nothing persists a raw `Step` value
+        // across launches: `step` is a plain `@State`, always starting at
+        // `.chooseDay` (see its declaration above), never seeded from
+        // `UserDefaults`/SwiftData/anywhere else — grepped the whole app
+        // for `Step.rawValue`/`step.rawValue` to confirm the only two
+        // reads are `advance()`/`back()`'s own arithmetic, both of which
+        // re-derive fresh off the enum's current order every time, never a
+        // stored number from a previous run.
+        case chooseDay, habits, twoMinuteTasks, today, inbox, atRisk, meals, tomorrow
 
         /// `planDate` is only meaningful for `.meals`/`.tomorrow` — the day
         /// right after whichever day was picked in Choose Day, not
@@ -171,6 +188,7 @@ struct NightlyReviewView: View {
         func title(planDate: Date) -> String {
             switch self {
             case .chooseDay: return "Which Day?"
+            case .habits: return "Habits"
             case .twoMinuteTasks: return "2-Minute Tasks"
             case .today: return "Review Schedule"
             case .inbox: return "Sort Your Inbox"
@@ -193,6 +211,7 @@ struct NightlyReviewView: View {
         var skipLabel: String {
             switch self {
             case .chooseDay: return "Which Day?"
+            case .habits: return "Habits"
             case .twoMinuteTasks: return "2-Minute Tasks"
             case .today: return "Review Schedule"
             case .inbox: return "Inbox"
@@ -207,7 +226,17 @@ struct NightlyReviewView: View {
         /// (never reached as a "next" candidate anyway), `.today` (where
         /// nothing missed gets confirmed — always shown even if sparse),
         /// and `.tomorrow` (the final approval screen — same reasoning).
-        static let autoSkipEligible: Set<Step> = [.twoMinuteTasks, .inbox, .atRisk, .meals]
+        /// `.habits` IS eligible, unlike `.today` — with no applicable
+        /// habits there's nothing to gate on and no reason to show an
+        /// empty screen, unlike `.today`'s "nothing missed gets confirmed"
+        /// reasoning which doesn't apply here. See `isStepCurrentlyEmpty`
+        /// for what "empty" means for `.habits` specifically, and
+        /// `unresolvedHabitOccurrencesForGate` for the separate,
+        /// narrower "unresolved" check the Next button actually gates on
+        /// — the two are deliberately different conditions: a day where
+        /// every habit is already resolved is non-empty (still shown,
+        /// mirroring HabitsView) but not gate-blocked.
+        static let autoSkipEligible: Set<Step> = [.habits, .twoMinuteTasks, .inbox, .atRisk, .meals]
     }
 
     private var planDate: Date {
@@ -252,6 +281,7 @@ struct NightlyReviewView: View {
             Group {
                 switch step {
                 case .chooseDay: chooseDayStep
+                case .habits: habitsStep
                 case .twoMinuteTasks: twoMinuteTasksStep
                 case .today: todayStep
                 case .inbox: inboxStep
@@ -335,13 +365,20 @@ struct NightlyReviewView: View {
             // Deliberately its own row, above the buttons, rather than a
             // disabled-Next tooltip — a dead button with no visible reason
             // reads as broken, not gated (see `unresolvedGateReviewItems`'s
-            // own comment for exactly what this counts and why).
+            // own comment for exactly what `.today`'s gate counts and why,
+            // and `unresolvedHabitOccurrencesForGate`'s for `.habits`' own,
+            // separate gate).
             if step == .today, !unresolvedGateReviewItems.isEmpty {
                 Button(action: jumpToFirstUnresolvedGateItem) {
-                    Label(unresolvedGateMessage, systemImage: "arrow.down.circle")
+                    Label(todayUnresolvedGateMessage, systemImage: "arrow.down.circle")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.orange)
                 }
+            }
+            if step == .habits, !unresolvedHabitOccurrencesForGate.isEmpty {
+                Label(habitsUnresolvedGateMessage, systemImage: "arrow.down.circle")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.orange)
             }
             HStack {
                 Button("Close") { finishAndDismiss() }
@@ -355,7 +392,10 @@ struct NightlyReviewView: View {
                 } else {
                     Button("Next", action: advance)
                         .buttonStyle(.borderedProminent)
-                        .disabled(step == .today && !unresolvedGateReviewItems.isEmpty)
+                        .disabled(
+                            (step == .today && !unresolvedGateReviewItems.isEmpty)
+                            || (step == .habits && !unresolvedHabitOccurrencesForGate.isEmpty)
+                        )
                 }
             }
         }
@@ -364,13 +404,19 @@ struct NightlyReviewView: View {
         .background(.bar)
     }
 
-    /// **The Today-step Next gate — habits and recurring tasks,
-    /// deliberately scoped to exactly those two.** Built by filtering
-    /// `reviewItems` itself (the same merged, sorted list the step
-    /// renders), so a row's gate status and its rendered position always
-    /// agree, and "jump to first" below lands on whichever blocking row
-    /// actually appears first on screen — not a second, independently-
-    /// ordered notion of "first."
+    /// **The Today-step Next gate — recurring tasks only.** Habits used to
+    /// gate this same step alongside recurring tasks; they now gate their
+    /// own, earlier `.habits` step instead (see
+    /// `unresolvedHabitOccurrencesForGate`), so this is scoped to exactly
+    /// one category, not two. Built by filtering `reviewItems` itself (the
+    /// same merged, sorted list the step renders — `reviewItems` no longer
+    /// contains any `.habit` case at all, so the `.habit` branch below is
+    /// unreachable in practice; kept only because `ReviewItem`'s switch
+    /// must stay exhaustive, since the enum itself is still used by
+    /// `.habit`-producing callers elsewhere), so a row's gate status and
+    /// its rendered position always agree, and "jump to first" below lands
+    /// on whichever blocking row actually appears first on screen — not a
+    /// second, independently-ordered notion of "first."
     ///
     /// Non-recurring blocks and meals are **not** part of this gate, and
     /// must not be added to it later without re-litigating this: both
@@ -387,21 +433,19 @@ struct NightlyReviewView: View {
     /// review, which is worse than the missed-row problem this gate
     /// exists to solve.
     ///
-    /// Habits and recurring tasks are different: both cycle through a
-    /// bounded set of genuine terminal states (`Habit.cycleOccurrence`'s
-    /// four, `TaskItem.cycleRecurringOccurrence`'s three) in a bounded
-    /// number of taps, and `.none` is the one state either design treats
-    /// as "not actually looked at yet," never as an accepted final state
-    /// — see the missed sweeps this gate makes largely redundant but does
-    /// not replace, `markUnresolvedHabitOccurrencesAsMissed` and
-    /// `pushMissedRecurringOccurrences`. A recurring task's Specific-Time
-    /// occurrence is included here even though it renders as `.block` —
-    /// `task.isRecurring` is what tells it apart from an ordinary,
-    /// deliberately-ungated block.
+    /// A recurring task cycles through a bounded set of genuine terminal
+    /// states (`TaskItem.cycleRecurringOccurrence`'s three) in a bounded
+    /// number of taps, and `.none` is the one state that design treats as
+    /// "not actually looked at yet," never as an accepted final state —
+    /// see the missed sweep this gate makes largely redundant but does not
+    /// replace, `pushMissedRecurringOccurrences`. A recurring task's
+    /// Specific-Time occurrence is included here even though it renders as
+    /// `.block` — `task.isRecurring` is what tells it apart from an
+    /// ordinary, deliberately-ungated block.
     private var unresolvedGateReviewItems: [ReviewItem] {
         reviewItems.filter { item in
             switch item {
-            case .habit(let occurrence): return occurrence.status == .none
+            case .habit: return false // unreachable — see this property's own doc comment
             case .recurringTask(let occurrence): return occurrence.status == .none
             case .block(let block):
                 guard let task = block.task, task.isRecurring, task.recurrenceTimeMode == .specific else { return false }
@@ -411,17 +455,34 @@ struct NightlyReviewView: View {
         }
     }
 
-    private var unresolvedGateMessage: String {
-        let habitCount = unresolvedGateReviewItems.filter { if case .habit = $0 { return true }; return false }.count
-        let taskCount = unresolvedGateReviewItems.count - habitCount
-        return ScheduleReviewViewModel.unresolvedGateMessage(unresolvedHabitCount: habitCount, unresolvedRecurringTaskCount: taskCount)
+    private var todayUnresolvedGateMessage: String {
+        ScheduleReviewViewModel.unresolvedGateMessage(unresolvedHabitCount: 0, unresolvedRecurringTaskCount: unresolvedGateReviewItems.count)
+    }
+
+    /// **The Habits-step Next gate.** The counterpart split off from what
+    /// used to be `.today`'s combined habits-and-tasks gate — see
+    /// `unresolvedGateReviewItems`'s own doc comment for the split.
+    /// Filters `openHabitOccurrencesForReview` (this view's frozen-
+    /// identity/live-status wrapper — see `frozenTodayHabitOccurrences`'s
+    /// doc comment) through `ScheduleReviewViewModel
+    /// .unresolvedHabitOccurrences`, the exact same `.none`-only predicate
+    /// the old combined gate used for its own habit half, just no longer
+    /// mixed in with recurring tasks.
+    private var unresolvedHabitOccurrencesForGate: [HabitReviewOccurrence] {
+        ScheduleReviewViewModel.unresolvedHabitOccurrences(openHabitOccurrencesForReview)
+    }
+
+    private var habitsUnresolvedGateMessage: String {
+        ScheduleReviewViewModel.unresolvedGateMessage(unresolvedHabitCount: unresolvedHabitOccurrencesForGate.count, unresolvedRecurringTaskCount: 0)
     }
 
     /// Scrolls the first blocking row (in the same order the list itself
     /// renders — see `unresolvedGateReviewItems`) into view. Jumps to the
     /// first only; tapping again after resolving it lands on whichever is
     /// first next, which in practice walks the whole blocking set one tap
-    /// at a time.
+    /// at a time. `.today`-only — the `.habits` step's own gate message has
+    /// no equivalent jump-to-scroll wired up (see `habitsStep`'s own doc
+    /// comment for why that's an accepted gap, not an oversight).
     private func jumpToFirstUnresolvedGateItem() {
         guard let first = unresolvedGateReviewItems.first else { return }
         scrollToReviewItemID = first.id
@@ -470,6 +531,26 @@ struct NightlyReviewView: View {
     private func isStepCurrentlyEmpty(_ step: Step) -> Bool {
         switch step {
         case .chooseDay, .today, .tomorrow: return false
+        // Deliberately the FULL frozen set (every status), not the
+        // unresolved subset `unresolvedHabitOccurrencesForGate` gates
+        // Next on — matches what `habitsStep` itself renders (see
+        // `openHabitOccurrencesForReview`), same "empty means literally
+        // nothing to show" contract this whole function documents. This
+        // and the gate are answering two different questions that happen
+        // to both be about habits: "is there anything to show at all"
+        // (this one — no applicable habits means skip the step, there's
+        // nothing to render) vs. "is there anything still unresolved"
+        // (the gate — a day where every habit is already resolved has
+        // real content to display, mirroring HabitsView, so it's not
+        // empty here, but it's also not gate-blocked, since nothing's
+        // left to mark). Consolidating these onto one list would silently
+        // break one of the two cases with no obvious symptom: reading the
+        // unresolved-only list here would auto-skip a day whose habits
+        // are all already resolved instead of showing them, and reading
+        // the full list in the gate would block Next forever on a day
+        // with habits, since resolved ones would count as "present" but
+        // never "clear."
+        case .habits: return openHabitOccurrencesForReview.isEmpty
         case .twoMinuteTasks: return twoMinuteReviewTasks.isEmpty
         case .inbox: return attributeReviewSession == nil
         case .atRisk: return atRiskTasks.isEmpty
@@ -490,6 +571,29 @@ struct NightlyReviewView: View {
     /// Next onto it and then off again, even though it's never actually
     /// shown on screen.
     private func runEntryEffects(for next: Step) {
+        if next == .habits {
+            // Frozen exactly once, on entry — see `frozenTodayHabitOccurrences`'s
+            // own doc comment for why this can't just be re-derived live on
+            // every render the way it used to be. Deliberately
+            // `allHabitOccurrencesForReview` (every status), not
+            // `openHabitOccurrencesForReview` (`.none` only, what the sweep
+            // acts on) — freezing the *filtered* call's result would mean
+            // a habit already resolved before the step opened never
+            // entered the frozen set in the first place, the exact gap
+            // this exists to close. See both functions' own doc comments
+            // for the display/operational split. Moved here (from
+            // `.today`'s own entry effects) now that habits get their own,
+            // earlier step — `reviewDisplayCutoff` only depends on
+            // `reviewDate`, already set by Choose Day one step back, so
+            // there's no ordering hazard in freezing this before
+            // `.twoMinuteTasks`/`.today` run.
+            frozenTodayHabitOccurrences = ScheduleReviewViewModel.allHabitOccurrencesForReview(
+                habits: allHabits,
+                context: modelContext,
+                upTo: reviewDisplayCutoff,
+                completedSince: NightlyReviewCompletionState.shared.lastClosedReviewDay
+            )
+        }
         if next == .today {
             // Two-Minute-Tasks-step taps are visual-only — commit them
             // here, on the way out, so Today Review (which now runs right
@@ -502,25 +606,11 @@ struct NightlyReviewView: View {
                 ScheduleDirtyState.shared.isDirty = true
             }
             stagedTwoMinuteToggleIDs = []
-            // Frozen exactly once, on entry — see `frozenTodayHabitOccurrences`'s
-            // own doc comment for why this can't just be re-derived live on
-            // every render the way it used to be. Deliberately
-            // `allHabitOccurrencesForReview` (every status), not
-            // `openHabitOccurrencesForReview` (`.none` only, what the sweep
-            // acts on) — freezing the *filtered* call's result would mean
-            // a habit already resolved before the step opened never
-            // entered the frozen set in the first place, the exact gap
-            // this exists to close. See both functions' own doc comments
-            // for the display/operational split.
-            frozenTodayHabitOccurrences = ScheduleReviewViewModel.allHabitOccurrencesForReview(
-                habits: allHabits,
-                context: modelContext,
-                upTo: reviewDisplayCutoff,
-                completedSince: NightlyReviewCompletionState.shared.lastClosedReviewDay
-            )
             // Same freeze, same reasoning, for AM/Midday/PM recurring
             // tasks — see `frozenTodayRecurringTaskOccurrences`'s own doc
-            // comment.
+            // comment. Recurring tasks still gate/display in `.today`
+            // itself, so this stays here (unlike the habit freeze above,
+            // which moved to `.habits`).
             frozenTodayRecurringTaskOccurrences = ScheduleReviewViewModel.allRecurringTaskOccurrencesForReview(
                 tasks: allTasks,
                 context: modelContext,
@@ -953,6 +1043,108 @@ struct NightlyReviewView: View {
         }
     }
 
+    // MARK: - Step 1: Habits (mirrors HabitsView's Today page)
+
+    /// One row `habitsStep` renders — a single habit, grouped with every
+    /// other occurrence of it landing on the same `day`, so a habit with
+    /// `timesPerDay > 1` still shows as one row with N circles (mirroring
+    /// `HabitsTodayDayList`'s own per-habit row shape) rather than one row
+    /// per occurrence the way `OverdueBlocksReviewList`'s flattened list
+    /// does.
+    private struct HabitsStepRow: Identifiable {
+        let habit: Habit
+        var id: UUID { habit.id }
+        let occurrences: [HabitReviewOccurrence]
+    }
+
+    /// One day section `habitsStep` renders — plural because backlog
+    /// (an occurrence from a day before `reviewDate` still open) can put
+    /// more than one day on screen at once, same as `OverdueBlocksReviewList
+    /// .groupedByDay` already does for the merged Today list.
+    private struct HabitsStepDayGroup: Identifiable {
+        let day: Date
+        var id: Date { day }
+        let rows: [HabitsStepRow]
+    }
+
+    /// Groups `openHabitOccurrencesForReview` (this view's frozen-identity/
+    /// live-status wrapper — unchanged by this step's move, see
+    /// `frozenTodayHabitOccurrences`'s own doc comment) first by day, then
+    /// by habit within each day, sorting habit rows by `Habit.todayOrderKey`
+    /// — the same fixed ordering (frequency, then occurrence-0 time of
+    /// day, then a stable tiebreak) `HabitsTodayDayList.sortedHabits`
+    /// already uses, so a habit's position here matches where it'd sit on
+    /// the Habits tab for the same day.
+    private var groupedHabitOccurrencesForReview: [HabitsStepDayGroup] {
+        let calendar = Calendar.current
+        let byDay = Dictionary(grouping: openHabitOccurrencesForReview) { calendar.startOfDay(for: $0.targetTime) }
+        return byDay.map { day, occurrences in
+            let byHabit = Dictionary(grouping: occurrences) { $0.habit.id }
+            let rows = byHabit.values
+                .map { occs in HabitsStepRow(habit: occs[0].habit, occurrences: occs.sorted { $0.index < $1.index }) }
+                .sorted { $0.habit.todayOrderKey < $1.habit.todayOrderKey }
+            return HabitsStepDayGroup(day: day, rows: rows)
+        }.sorted { $0.day < $1.day }
+    }
+
+    private static let habitsStepDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE, MMM d"
+        return formatter
+    }()
+
+    private func habitsStepDayLabel(_ day: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(day) { return "Today" }
+        if calendar.isDateInYesterday(day) { return "Yesterday" }
+        return Self.habitsStepDayFormatter.string(from: day)
+    }
+
+    /// The dedicated Nightly Review step for habits — split out of the old
+    /// combined "Review Schedule" (`.today`) step so habits get their own
+    /// screen, placed right after Choose Day (see `Step`'s own doc comment
+    /// for why there and not literally first). Mirrors `HabitsTodayDayList`'s
+    /// presentation (habit name + one circle per occurrence, grouped by
+    /// habit, sorted by `todayOrderKey`) rather than reusing
+    /// `OverdueBlocksReviewList`'s flattened per-occurrence rows — that
+    /// list's whole shape (one row per occurrence, sorted by `sortTime`)
+    /// exists to interleave habits among calendar blocks/tasks/meals by
+    /// time, which doesn't apply here now that habits stand alone.
+    ///
+    /// No jump-to-first-unresolved affordance here, unlike `.today`'s
+    /// `jumpToFirstUnresolvedGateItem` — this list is grouped by day and
+    /// typically short (a handful of habits at most), so scrolling a
+    /// specific blocking row into view doesn't carry its weight the way it
+    /// does for `.today`'s much longer merged list. The "N habits still
+    /// unmarked" message alone (see `navBar`) is enough to say what's
+    /// blocking Next.
+    private var habitsStep: some View {
+        List {
+            if groupedHabitOccurrencesForReview.isEmpty {
+                Text("No habits to review.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(groupedHabitOccurrencesForReview) { group in
+                Section(habitsStepDayLabel(group.day)) {
+                    ForEach(group.rows) { row in
+                        HStack {
+                            Text(row.habit.name)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 8)
+                            HStack(spacing: 6) {
+                                ForEach(row.occurrences) { occurrence in
+                                    HabitOccurrenceCircleView(status: occurrence.status) {
+                                        cycleHabitReviewOccurrence(occurrence)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Step 2: Today
 
     /// Used only for *operational* decisions — actually marking something
@@ -1036,21 +1228,25 @@ struct NightlyReviewView: View {
         )
     }
 
-    /// Blocks, open habit occurrences, completed-with-no-block tasks, and
-    /// tonight's meal(s) mixed into one list, organized by time within
+    /// Blocks, recurring-task occurrences, completed-with-no-block tasks,
+    /// and tonight's meal(s) mixed into one list, organized by time within
     /// each day — see `ReviewItem`/`OverdueBlocksReviewList`. This is what
-    /// makes habits, tasks, and dinner land in the same order they
-    /// actually sit on the calendar, instead of dinner being hardcoded to
-    /// the top regardless of its own scheduled time — and, separately,
-    /// what pins a 2-Minute Task completion to the very front of its day
-    /// regardless of either: `isTwoMinuteTask` is checked against
-    /// `twoMinuteReviewTaskIDs` (this session's own snapshot from the
-    /// step just before this one) rather than the record's live task,
-    /// since nothing guarantees that task is still around by the time
-    /// this reads it.
+    /// makes tasks and dinner land in the same order they actually sit on
+    /// the calendar, instead of dinner being hardcoded to the top
+    /// regardless of its own scheduled time — and, separately, what pins a
+    /// 2-Minute Task completion to the very front of its day regardless of
+    /// either: `isTwoMinuteTask` is checked against `twoMinuteReviewTaskIDs`
+    /// (this session's own snapshot from the step just before this one)
+    /// rather than the record's live task, since nothing guarantees that
+    /// task is still around by the time this reads it.
+    ///
+    /// No longer includes habit occurrences — those moved to their own,
+    /// earlier `.habits` step (see `habitsStep`). `ReviewItem.habit` still
+    /// exists as an enum case and `OverdueBlocksReviewList` still renders
+    /// it (both are general-purpose, not owned outright by this step), it
+    /// just never gets produced from here anymore.
     private var reviewItems: [ReviewItem] {
         reviewableBlocks.map { .block($0) }
-            + openHabitOccurrencesForReview.map { .habit($0) }
             + openRecurringTaskOccurrencesForReview.map { .recurringTask($0) }
             + completedTasksWithNoBlock.map { record in
                 .completedTask(record, isTwoMinuteTask: twoMinuteReviewTaskIDs.contains(record.taskID))
@@ -1107,6 +1303,10 @@ struct NightlyReviewView: View {
             OverdueBlocksReviewList(items: reviewItems, onToggle: { item in
                 switch item {
                 case .habit(let occurrence):
+                    // Never actually reached — `reviewItems` no longer
+                    // produces `.habit` (habits moved to their own
+                    // `.habits` step, see `habitsStep`). Kept only so this
+                    // switch stays exhaustive over `ReviewItem`.
                     cycleHabitReviewOccurrence(occurrence)
                 case .recurringTask(let occurrence):
                     cycleRecurringTaskReviewOccurrence(occurrence)
@@ -1141,11 +1341,9 @@ struct NightlyReviewView: View {
     /// `.meal` reads/writes `stagedMealSelectionIDs` instead of
     /// `stagedTodayToggleIDs` — see `todayStep`'s own doc comment for why
     /// it needs its own separate staged set. `.habit` is never actually
-    /// consulted here — `OverdueBlocksReviewList.row(for:)` reads a habit
-    /// occurrence's own live `status` directly instead of going through
-    /// `isEffectivelyCompleted` at all, since it's never staged — kept
-    /// here only so this `switch` stays exhaustive, returning the same
-    /// thing the live value already would.
+    /// reached here at all now — `reviewItems` no longer produces it
+    /// (habits moved to their own `.habits` step) — kept only so this
+    /// `switch` stays exhaustive over `ReviewItem`.
     private func effectiveCompleted(for item: ReviewItem) -> Bool {
         switch item {
         case .block(let block):
@@ -2314,9 +2512,28 @@ struct TaskReviewCard: View {
         .buttonStyle(.plain)
     }
 
+    /// Only `.first`/`.last` for Day of Month (see
+    /// `RelativeRecurrenceScope.dayOfMonth`'s own doc comment for why any
+    /// other day-of-month is deliberately left to Specific Date) — all
+    /// five for Weekday of Month.
+    private var relativeRecurrenceOrdinalOptions: [RelativeRecurrenceOrdinal] {
+        task.relativeRecurrenceScope == .dayOfMonth ? [.first, .last] : RelativeRecurrenceOrdinal.allCases
+    }
+
     private var recurringSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             if task.isRecurring {
+                Picker("Recurrence Mode", selection: Binding(
+                    get: { task.recurrenceMode },
+                    set: { task.recurrenceMode = $0 }
+                )) {
+                    ForEach(RecurrenceMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.bottom, 2)
+
                 HStack(spacing: 8) {
                     Text("Every")
                         .font(.body)
@@ -2340,17 +2557,30 @@ struct TaskReviewCard: View {
                         }
                         .fixedSize()
 
-                        Picker("Repeat every", selection: Binding(
-                            get: { task.recurrenceUnit },
-                            set: { task.recurrenceUnit = $0 }
-                        )) {
-                            ForEach(RecurrenceUnit.allCases) { unit in
-                                Text(unit.label(for: task.recurrenceIntervalCount).capitalized).tag(unit)
+                        if task.recurrenceMode == .specificDate {
+                            Picker("Repeat every", selection: Binding(
+                                get: { task.recurrenceUnit },
+                                set: { task.recurrenceUnit = $0 }
+                            )) {
+                                ForEach(RecurrenceUnit.allCases) { unit in
+                                    Text(unit.label(for: task.recurrenceIntervalCount).capitalized).tag(unit)
+                                }
                             }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .fixedSize()
+                        } else {
+                            // Relative Date is always month-scoped — "the
+                            // first Saturday" only means something once a
+                            // month, so there's no unit to choose. `recurrenceUnit`
+                            // itself is never read by `hasRelativeDateOccurrence`
+                            // — retained untouched, just not shown, so
+                            // switching back to Specific Date sees whatever
+                            // was there before.
+                            Text(task.recurrenceIntervalCount == 1 ? "month" : "months")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.secondary)
                         }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
-                        .fixedSize()
                     } else {
                         // Starts unselected — `recurrenceIntervalCount`/
                         // `recurrenceUnit` already have real, storable
@@ -2364,6 +2594,83 @@ struct TaskReviewCard: View {
                         // opt in" shape the Duration wheel already uses.
                         notSelectedButton {
                             task.recurrenceIntervalPicked = true
+                        }
+                    }
+                }
+
+                // Relative Date's own pattern question — "the 1st"/"the
+                // last day" of the month, or "the first/second/third/
+                // fourth/last <weekday>." Starts unselected same as
+                // Every/Time (`TaskItem.relativeRecurrenceMissing`) —
+                // "Day of Month, First" is a real stored default, not
+                // evidence anyone chose it.
+                if task.recurrenceMode == .relativeDate {
+                    HStack {
+                        Text("Pattern")
+                        Spacer()
+                        if !task.relativeRecurrencePicked {
+                            notSelectedButton {
+                                task.relativeRecurrencePicked = true
+                            }
+                        }
+                    }
+
+                    if task.relativeRecurrencePicked {
+                        HStack {
+                            Text("Scope")
+                            Spacer()
+                            Picker("Scope", selection: Binding(
+                                get: { task.relativeRecurrenceScope },
+                                set: { newScope in
+                                    task.relativeRecurrenceScope = newScope
+                                    // Day of Month only ever offers
+                                    // First/Last — snap back to First so
+                                    // the picker never shows a selection
+                                    // that scope doesn't actually offer.
+                                    if newScope == .dayOfMonth, task.relativeRecurrenceOrdinal != .last {
+                                        task.relativeRecurrenceOrdinal = .first
+                                    }
+                                }
+                            )) {
+                                ForEach(RelativeRecurrenceScope.allCases) { scope in
+                                    Text(scope.label).tag(scope)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                        }
+
+                        HStack {
+                            Text(task.relativeRecurrenceScope == .dayOfMonth ? "Day" : "Position")
+                            Spacer()
+                            Picker("Position", selection: Binding(
+                                get: { task.relativeRecurrenceOrdinal },
+                                set: { task.relativeRecurrenceOrdinal = $0 }
+                            )) {
+                                ForEach(relativeRecurrenceOrdinalOptions) { ordinal in
+                                    Text(task.relativeRecurrenceScope == .dayOfMonth && ordinal == .first ? "1st" : ordinal.label)
+                                        .tag(ordinal)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                        }
+
+                        if task.relativeRecurrenceScope == .weekdayOfMonth {
+                            HStack {
+                                Text("Weekday")
+                                Spacer()
+                                Picker("Weekday", selection: Binding(
+                                    get: { task.relativeRecurrenceWeekday ?? 1 },
+                                    set: { task.relativeRecurrenceWeekday = $0 }
+                                )) {
+                                    ForEach(1...7, id: \.self) { weekday in
+                                        Text(Calendar.current.weekdaySymbols[weekday - 1]).tag(weekday)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .labelsHidden()
+                            }
                         }
                     }
                 }

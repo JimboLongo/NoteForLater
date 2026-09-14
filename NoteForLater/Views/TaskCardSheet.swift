@@ -147,6 +147,11 @@ struct TaskEditSnapshot: Equatable {
     let recurrenceTimeOfDayMinutes: Int?
     let recurrenceEndDate: Date?
     let isPushable: Bool
+    let recurrenceModeRaw: String
+    let relativeRecurrenceScopeRaw: String
+    let relativeRecurrenceOrdinalRaw: Int
+    let relativeRecurrenceWeekday: Int?
+    let relativeRecurrencePicked: Bool
     let startDate: Date?
     let startDatePicked: Bool
 
@@ -184,6 +189,11 @@ struct TaskEditSnapshot: Equatable {
         recurrenceTimeOfDayMinutes = task.recurrenceTimeOfDayMinutes
         recurrenceEndDate = task.recurrenceEndDate
         isPushable = task.isPushable
+        recurrenceModeRaw = task.recurrenceModeRaw
+        relativeRecurrenceScopeRaw = task.relativeRecurrenceScopeRaw
+        relativeRecurrenceOrdinalRaw = task.relativeRecurrenceOrdinalRaw
+        relativeRecurrenceWeekday = task.relativeRecurrenceWeekday
+        relativeRecurrencePicked = task.relativeRecurrencePicked
         startDate = task.startDate
         startDatePicked = task.startDatePicked
     }
@@ -219,6 +229,11 @@ struct TaskEditSnapshot: Equatable {
         task.recurrenceTimeOfDayMinutes = recurrenceTimeOfDayMinutes
         task.recurrenceEndDate = recurrenceEndDate
         task.isPushable = isPushable
+        task.recurrenceModeRaw = recurrenceModeRaw
+        task.relativeRecurrenceScopeRaw = relativeRecurrenceScopeRaw
+        task.relativeRecurrenceOrdinalRaw = relativeRecurrenceOrdinalRaw
+        task.relativeRecurrenceWeekday = relativeRecurrenceWeekday
+        task.relativeRecurrencePicked = relativeRecurrencePicked
         task.startDate = startDate
         task.startDatePicked = startDatePicked
         // A duration edit already live-resized any scheduled block behind

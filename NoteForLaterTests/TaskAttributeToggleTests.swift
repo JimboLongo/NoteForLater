@@ -458,4 +458,44 @@ final class TaskAttributeToggleTests: XCTestCase {
         XCTAssertTrue(task.dueDateDecided)
         XCTAssertTrue(task.dueDatePicked)
     }
+
+    // MARK: - Relative Date's "Pattern" question surfaces in attribute review
+
+    /// A fresh Relative Date recurring task must read as missing
+    /// "Pattern" — `relativeRecurrenceScope`/`.ordinal` start on real,
+    /// storable defaults ("Day of Month, First"), not evidence anyone
+    /// actually configured it.
+    func test_freshRelativeDateTask_surfacesPatternAsMissing() {
+        let shelf = Shelf(name: "Recurring Tasks")
+        shelf.isRecurringTasks = true
+        let task = TaskItem.makeForDirectCapture(title: "Water the garden", shelf: shelf)
+        task.recurrenceMode = .relativeDate
+
+        XCTAssertTrue(task.missingAttributeNames(consideringShelf: shelf).contains("Pattern"))
+    }
+
+    /// Once the pattern is actually touched, it must drop out of the
+    /// missing list.
+    func test_relativeDateTask_withPatternPicked_isNotMissing() {
+        let shelf = Shelf(name: "Recurring Tasks")
+        shelf.isRecurringTasks = true
+        let task = TaskItem.makeForDirectCapture(title: "Water the garden", shelf: shelf)
+        task.recurrenceMode = .relativeDate
+
+        task.relativeRecurrencePicked = true
+
+        XCTAssertFalse(task.missingAttributeNames(consideringShelf: shelf).contains("Pattern"))
+    }
+
+    /// A Specific Date recurring task is never asked this question at
+    /// all — "Pattern" must never appear for it, regardless of
+    /// `relativeRecurrencePicked`.
+    func test_specificDateTask_neverReportsPatternAsMissing() {
+        let shelf = Shelf(name: "Recurring Tasks")
+        shelf.isRecurringTasks = true
+        let task = TaskItem.makeForDirectCapture(title: "Water the garden", shelf: shelf)
+        XCTAssertEqual(task.recurrenceMode, .specificDate)
+
+        XCTAssertFalse(task.missingAttributeNames(consideringShelf: shelf).contains("Pattern"))
+    }
 }
