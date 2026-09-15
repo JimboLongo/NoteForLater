@@ -30,6 +30,51 @@ The next person converting any stored field to computed needs to do the
 rename-and-backfill *before* shipping the schema change, not discover the
 data loss after.
 
+Two more findings from getting that migration right, worth recording
+alongside it:
+
+- **Flag ordering, and why the per-row guard is a second line of defense,
+  not redundant with it.** The migration's own completion flag
+  (`UserDefaults` key `didMigrateBlocksAndMealsToThreeState.v1`) is set
+  **only after** `context.save()` returns successfully — never before.
+  Setting it first would be the worse failure mode: a crash mid-backfill
+  would permanently disable the retry the migration needs, leaving the
+  store half-migrated forever with nothing left to notice or fix it.
+  Setting it only after success means an interrupted run just re-runs next
+  launch instead. But `UserDefaults` and the SwiftData store are two
+  *separate* stores — a crash in the narrow window after `save()` succeeds
+  but before that flag durably persists would leave the flag unset despite
+  the data already being correctly migrated, and a naive retry would
+  re-derive every row from scratch, capable of silently reclassifying one
+  that had been touched since (including by the user, interactively).
+  The fix was a **second** guard at the row level —
+  `hasMigratedThreeState: Bool`, checked before deriving and set in the
+  *same* `context.save()` call as the `status` write it guards, so the two
+  can never land out of sync the way the data store and `UserDefaults` can.
+  The outer flag stays as a fast-path early exit for the common case; the
+  per-row flag is what actually guarantees a second pass is a true no-op.
+  Verified fail-then-pass, not just asserted: with the row-level guard
+  removed, a simulated second pass measurably stomped a `.complete` row
+  back to `.missed`.
+- **Test-methodology trap: a function that opens its own `ModelContext`
+  makes a test's held object references go stale after it saves.**
+  `migrateIncompleteBlocksAndMealsToThreeStateIfNeeded(container:)` builds
+  its own `ModelContext(container)` rather than taking one — same
+  container, but a *different* context than whatever a test (or another
+  caller) already holds objects from. Mutating and saving through the
+  function's context does not update the properties on a `TaskItem`/
+  `ScheduledBlock` a test already has a reference to; that reference stays
+  frozen at its pre-call values with no error or warning. A first version
+  of the idempotence test above read those stale references straight after
+  calling the migration and asserted against values that had never
+  updated — passing or failing for the wrong reason regardless of what the
+  migration actually did, silently measuring nothing. Fixed by re-fetching
+  by `id` from the test's own context after each call, matching how any
+  real second reader (another launch, another view) would see fresh state
+  too. The general rule: after calling anything that constructs its own
+  `ModelContext` internally, re-fetch before asserting — never trust an
+  object reference held from before the call.
+
 ---
 
 ## Shipped this session
