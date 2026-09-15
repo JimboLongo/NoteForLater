@@ -54,16 +54,6 @@ struct NightlyReviewView: View {
     /// checking a task off leaves it in the list, strikethrough, instead of
     /// yanking it out from under the user mid-review.
     @State private var twoMinuteReviewTaskIDs: Set<UUID> = []
-    /// Taps during the Today step are visual-only — this is what actually
-    /// makes them reversible before Next. Keyed by `ReviewItem.id` (already
-    /// unifies a block's and a habit occurrence's id into one String), so
-    /// one set stages both kinds. Membership means "flip the real model
-    /// once when Next commits" — see `advance()`'s `next == .inbox` branch,
-    /// which replays this set against `reviewItems` and clears it
-    /// afterward. Reset whenever a different day gets picked, same as
-    /// `twoMinuteReviewTaskIDs`, since a stale entry from another day's
-    /// `reviewItems` would never match anything real here anyway.
-    @State private var stagedTodayToggleIDs = Set<String>()
     /// Which habit occurrences the Today step is reviewing, frozen the
     /// moment the step is entered (`runEntryEffects(for: .today)`) rather
     /// than re-derived on every render. Sourced from `ScheduleReviewViewModel
@@ -73,8 +63,9 @@ struct NightlyReviewView: View {
     /// before the step ever opened is part of the frozen set too, not just
     /// the ones still open. Habit rows cycle through the full four-state
     /// sequence via `Habit.cycleOccurrence` (see `cycleHabitReviewOccurrence`),
-    /// writing immediately rather than staging like `stagedTodayToggleIDs`
-    /// — the moment a row advances past `.none`, the operational list's
+    /// writing immediately — every row on this step does now (see
+    /// `cycleBlockCompletion`/`mealCircleTapped` for the block/meal
+    /// counterparts) — the moment a row advances past `.none`, the operational list's
     /// own `status == .none` filter would otherwise drop it, making the
     /// row vanish mid-cycle with no way to tap it back out. This is a
     /// **display-only** fix layered on top of that filter, not a
@@ -122,17 +113,6 @@ struct NightlyReviewView: View {
     /// scroll (see `OverdueBlocksReviewList.scrollTarget`), so no reset
     /// needed elsewhere.
     @State private var scrollToReviewItemID: String? = nil
-    /// Same idea as `stagedTodayToggleIDs`, for the 2-Minute Tasks step —
-    /// committed in `advance()`'s `next == .today` branch instead (that
-    /// step now runs *before* Today Review, not after it).
-    @State private var stagedTwoMinuteToggleIDs = Set<UUID>()
-    /// Same staging pattern again, for the `MealSelection` rows on the
-    /// Today step — a set, not a single flag, since `todayMealSelections`
-    /// can surface more than one at once (a multi-day backlog, same as
-    /// `reviewableBlocks` already allows for ordinary blocks). Committed
-    /// in `advance()`'s `next == .inbox` branch, same trigger point as
-    /// the rest of Today's staged state.
-    @State private var stagedMealSelectionIDs = Set<UUID>()
     /// Drives the Plan step's Replace-Task sheet — same
     /// `ReplacementPickerSheet` the regular calendar view uses (see
     /// `ScheduleReviewView`).
@@ -404,11 +384,11 @@ struct NightlyReviewView: View {
         .background(.bar)
     }
 
-    /// **The Today-step Next gate — recurring tasks only.** Habits used to
-    /// gate this same step alongside recurring tasks; they now gate their
-    /// own, earlier `.habits` step instead (see
-    /// `unresolvedHabitOccurrencesForGate`), so this is scoped to exactly
-    /// one category, not two. Built by filtering `reviewItems` itself (the
+    /// **The Today-step Next gate — every task block, meal, and recurring
+    /// task occurrence.** Habits used to gate this same step alongside
+    /// recurring tasks; they now gate their own, earlier `.habits` step
+    /// instead (see `unresolvedHabitOccurrencesForGate`), so this is
+    /// scoped to non-habit rows only. Built by filtering `reviewItems` itself (the
     /// same merged, sorted list the step renders — `reviewItems` no longer
     /// contains any `.habit` case at all, so the `.habit` branch below is
     /// unreachable in practice; kept only because `ReviewItem`'s switch
@@ -418,41 +398,34 @@ struct NightlyReviewView: View {
     /// on whichever blocking row actually appears first on screen — not a
     /// second, independently-ordered notion of "first."
     ///
-    /// Non-recurring blocks and meals are **not** part of this gate, and
-    /// must not be added to it later without re-litigating this: both
-    /// only ever expose a single `isCompleted` boolean with no
-    /// "explicitly decided not done" state distinct from "haven't looked
-    /// at it yet," and leaving one incomplete is the normal, expected
-    /// input the push-forward pipeline is built around — `advance()`
-    /// already pushes an incomplete non-recurring task forward
-    /// (`guaranteePlacement`) and an incomplete meal just sits in next
-    /// time's backlog by design (see `todayMealSelections`). Gating Next
-    /// on those being "resolved" would block the review on any ordinary
-    /// night with leftover work, with no way to explicitly clear it short
-    /// of falsely marking it complete — a permanently uncompletable
-    /// review, which is worse than the missed-row problem this gate
-    /// exists to solve.
+    /// **REVERSAL:** non-recurring blocks and meals used to be excluded
+    /// here on purpose — the old reasoning (kept below, struck through in
+    /// spirit rather than deleted, since the "why not" is worth keeping
+    /// as history) was that both only ever exposed a single `isCompleted`
+    /// boolean with no "explicitly decided not done" state distinct from
+    /// "haven't looked at it yet," so gating on them would trap the
+    /// review on any ordinary night with leftover work. That's no longer
+    /// true: `ScheduledBlock`/`MealSelection` now carry the same
+    /// three-state `status` a recurring task's occurrence does, and
+    /// `.missed` is exactly the "explicitly decided not done, resolved"
+    /// state that used to be missing — leaving something at `.none`
+    /// (never looked at) is the only thing this gate ever blocks on, the
+    /// same as it always has for recurring tasks. Cycling to `.missed`
+    /// (not just `.complete`) fully satisfies the gate; nothing forces a
+    /// false "complete."
     ///
     /// A recurring task cycles through a bounded set of genuine terminal
     /// states (`TaskItem.cycleRecurringOccurrence`'s three) in a bounded
     /// number of taps, and `.none` is the one state that design treats as
     /// "not actually looked at yet," never as an accepted final state —
     /// see the missed sweep this gate makes largely redundant but does not
-    /// replace, `pushMissedRecurringOccurrences`. A recurring task's
-    /// Specific-Time occurrence is included here even though it renders as
-    /// `.block` — `task.isRecurring` is what tells it apart from an
-    /// ordinary, deliberately-ungated block.
+    /// replace, `pushMissedRecurringOccurrences`/`resolveMissedPastBlocks`.
+    /// The same is now true for an ordinary block or meal: `.none` is the
+    /// only unresolved state, `.missed` is a real terminal answer, and
+    /// `resolveMissedPastBlocks` is the redundant safety net for it, not
+    /// this gate's reason to exclude it.
     private var unresolvedGateReviewItems: [ReviewItem] {
-        reviewItems.filter { item in
-            switch item {
-            case .habit: return false // unreachable — see this property's own doc comment
-            case .recurringTask(let occurrence): return occurrence.status == .none
-            case .block(let block):
-                guard let task = block.task, task.isRecurring, task.recurrenceTimeMode == .specific else { return false }
-                return ScheduleReviewViewModel.recurringTaskOccurrenceStatus(task: task, on: block.date, context: modelContext) == .none
-            case .completedTask, .meal: return false
-            }
-        }
+        reviewItems.filter { $0.blocksGate(context: modelContext) }
     }
 
     private var todayUnresolvedGateMessage: String {
@@ -595,17 +568,6 @@ struct NightlyReviewView: View {
             )
         }
         if next == .today {
-            // Two-Minute-Tasks-step taps are visual-only — commit them
-            // here, on the way out, so Today Review (which now runs right
-            // after, not three steps later) can show them as already
-            // completed. Moved here from the old twoMinuteTasks->tomorrow
-            // transition now that Two-Minute Tasks runs *before* Today
-            // Review instead of after it.
-            for task in twoMinuteReviewTasks where stagedTwoMinuteToggleIDs.contains(task.id) {
-                task.setCompleted(!task.isCompleted, in: modelContext)
-                ScheduleDirtyState.shared.isDirty = true
-            }
-            stagedTwoMinuteToggleIDs = []
             // Same freeze, same reasoning, for AM/Midday/PM recurring
             // tasks — see `frozenTodayRecurringTaskOccurrences`'s own doc
             // comment. Recurring tasks still gate/display in `.today`
@@ -637,64 +599,22 @@ struct NightlyReviewView: View {
             let completedTaskIDs = Set(completedRecords.map(\.taskID))
             let recentlyCompleted = (twoMinuteShelf?.tasks ?? []).filter { completedTaskIDs.contains($0.id) }
             twoMinuteReviewTaskIDs = Set(pending.map(\.id) + recentlyCompleted.map(\.id))
-            stagedTwoMinuteToggleIDs = []
         }
         if next == .inbox {
             startAttributeReviewSession()
         }
         if next == .inbox, let todayViewModel, let tomorrowViewModel {
-            // Today-step taps are visual-only (see `stagedTodayToggleIDs`)
-            // until right here — replay every staged toggle against the
-            // still-real, still-unwritten model, then clear the set. Must
-            // run before `reviewedBlocks` is captured just below, since
-            // that split (and the missed-habit sweep after it) both read
-            // real completion state.
-            for item in reviewItems where stagedTodayToggleIDs.contains(item.id) {
-                switch item {
-                case .block(let block):
-                    todayViewModel.toggleComplete(block)
-                case .habit:
-                    // Never actually reached — a `.habit` tap writes
-                    // immediately via `cycleHabitReviewOccurrence`
-                    // (see `todayStep`), so its id never lands in
-                    // `stagedTodayToggleIDs` for this loop's own `where`
-                    // clause to match.
-                    break
-                case .recurringTask:
-                    // Never actually reached — same reasoning as `.habit`:
-                    // a `.recurringTask` tap writes immediately via
-                    // `cycleRecurringTaskReviewOccurrence`.
-                    break
-                case .completedTask:
-                    break
-                case .meal:
-                    // Never actually reached — a `.meal` tap stages into
-                    // `stagedMealSelectionIDs`, not `stagedTodayToggleIDs`
-                    // (see `todayStep`), so this loop's own `where`
-                    // clause never matches one. Committed separately,
-                    // right below, since that commit also needs to
-                    // trigger pantry deduction — something neither a
-                    // block nor a habit occurrence ever does.
-                    break
-                }
-            }
-            stagedTodayToggleIDs = []
-            // Every meal shown this step (tonight's, plus any earlier
-            // unresolved backlog — see `todayMealSelections`) that got
-            // staged, committed the same visual-only way as everything
-            // else on this step. Committing `true` is the trigger for
-            // pantry deduction: resolve the live `Recipe` by `recipeID`
-            // (may have been edited/deleted since selection — if so, this
-            // silently does nothing, consistent with this feature's whole
-            // "no warnings" policy) and hand it to `PantryDeductionService`
-            // along with the Kitchen shelf's current pantry items.
-            for selection in todayMealSelections where stagedMealSelectionIDs.contains(selection.id) {
-                selection.isCompleted.toggle()
-                if selection.isCompleted, let recipe = allRecipes.first(where: { $0.id == selection.recipeID }) {
-                    PantryDeductionService.deduct(recipe: recipe, pantryItems: kitchenPantryItems)
-                }
-            }
-            stagedMealSelectionIDs = []
+            // REVERSAL/redesign: `.block`/`.meal` taps used to stage into
+            // `stagedTodayToggleIDs`/`stagedMealSelectionIDs` and only
+            // write here, on commit. They write immediately now, exactly
+            // like `.habit`/`.recurringTask` already did — a three-state
+            // cycle needs to know which of the three states a row is
+            // *actually* in right now to decide what the next tap
+            // produces, which a staged pending-flip can't represent for
+            // more than two (see `cycleBlockCompletion`/
+            // `mealCircleTapped`, both called directly from `todayStep`).
+            // Nothing left to replay here.
+            //
             // §7.2: this whole batch runs "on Next from the Today step,"
             // i.e. right here on the today→inbox transition, not deferred
             // all the way to the tomorrow handoff below. Freeze exactly
@@ -706,7 +626,6 @@ struct NightlyReviewView: View {
             let reviewedBlocks = reviewableBlocks
             let frozenCutoff = reviewCutoff
             let frozenAllBlocks = allBlocks
-            let frozenReviewDate = reviewDate
             for block in reviewedBlocks {
                 block.task?.isNightlyReviewed = true
             }
@@ -718,13 +637,15 @@ struct NightlyReviewView: View {
             let recurringCompletedTasks = reviewedBlocks.filter(\.isCompleted).compactMap(\.task).filter(\.isRecurring)
             let incompleteTasks = reviewedBlocks.filter { !$0.isCompleted }.compactMap(\.task)
 
-            // A recurring task's own incomplete block is about to be
-            // deleted outright by `clearIncompletePastBlocks` below, same
-            // as any other stale block, with nothing else stepping in to
-            // replace it — captured here, before that happens, so there's
-            // something to push forward instead of the occurrence just
-            // silently vanishing until its next real recurrence day. Also
-            // covers AM/Midday/PM recurring tasks, which never have a
+            // A recurring task's own missed block just sits there now
+            // (nothing deletes it — see `resolveMissedPastBlocks`'s own
+            // doc comment), but still needs something to actually push
+            // the occurrence forward — that's this call, not
+            // `resolveMissedPastBlocks`, which explicitly excludes a
+            // recurring task's own block (`task?.isRecurring != true`)
+            // since its next placement is this mechanism's job, not
+            // `guaranteePlacement`'s. Also covers AM/Midday/PM recurring
+            // tasks, which never have a
             // block for the state above to capture in the first place (see
             // `ScheduleReviewViewModel.pushMissedRecurringOccurrences`'s own
             // doc comment). Skips any task that's already being pushed (an
@@ -761,33 +682,17 @@ struct NightlyReviewView: View {
             immediatelyPushedRecurringOccurrenceIDs = []
             let allFreshRecurringTaskPushes = freshlyPushedRecurringOccurrences + tapPushedRecurringOccurrences
 
-            // A non-recurring task's own incomplete block is about to be
-            // deleted outright by `clearIncompletePastBlocks` below too —
-            // captured here, before it's gone, so `guaranteePlacement`
-            // in the Task below has the original day/time/duration to
-            // rebuild from. Without this, an incomplete task was merely
-            // freed up to maybe get picked up by a future general
-            // regenerate walk — which is exactly how a task with room
-            // genuinely free in its own eligible window could still just
-            // never actually land (see `RippleSchedulingService`'s own
-            // doc comment for the concrete "Stirfry recipes" bug this
-            // fixes).
-            let missedNonRecurringPlacements = reviewedBlocks.compactMap { block -> (task: TaskItem, date: Date, startTime: Date, durationMinutes: Int)? in
-                guard !block.isCompleted, let task = block.task, !task.isRecurring else { return nil }
-                return (task, block.date, block.startTime, block.durationMinutes)
-            }
-
             // Any habit occurrence the Today review showed but never got
             // checked off — timed or not — is done being reviewable the
             // moment Today is left behind, so it's marked missed right
             // here, synchronously, before any of the async cleanup below.
-            // Deliberately not folded into `clearIncompletePastBlocks`
+            // Deliberately not folded into `resolveMissedPastBlocks`
             // itself (used here too, just below): a passed-but-undone
             // habit should still get a fresh shot later *today* during an
             // ordinary intra-day Regenerate, not be written off — only
             // Nightly Review's own end-of-day handoff means "no more
             // chances left." (Correcting a stale claim this comment used
-            // to make: `clearIncompletePastBlocks` does *not* currently
+            // to make: `resolveMissedPastBlocks` does *not* currently
             // have another caller from any Regenerate flow — grepped while
             // verifying `reviewCutoff`'s widened-cutoff change was safe,
             // confirmed exactly one call site, right below. The design
@@ -813,30 +718,32 @@ struct NightlyReviewView: View {
                 // instead.
                 await tomorrowViewModel.purgeCompletedBlocks()
                 tomorrowViewModel.purgeCompletedMealSelections()
-                tomorrowViewModel.resolveIncompleteMealSelections(reviewDate: frozenReviewDate)
+                // REVERSAL: `resolveIncompleteMealSelections` (deleted an
+                // incomplete-and-past meal outright) is gone — with meals
+                // now covered by the Today gate (see
+                // `unresolvedGateReviewItems`), nothing can reach this
+                // point still `.none`; every meal `reviewedBlocks`/
+                // `todayMealSelections` showed was already interactively
+                // resolved to `.complete` or `.missed` before Next was
+                // even enabled. Nothing left here to sweep.
                 for task in recurringCompletedTasks {
                     task.isNightlyReviewed = false
                 }
-                // Incomplete → unscheduled from its stale block so it's a
-                // real candidate again, restoring `remainingMinutes`, then
-                // un-stamped so it re-enters tomorrow's plan as an
-                // ordinary task rather than staying marked as still
-                // "mid-review." Uses the frozen cutoff/blocks captured
-                // above, not a live re-read, for the same reason the
-                // stamping itself happened synchronously before this Task
-                // even started.
-                await todayViewModel.clearIncompletePastBlocks(allBlocks: frozenAllBlocks, cutoff: frozenCutoff)
+                // REVERSAL: nothing is deleted from the calendar for a
+                // missed block anymore (see `resolveMissedPastBlocks`'s
+                // own doc comment) — the interactive cycle
+                // (`ScheduleReviewViewModel.cycleBlockCompletion`) already
+                // guaranteed a fresh placement the moment each one was
+                // tapped to `.missed`, immediately, the same way a
+                // recurring task's own miss already pushes immediately
+                // (`pushIfMissed`). This call is the same redundant,
+                // guarded safety net `pushMissedRecurringOccurrences` is
+                // for recurring tasks — it only actually does anything for
+                // a block that never went through the interactive cycle
+                // at all (the one-time migration backfill).
+                tomorrowViewModel.resolveMissedPastBlocks(allBlocks: frozenAllBlocks)
                 for task in incompleteTasks {
                     task.isNightlyReviewed = false
-                }
-                // Guaranteed placement, not left to `regenerateFromNow`
-                // below to maybe find room — sets `task.isScheduled =
-                // true` on each one, so the general walk's own
-                // `!$0.isScheduled` filter (`AISchedulingService.swift`)
-                // naturally leaves them alone rather than fighting over
-                // the same slot this just claimed.
-                for placement in missedNonRecurringPlacements {
-                    tomorrowViewModel.guaranteePlacement(for: placement.task, missedDate: placement.date, missedStartTime: placement.startTime, durationMinutes: placement.durationMinutes)
                 }
                 // Same guarantee as `guaranteePlacement` above, for a
                 // recurring miss: rather than leaving the record it just
@@ -865,7 +772,7 @@ struct NightlyReviewView: View {
                 // never touched by any of this — but a locked *past*
                 // incomplete block already was, eleven lines up: §7.3
                 // deliberately strips lock protection once a block's own
-                // day is over (see `clearIncompletePastBlocks`).
+                // day is over (see `resolveMissedPastBlocks`).
                 let completedFully = await tomorrowViewModel.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
                 if completedFully {
                     ScheduleDirtyState.shared.isDirty = false
@@ -1027,8 +934,6 @@ struct NightlyReviewView: View {
             }
         }
         .onChange(of: reviewDate) { _, _ in
-            stagedTodayToggleIDs = []
-            stagedMealSelectionIDs = []
             frozenTodayHabitOccurrences = []
             frozenTodayRecurringTaskOccurrences = []
         }
@@ -1197,7 +1102,7 @@ struct NightlyReviewView: View {
     ///
     /// Shared by `markUnresolvedHabitOccurrencesAsMissed`,
     /// `advance()` (what gets frozen as `frozenCutoff`, for both
-    /// `clearIncompletePastBlocks` and `pushMissedRecurringOccurrences` —
+    /// `resolveMissedPastBlocks` and `pushMissedRecurringOccurrences` —
     /// the latter not originally called out when this cutoff was widened,
     /// found by grepping every reader rather than trusting the two
     /// already-known ones). Widening is correct for all three: each one
@@ -1305,20 +1210,20 @@ struct NightlyReviewView: View {
         )
     }
 
-    /// A tap on a `.block`/`.meal` item only flips membership in
-    /// `stagedTodayToggleIDs`/`stagedMealSelectionIDs` — no model write
-    /// happens until `advance()` commits the batch on Next (§ requirement
-    /// that Today-step taps be visual-only and reversible).
-    /// `effectiveCompleted` is what lets those rows render that pending
-    /// state without touching the underlying model directly. A `.habit`
-    /// tap is different: it writes immediately, via `Habit.cycleOccurrence`
-    /// (see `cycleHabitReviewOccurrence`) — there's no staged "pending
-    /// flip" for a four-state cycle to represent, since the next tap's
-    /// result depends on knowing which of the four states the row is
-    /// *actually* in right now.
+    /// Every row on this step writes immediately now — `.block`/`.meal`
+    /// included, same as `.habit`/`.recurringTask` already did. A
+    /// three-state cycle needs to know which of the three states a row
+    /// is *actually* in right now to decide what the next tap produces,
+    /// which a staged "pending flip" can never represent for more than
+    /// two — the reversibility a staged commit used to give Today-step
+    /// taps doesn't apply to a cycle at all: tapping again already *is*
+    /// how you reverse it, same as `.habit`/`.recurringTask` always
+    /// worked. No `isEffectivelyCompleted` override needed anymore either
+    /// — every row now reads its own live status directly (`OverdueBlocksReviewList`'s
+    /// default when that closure is omitted).
     @ViewBuilder
     private var todayStep: some View {
-        if todayViewModel != nil {
+        if let todayViewModel {
             OverdueBlocksReviewList(items: reviewItems, onToggle: { item in
                 switch item {
                 case .habit(let occurrence):
@@ -1330,51 +1235,37 @@ struct NightlyReviewView: View {
                 case .recurringTask(let occurrence):
                     cycleRecurringTaskReviewOccurrence(occurrence)
                 case .meal(let selection, _):
-                    if stagedMealSelectionIDs.contains(selection.id) {
-                        stagedMealSelectionIDs.remove(selection.id)
-                    } else {
-                        stagedMealSelectionIDs.insert(selection.id)
-                    }
+                    mealCircleTapped(selection, viewModel: todayViewModel)
                 case .block(let block) where block.task?.isRecurring == true:
-                    // A recurring task's Specific-Time block goes through
-                    // the same immediate 3-state cycle as `.recurringTask`
-                    // above — it's never staged, same reasoning as
-                    // `.habit`/`.recurringTask`: the next tap's result
-                    // depends on the block's *actual* current status, which
-                    // a staged pending-flip can't represent for more than
-                    // two states.
                     cycleRecurringTaskReviewOccurrence(block: block)
-                case .block, .completedTask:
-                    if stagedTodayToggleIDs.contains(item.id) {
-                        stagedTodayToggleIDs.remove(item.id)
-                    } else {
-                        stagedTodayToggleIDs.insert(item.id)
-                    }
+                case .block(let block):
+                    todayViewModel.cycleBlockCompletion(block)
+                case .completedTask:
+                    // Never actually reached — `completedTaskRow` has no
+                    // tap gesture at all (no live model to toggle back).
+                    break
                 }
-            }, isEffectivelyCompleted: effectiveCompleted, scrollTarget: $scrollToReviewItemID)
+            }, scrollTarget: $scrollToReviewItemID)
         } else {
             ProgressView()
         }
     }
 
-    /// `.meal` reads/writes `stagedMealSelectionIDs` instead of
-    /// `stagedTodayToggleIDs` — see `todayStep`'s own doc comment for why
-    /// it needs its own separate staged set. `.habit` is never actually
-    /// reached here at all now — `reviewItems` no longer produces it
-    /// (habits moved to their own `.habits` step) — kept only so this
-    /// `switch` stays exhaustive over `ReviewItem`.
-    private func effectiveCompleted(for item: ReviewItem) -> Bool {
-        switch item {
-        case .block(let block):
-            return stagedTodayToggleIDs.contains(item.id) ? !block.isCompleted : block.isCompleted
-        case .habit(let occurrence):
-            return occurrence.isCompleted
-        case .recurringTask(let occurrence):
-            return occurrence.status == .complete
-        case .completedTask:
-            return true
-        case .meal(let selection, _):
-            return stagedMealSelectionIDs.contains(selection.id) ? !selection.isCompleted : selection.isCompleted
+    /// The meal counterpart to `ScheduleReviewViewModel
+    /// .cycleBlockCompletion`, which the tap actually delegates to — that
+    /// function operates on a `ScheduledBlock`, mirroring onto whichever
+    /// `MealSelection` it's paired with, not the other way around, so a
+    /// tap here needs to find that block first. Falls back to cycling
+    /// `selection.status` directly (no pantry-deduction/mirror wiring) in
+    /// the one case that block's gone missing — shouldn't normally
+    /// happen (`MealSelection`'s own doc comment: always created
+    /// alongside its block), but a tap that silently did nothing would be
+    /// worse than one that at least updates the selection's own status.
+    private func mealCircleTapped(_ selection: MealSelection, viewModel: ScheduleReviewViewModel) {
+        if let block = allBlocks.first(where: { $0.mealSelection?.id == selection.id }) {
+            viewModel.cycleBlockCompletion(block)
+        } else {
+            selection.status = selection.status.cycledExcludingExcused
         }
     }
 
@@ -1616,10 +1507,6 @@ struct NightlyReviewView: View {
             .sorted { $0.createdAt < $1.createdAt }
     }
 
-    private func effectiveTwoMinuteCompleted(_ task: TaskItem) -> Bool {
-        stagedTwoMinuteToggleIDs.contains(task.id) ? !task.isCompleted : task.isCompleted
-    }
-
     @ViewBuilder
     private var twoMinuteTasksStep: some View {
         if twoMinuteShelf == nil {
@@ -1647,39 +1534,49 @@ struct NightlyReviewView: View {
         }
     }
 
-    /// A tap anywhere on the row only flips membership in
-    /// `stagedTwoMinuteToggleIDs` — the real `setCompleted` write (and the
-    /// dirty-flag set that used to sit right here) is deferred to
-    /// `advance()`'s `next == .tomorrow` branch, same visual-only-until-
-    /// Next rule as the Today step's own rows. `.contentShape(Rectangle())`
-    /// on the whole `HStack`, not just the circle, is what makes the title
-    /// text and the `Spacer()`'s blank space tappable too.
+    /// A tap anywhere on the row cycles `task.status` directly and
+    /// immediately (`TaskItem.cycleCompletion`) — no staging. Same reason
+    /// `.block`/`.meal` rows on the Today step went immediate-write too:
+    /// a three-state cycle needs to know which of the three states the
+    /// row is *actually* in right now to know what the next tap should
+    /// produce, which a staged "pending flip" can't represent for more
+    /// than two. `.contentShape(Rectangle())` on the whole `HStack`, not
+    /// just the circle, is what makes the title text and the `Spacer()`'s
+    /// blank space tappable too.
     private func twoMinuteTaskRow(_ task: TaskItem) -> some View {
-        let isCompleted = effectiveTwoMinuteCompleted(task)
-        return HStack(spacing: 12) {
-            twoMinuteSelectionCircle(isSelected: isCompleted)
+        HStack(spacing: 12) {
+            twoMinuteSelectionCircle(status: task.status)
             Text(task.title)
-                .strikethrough(isCompleted)
+                .strikethrough(task.status == .complete)
             Spacer()
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            if stagedTwoMinuteToggleIDs.contains(task.id) {
-                stagedTwoMinuteToggleIDs.remove(task.id)
-            } else {
-                stagedTwoMinuteToggleIDs.insert(task.id)
-            }
+            task.cycleCompletion(in: modelContext)
+            ScheduleDirtyState.shared.isDirty = true
         }
-        .opacity(isCompleted ? 0.5 : 1)
+        .opacity(task.status == .none ? 1 : 0.5)
     }
 
-    private func twoMinuteSelectionCircle(isSelected: Bool) -> some View {
-        ZStack {
+    /// Same three-state rendering `OverdueBlocksReviewList
+    /// .habitSelectionCircle` uses (green check / red X / empty) — no
+    /// `.excused` branch, since `OccurrenceStatus.cycledExcludingExcused`
+    /// (what `TaskItem.cycleCompletion` actually cycles through) never
+    /// produces it. Kept as its own small copy here rather than exposing
+    /// that `private` circle across files for one shared call.
+    private func twoMinuteSelectionCircle(status: OccurrenceStatus) -> some View {
+        let circleColor: Color = status == .complete ? .green : (status == .missed ? .red.opacity(0.55) : .clear)
+        let strokeColor: Color = status == .none ? .secondary.opacity(0.5) : circleColor
+        return ZStack {
             Circle()
-                .fill(isSelected ? Color.green : Color.clear)
-                .overlay(Circle().strokeBorder(isSelected ? Color.green : Color.secondary.opacity(0.5), lineWidth: 1.5))
-            if isSelected {
+                .fill(circleColor)
+                .overlay(Circle().strokeBorder(strokeColor, lineWidth: 1.5))
+            if status == .complete {
                 Image(systemName: "checkmark")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.white)
+            } else if status == .missed {
+                Image(systemName: "xmark")
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(.white)
             }
@@ -2043,9 +1940,14 @@ struct TaskReviewCard: View {
     /// instant (bright white scrim, oversized/invisible square), true is
     /// the settled state (scrim gone, square at rest). See `showToast`.
     @State private var toastVisible = false
-    @State private var isShowingDatePicker = false
-    @State private var isShowingStartDatePicker = false
     @State private var isShowingSnoozeWheel = false
+    /// The recurring card's own Specific-Time clock — styled like
+    /// `SettingsView`'s Daily Check-In rows (tap the row, a popover
+    /// opens) rather than an always-visible wheel. See
+    /// `timeExpandedContent`'s own doc comment for why this is a
+    /// popover around the existing `HourMinutePeriodPicker`, not a
+    /// native `DatePicker`.
+    @State private var isShowingRecurrenceTimeOfDayPopover = false
     @State private var snoozeDays = 1
     /// Whether each collapsed recurring-task row (`recurringSection`) is
     /// showing its real controls — everything starts collapsed each time
@@ -2061,6 +1963,11 @@ struct TaskReviewCard: View {
     /// state, not an unconfigured one — unlike the other three rows,
     /// "Ends" never auto-expands, so this always starts `false`.
     @State private var isEndsExpanded = false
+    /// Same collapsed-answer-row treatment, for the non-recurring card's
+    /// own "Due" and "Priority" rows — see `init`'s seeding and
+    /// `isDueConfigured`/`isPriorityConfigured`.
+    @State private var isDueExpanded: Bool
+    @State private var isPriorityExpanded: Bool
     /// Captured once this card's edits settle in after appearing (past any
     /// one-time backfill), so the action button can tell "nothing's been
     /// touched" (Skip) apart from "something's actually been edited" (Save
@@ -2105,14 +2012,22 @@ struct TaskReviewCard: View {
         return (options + [task.estimatedMinutes]).sorted()
     }
 
-    /// Whether "Repeats" (Mode + Every + Pattern) has enough answered to
-    /// show a real summary instead of "Not Selected" — reads
-    /// `missingAttributeNames` (the same canonical source
+    /// Whether "Repeats" (Every + "On the," for a monthly pattern) has
+    /// enough answered to show a real summary instead of "Not Selected" —
+    /// reads `missingAttributeNames` (the same canonical source
     /// `TaskItem.recurrenceIntervalMissing`/`.relativeRecurrenceMissing`
     /// back) rather than re-deriving the picked-flags by hand, so this
     /// can never drift from what the attribute review actually flags as
     /// missing. `static` (taking `task`/`shelf` explicitly) so `init` can
     /// call it before `self` exists, to seed `isRepeatsExpanded`.
+    ///
+    /// No longer gates "Pattern" on `task.recurrenceMode == .relativeDate`
+    /// — `relativeRecurrenceMissing` itself now gates on `recurrenceUnit
+    /// == .months` instead (see that function's own doc comment for why:
+    /// the combined "On the" row can resolve to *either* mode, so
+    /// `recurrenceMode` alone can no longer distinguish "never touched"
+    /// from "deliberately chose Same day"). Checking `missing` directly,
+    /// unconditionally, is what stays correct either way.
     ///
     /// `internal`, not `private` — loosened specifically so
     /// `RecurringTaskCardLayoutTests` can exercise the real predicate
@@ -2124,7 +2039,7 @@ struct TaskReviewCard: View {
     static func isRepeatsConfigured(task: TaskItem, shelf: Shelf?) -> Bool {
         let missing = task.missingAttributeNames(consideringShelf: shelf)
         if missing.contains("Every") { return false }
-        if task.recurrenceMode == .relativeDate, missing.contains("Pattern") { return false }
+        if missing.contains("Pattern") { return false }
         return true
     }
 
@@ -2147,6 +2062,198 @@ struct TaskReviewCard: View {
         if missing.contains("Duration") { return false }
         if !segmentOptions.isEmpty, missing.contains("Divisible") { return false }
         return true
+    }
+
+    /// Same reasoning as `isRepeatsConfigured`. `TaskItem.dueDateMissing`
+    /// already carries the undecided-vs-decided-as-none distinction this
+    /// exists to preserve: undecided (`!dueDateDecided`) or decided-yes-
+    /// but-not-yet-picked both count as missing, while decided-as-none
+    /// (`dueDateDecided && dueDate == nil`) does not — "None" is a real
+    /// answer, not an absence of one. Only ever true for a non-recurring
+    /// task (`dueDateMissing` excludes a recurring task outright, which
+    /// is asked Start Date instead), but takes no `isRecurring` branch of
+    /// its own — there's nothing left to special-case once the canonical
+    /// source already does.
+    static func isDueConfigured(task: TaskItem, shelf: Shelf?) -> Bool {
+        !task.missingAttributeNames(consideringShelf: shelf).contains("Due Date")
+    }
+
+    /// The non-recurring "Time" row's own configured-check — Duration
+    /// and Divisible only, no recurrence-mode question to fold in (a
+    /// non-recurring task has no AM/Midday/PM/Specific concept at all;
+    /// the scheduler places it into whatever eligible slot fits, not a
+    /// time the task states). Deliberately a separate function from
+    /// `isTimeConfigured` rather than a shared one with a branch: that
+    /// one's "Time" key and `recurrenceTimeMode` guard are recurring-only
+    /// concepts that don't apply here, and reusing it as-is would return
+    /// `true` unconditionally (since `missing` never contains "Time" for
+    /// a non-recurring task), masking a genuinely unanswered Duration.
+    ///
+    /// Same `segmentOptions`-gated treatment of "Divisible" as
+    /// `isTimeConfigured` — `TaskItem.divisibleMissing` has no guard of
+    /// its own for "Duration answered No" (only for an untimed recurring
+    /// occurrence), so a task that answered Duration "No" and never
+    /// separately touched Divisible would otherwise read as permanently
+    /// unconfigured despite Divisible being moot (nothing to split) and
+    /// its own control disabled. Ungated when there's a real, splittable
+    /// duration — Divisible genuinely needs an answer then, same as the
+    /// recurring row.
+    static func isDurationConfigured(task: TaskItem, shelf: Shelf?) -> Bool {
+        let missing = task.missingAttributeNames(consideringShelf: shelf)
+        if missing.contains("Duration") { return false }
+        let segmentOptions = TaskItem.validSegmentOptions(for: task.estimatedMinutes)
+        if !segmentOptions.isEmpty, missing.contains("Divisible") { return false }
+        return true
+    }
+
+    /// Same reasoning as `isRepeatsConfigured`. `TaskItem.priorityMissing`
+    /// already excludes a recurring task outright (High Priority isn't
+    /// offered to one at all), so this is only ever meaningfully false
+    /// for a non-recurring task on a shelf that tracks Priority.
+    static func isPriorityConfigured(task: TaskItem, shelf: Shelf?) -> Bool {
+        !task.missingAttributeNames(consideringShelf: shelf).contains("Priority")
+    }
+
+    // MARK: - Repeats section: select-and-mark-picked, one function per field
+
+    /// Every one of these pairs with a `PickedMenuPicker` call site in
+    /// `repeatsExpandedContent`/`timeExpandedContent` — see that type's
+    /// own doc comment for why the pairing exists at all (a `Button`
+    /// inside a `Menu` always runs its action, unlike `Picker(selection:)`,
+    /// so re-choosing the value already showing still marks it picked).
+    /// `internal`, not `private`, for the same direct-testability
+    /// reasoning as `isRepeatsConfigured`: each one is called directly by
+    /// a test with the option *already equal* to the task's current
+    /// value, asserting the "picked" flag flips anyway.
+    ///
+    /// Relative Date is only ever meaningful monthly (see
+    /// `RelativeRecurrenceScope`'s own doc comment) — switching the unit
+    /// away from `.months` always forces `recurrenceMode` back to
+    /// `.specificDate`, otherwise a task could be left in a genuinely
+    /// invalid combination (days/weeks paired with a relative-date
+    /// pattern) that `TaskItem.hasRecurringOccurrence` was never written
+    /// to dispatch on. Switching *to* `.months` touches nothing else —
+    /// whatever `recurrenceMode`/pattern was last set (or its stored
+    /// default) is left for the "On the" row to show/confirm.
+    static func selectRecurrenceUnit(_ unit: RecurrenceUnit, on task: TaskItem) {
+        task.recurrenceUnit = unit
+        if unit != .months {
+            task.recurrenceMode = .specificDate
+        }
+        task.recurrenceIntervalPicked = true
+    }
+
+    static func selectRecurrenceTimeMode(_ mode: HabitOccurrenceTimeMode, on task: TaskItem) {
+        task.recurrenceTimeMode = mode
+        task.recurrenceTimeModePicked = true
+    }
+
+    /// The "On the" row's own two-way choice — "Day of month" or
+    /// "Weekday of month." Both set `recurrenceMode = .relativeDate`
+    /// unconditionally: choosing *either* one here is choosing to use a
+    /// relative pattern at all, before the day-of-month branch's own
+    /// `DayOfMonthPosition` sub-choice (see below) decides whether that
+    /// holds — its "Same day" option quietly flips `recurrenceMode` back
+    /// to `.specificDate`, reusing the existing Specific Date evaluator
+    /// for "recur on the same day-of-month as the anchor" rather than
+    /// teaching the Relative Date evaluator a new case for it (per this
+    /// change's own scope: the evaluator branches stay exactly as they
+    /// are, only how the user selects between them changes).
+    static func selectMonthlyScope(_ scope: RelativeRecurrenceScope, on task: TaskItem) {
+        task.relativeRecurrenceScope = scope
+        task.recurrenceMode = .relativeDate
+        task.relativeRecurrencePicked = true
+    }
+
+    /// The day-of-month branch's own three-way choice, replacing what
+    /// used to be a plain First/Last `RelativeRecurrenceOrdinal` picker.
+    /// "Same day" is the one genuinely new pattern this whole redesign
+    /// adds — "recur on the same day of the month as the anchor," which
+    /// was already fully expressible before (as Specific Date, monthly),
+    /// just not reachable from what looked like the day-of-month
+    /// question. Deliberately its own small enum rather than stretching
+    /// `RelativeRecurrenceOrdinal` to cover it: that type's cases are
+    /// evaluator inputs for the Relative Date branch specifically (see
+    /// its own doc comment on why it deliberately stops at `.fourth`/
+    /// `.last`), and "Same day" isn't a Relative Date pattern at all — it
+    /// dispatches to the *other* evaluator branch entirely.
+    enum DayOfMonthPosition: CaseIterable, Hashable {
+        case first, last, sameAsAnchor
+
+        var label: String {
+            switch self {
+            case .first: return "First day"
+            case .last: return "Last day"
+            case .sameAsAnchor: return "Same day"
+            }
+        }
+    }
+
+    /// Derives the day-of-month branch's current choice by reading
+    /// `recurrenceMode`/`relativeRecurrenceOrdinal` back — `.specificDate`
+    /// (any reason, including "never touched") reads as "Same day," which
+    /// is exactly its correct display value regardless of which of those
+    /// two the task is actually in, since "Same day" *is* what
+    /// `.specificDate` means here. `!relativeRecurrencePicked` (tracked
+    /// separately, see `TaskItem.relativeRecurrenceMissing`) is what
+    /// tells "never touched" apart from "deliberately Same day" for
+    /// missing-attribute purposes — this function only answers "what
+    /// should the picker show," not "has this been decided."
+    static func dayOfMonthPosition(for task: TaskItem) -> DayOfMonthPosition {
+        guard task.recurrenceMode == .relativeDate else { return .sameAsAnchor }
+        return task.relativeRecurrenceOrdinal == .last ? .last : .first
+    }
+
+    static func selectDayOfMonthPosition(_ position: DayOfMonthPosition, on task: TaskItem) {
+        switch position {
+        case .first:
+            task.recurrenceMode = .relativeDate
+            task.relativeRecurrenceOrdinal = .first
+        case .last:
+            task.recurrenceMode = .relativeDate
+            task.relativeRecurrenceOrdinal = .last
+        case .sameAsAnchor:
+            task.recurrenceMode = .specificDate
+        }
+        task.relativeRecurrencePicked = true
+    }
+
+    /// The weekday-of-month branch's own Position row (First/Second/
+    /// Third/Fourth/Last) — `recurrenceMode` is already `.relativeDate`
+    /// by the time this is reachable at all (set by `selectMonthlyScope`
+    /// when "Weekday of month" was chosen), so this only ever touches the
+    /// ordinal itself.
+    static func selectRelativeOrdinal(_ ordinal: RelativeRecurrenceOrdinal, on task: TaskItem) {
+        task.relativeRecurrenceOrdinal = ordinal
+        task.relativeRecurrencePicked = true
+    }
+
+    static func selectRelativeWeekday(_ weekday: Int, on task: TaskItem) {
+        task.relativeRecurrenceWeekday = weekday
+        task.relativeRecurrencePicked = true
+    }
+
+    /// Migration for existing rows created before this redesign — called
+    /// from `body`'s `.onAppear`, alongside the identically-shaped
+    /// backfills for `recurrenceIntervalPicked`/`recurrenceTimeModePicked`
+    /// there. `relativeRecurrenceMissing` now gates on `recurrenceUnit ==
+    /// .months` (see its own doc comment) rather than only `recurrenceMode
+    /// == .relativeDate`, so a pre-existing *Specific Date* monthly task
+    /// (the far more common, longstanding case — "Specific Date" predates
+    /// "Relative Date" entirely) would otherwise start reading "Pattern"
+    /// as missing the first time this ships, despite already being a
+    /// fully configured, actively scheduling task. `dueDate != nil` is
+    /// the same "this was genuinely configured, not just sitting on
+    /// defaults" signal the other two backfills already use.
+    ///
+    /// Pulled out as its own function (unlike the other two, still
+    /// inline) specifically so a test can exercise the migration without
+    /// hosting a live view — this is the one this whole redesign's
+    /// "existing rows of both modes still evaluate identically" test
+    /// needs to call directly.
+    static func backfillRelativeRecurrencePickedIfNeeded(_ task: TaskItem) {
+        guard task.isRecurring, task.dueDate != nil, task.recurrenceUnit == .months, !task.relativeRecurrencePicked else { return }
+        task.relativeRecurrencePicked = true
     }
 
     init(
@@ -2176,9 +2283,18 @@ struct TaskReviewCard: View {
         // would evaluate to here anyway.
         _isRepeatsExpanded = State(initialValue: !Self.isRepeatsConfigured(task: task, shelf: task.shelf))
         _isStartsExpanded = State(initialValue: !Self.isStartsConfigured(task: task, shelf: task.shelf))
-        _isTimeExpanded = State(initialValue: !Self.isTimeConfigured(
-            task: task, shelf: task.shelf, segmentOptions: TaskItem.validSegmentOptions(for: task.estimatedMinutes)
-        ))
+        // "Time" means two different questions depending on `isRecurring`
+        // (see `isTimeConfigured` vs. `isDurationConfigured`'s own doc
+        // comments) — same shared row, same shared `@State`, since the
+        // two flavors are mutually exclusive for any one task.
+        _isTimeExpanded = State(initialValue: task.isRecurring
+            ? !Self.isTimeConfigured(
+                task: task, shelf: task.shelf, segmentOptions: TaskItem.validSegmentOptions(for: task.estimatedMinutes)
+            )
+            : !Self.isDurationConfigured(task: task, shelf: task.shelf)
+        )
+        _isDueExpanded = State(initialValue: !Self.isDueConfigured(task: task, shelf: task.shelf))
+        _isPriorityExpanded = State(initialValue: !Self.isPriorityConfigured(task: task, shelf: task.shelf))
     }
 
     /// nil until "Has due date" is actually answered either way — see
@@ -2332,6 +2448,7 @@ struct TaskReviewCard: View {
             if task.isRecurring, task.dueDate != nil {
                 if !task.recurrenceIntervalPicked { task.recurrenceIntervalPicked = true }
                 if !task.recurrenceTimeModePicked { task.recurrenceTimeModePicked = true }
+                Self.backfillRelativeRecurrencePickedIfNeeded(task)
             }
             if originalSnapshot == nil {
                 originalSnapshot = TaskEditSnapshot(task)
@@ -2423,27 +2540,10 @@ struct TaskReviewCard: View {
 
     /// Same idea as `dueDatesAllowed`, for Duration and Divisible —
     /// shelf-level only (greyed, not hidden, since the preview could
-    /// still be cancelled). See `durationApplicable` for the separate,
-    /// task-level "hide entirely" gate.
+    /// still be cancelled). Both flavors of the "Time" row (recurring and
+    /// non-recurring) share this same gate.
     private var durationAllowed: Bool {
         previewedShelf?.effectiveTracksDuration ?? true
-    }
-
-    /// Whether the shared, standalone Duration/Divisible section
-    /// (`cardScrollBody`, below `Divisible`'s own VStack) applies at all —
-    /// non-recurring tasks only now. A recurring task gets its own copy
-    /// of the identical `durationControl`/`divisibleControl` content
-    /// embedded directly inside its "Time" row instead (see
-    /// `recurringSection`) — folded in as a qualifier on the time, not a
-    /// peer section, and only ever relevant for Specific Time in the
-    /// first place (an AM/Midday/PM occurrence never gets a calendar
-    /// block — see `TaskItem.recurrenceTimeMode`'s own doc comment — so
-    /// there's nothing for a duration to size or a divisible split to
-    /// carve up). Values are retained untouched either way when Time mode
-    /// changes (see `TaskItem.recurringAndUntimed`) — switching back to
-    /// Specific shows them again exactly as they were.
-    private var durationApplicable: Bool {
-        !task.isRecurring
     }
 
     /// Instance wrappers around the `static` configured-checks above,
@@ -2462,13 +2562,26 @@ struct TaskReviewCard: View {
         Self.isTimeConfigured(task: task, shelf: previewedShelf, segmentOptions: segmentOptions)
     }
 
+    private var isDueConfigured: Bool {
+        Self.isDueConfigured(task: task, shelf: previewedShelf)
+    }
+
+    private var isDurationConfigured: Bool {
+        Self.isDurationConfigured(task: task, shelf: previewedShelf)
+    }
+
+    private var isPriorityConfigured: Bool {
+        Self.isPriorityConfigured(task: task, shelf: previewedShelf)
+    }
+
     /// The Duration Yes/No + wheel — extracted out of `cardScrollBody` so
-    /// it's reusable both there (non-recurring tasks, under
-    /// `durationApplicable`) and embedded directly inside a recurring
-    /// task's "Time" row (`recurringSection`) once Duration folded into
-    /// it as a qualifier rather than a peer section. Identical content,
-    /// identical interaction, in both places — no behavior change from
-    /// before the extraction.
+    /// it's reusable both by the non-recurring card's own "Time" row
+    /// (Duration + Divisible, folded together the same way the recurring
+    /// card's "Time" row folds them in alongside the clock) and embedded
+    /// directly inside a recurring task's "Time" row (`recurringSection`)
+    /// once Duration folded into it as a qualifier rather than a peer
+    /// section. Identical content, identical interaction, in every
+    /// place — no behavior change from before the extraction.
     @ViewBuilder
     private var durationControl: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -2791,25 +2904,27 @@ struct TaskReviewCard: View {
         .padding(.bottom, 0)
     }
 
-    /// Only `.first`/`.last` for Day of Month (see
-    /// `RelativeRecurrenceScope.dayOfMonth`'s own doc comment for why any
-    /// other day-of-month is deliberately left to Specific Date) — all
-    /// five for Weekday of Month.
-    private var relativeRecurrenceOrdinalOptions: [RelativeRecurrenceOrdinal] {
-        task.relativeRecurrenceScope == .dayOfMonth ? [.first, .last] : RelativeRecurrenceOrdinal.allCases
-    }
-
-    /// "Monthly · 4th Saturday" / "Not Selected" — `TaskItem
-    /// .recurrenceShortSummary`, the compact form built specifically so
-    /// this row fits on one line (see that property's own doc comment for
-    /// why it's a genuinely separate property from `recurrenceSummary`,
-    /// not a "short" flag on it — the long form is still exactly what
-    /// `ShelfListView.recurrenceLine` shows on the shelf card, untouched
-    /// by this). Gating on "not yet configured" belongs at this call
-    /// site, same as every other "Not Selected" field on this card — not
-    /// inside the model's own formatter.
+    /// "Monthly · 4th Saturday" — `TaskItem.recurrenceShortSummary`, the
+    /// compact form built specifically so this row fits on one line (see
+    /// that property's own doc comment for why it's a genuinely separate
+    /// property from `recurrenceSummary`, not a "short" flag on it — the
+    /// long form is still exactly what `ShelfListView.recurrenceLine`
+    /// shows on the shelf card, untouched by this).
+    ///
+    /// Shows the *live* value even before it's been "picked" — a fresh
+    /// recurring task's real stored default (`recurrenceUnit == .days`,
+    /// `recurrenceIntervalCount == 1`) reads "Daily" here, not "Not
+    /// Selected", the same way `recurrenceUnit`/`recurrenceIntervalCount`
+    /// already showed "1"/"Day" pre-highlighted the moment "Repeats" was
+    /// expanded — the collapsed summary was the only place still lying
+    /// about it. This is purely cosmetic, though: `isRepeatsConfigured`
+    /// (unchanged) still drives the row's italic/secondary "not decided
+    /// yet" styling and still gates `missingAttributeNames`, so a task
+    /// that's never actually had "Repeats" opened and confirmed still
+    /// surfaces as missing — reading "Daily" here is not the same as
+    /// being silently, unconfirmedly daily.
     private var repeatsSummaryText: String {
-        isRepeatsConfigured ? (task.recurrenceShortSummary ?? "Not Selected") : "Not Selected"
+        task.recurrenceShortSummary ?? "Not Selected"
     }
 
     /// "Thu, Sep 17, 2026" — abbreviated weekday, abbreviated month, no
@@ -2830,8 +2945,16 @@ struct TaskReviewCard: View {
     /// doesn't fabricate a size to show), or the bare mode label
     /// ("AM"/"Midday"/"PM") for an untimed occurrence, which never has a
     /// duration to combine with.
+    /// Shows the *live* value even before "Time" has actually been
+    /// picked — same reasoning, and same "cosmetic only" guarantee, as
+    /// `repeatsSummaryText`'s own doc comment: `recurrenceTimeMode`'s
+    /// real stored default is now `.midday`, so a fresh task reads
+    /// "Midday" here, not "Not Selected," but `isTimeConfigured`
+    /// (unchanged, still gated on `recurrenceTimeModePicked`) is what
+    /// actually drives the row's italic styling and
+    /// `missingAttributeNames` — this alone doesn't make a task silently,
+    /// unconfirmedly Midday.
     private var timeSummaryText: String {
-        guard task.recurrenceTimeModePicked else { return "Not Selected" }
         switch task.recurrenceTimeMode {
         case .am, .midday, .pm:
             return task.recurrenceTimeMode.label
@@ -2858,29 +2981,101 @@ struct TaskReviewCard: View {
         return formatter
     }()
 
-    /// Recurrence Mode + Every + (for Relative Date) Scope/Position/
-    /// Weekday — all five controls this card used to show as five
-    /// separate peer rows, now revealed together the moment "Repeats" is
-    /// expanded. Each control marks its own "picked" flag directly in its
-    /// `set` closure on first edit, rather than requiring a separate
-    /// "Not Selected" tap first — the row-level expand/collapse already
-    /// does that reveal job now, so a second layer of it here would just
-    /// be redundant. Values already stored (even if never "picked")
-    /// display live, same "show a real, editable default" precedent
-    /// `durationControl`'s wheel already set.
+    /// The non-recurring card's own "Due" row. Three states, not two —
+    /// this is the one place collapsing "Has due date" into a single
+    /// value row could have silently lost the undecided-vs-decided-as-
+    /// none distinction those flags exist for (see `TaskItem
+    /// .dueDateMissing`'s own doc comment), so all three are spelled out
+    /// explicitly rather than derived from a single optional:
+    /// - undecided (`!dueDateDecided`), or decided-yes-but-not-yet-picked
+    ///   (`dueDate != nil && !dueDatePicked`, the moment right after
+    ///   tapping "Yes" and before a real date is chosen) → "Not selected"
+    ///   — `isDueConfigured` is false for both, so both still surface in
+    ///   `missingAttributeNames`.
+    /// - decided-as-none (`dueDateDecided && dueDate == nil`) → "None",
+    ///   a real committed answer, not missing.
+    /// - decided-and-picked → the date itself.
+    ///
+    /// `static`, `internal` (not `private`) — same reasoning as
+    /// `isRepeatsConfigured`'s own doc comment: this is exactly the
+    /// display logic a "collapse undecided and none into one state" bug
+    /// would land in, so it needs to be exercisable directly by a unit
+    /// test rather than only inferred from `isDueConfigured`'s boolean.
+    static func dueSummaryText(task: TaskItem, shelf: Shelf?) -> String {
+        guard isDueConfigured(task: task, shelf: shelf) else { return "Not selected" }
+        guard let dueDate = task.dueDate else { return "None" }
+        return abbreviatedDateFormatter.string(from: dueDate)
+    }
+
+    private var dueSummaryText: String {
+        Self.dueSummaryText(task: task, shelf: previewedShelf)
+    }
+
+    /// The non-recurring card's own "Time" row — Duration and Divisible
+    /// only (see `isDurationConfigured`'s own doc comment for why there's
+    /// no mode/clock question here the way the recurring row has one).
+    /// Same three-state shape and same testability reasoning as
+    /// `dueSummaryText`: undecided → "Not selected", decided-no → "None",
+    /// decided-yes-with-a-value → the duration itself. Divisible doesn't
+    /// factor into the summary any more than it does for the recurring
+    /// row's own `timeSummaryText`.
+    static func nonRecurringTimeSummaryText(task: TaskItem) -> String {
+        guard task.durationDecided else { return "Not selected" }
+        guard task.durationAnsweredYes, task.estimatedMinutes > 0 else { return "None" }
+        return TaskItem.durationLabel(for: task.estimatedMinutes)
+    }
+
+    private var nonRecurringTimeSummaryText: String {
+        Self.nonRecurringTimeSummaryText(task: task)
+    }
+
+    /// "High"/"Low"/"Not selected" — mirrors `highPriorityAnswer`'s own
+    /// `get` exactly (`.unset` → nil/"Not selected", `.high` → "High",
+    /// `.low`/`.medium` → "Low") rather than calling it directly, since
+    /// that binding is instance-only and this needs to be a `static func`
+    /// for the same direct-testability reasoning as `dueSummaryText`. The
+    /// underlying model is still the same four-case `Priority` enum
+    /// (`.unset`/`.low`/`.medium`/`.high`) — this row doesn't change
+    /// that, only how it's displayed and edited. `.medium` reads
+    /// identically to `.low` here, exactly like today's Yes/No toggle
+    /// already treats them — legacy/AI-ranked data can still hold
+    /// `.medium`, it's just never reachable or distinguishable from this
+    /// control, unchanged from before this row existed.
+    static func prioritySummaryText(task: TaskItem) -> String {
+        switch task.priority {
+        case .unset: return "Not selected"
+        case .high: return "High"
+        case .low, .medium: return "Low"
+        }
+    }
+
+    private var prioritySummaryText: String {
+        Self.prioritySummaryText(task: task)
+    }
+
+    /// Every + (when the unit is months) "On the" — no mode toggle. The
+    /// old Specific-Date-vs-Relative-Date split only ever meant something
+    /// for a monthly pattern ("Relative Date" was never offered, or
+    /// useful, for days/weeks at all — see `RelativeRecurrenceScope`'s
+    /// own doc comment); everywhere else it was just noise, one extra
+    /// control answering a question the unit picker already answers.
+    /// `recurrenceMode` itself is unchanged and still stored — still
+    /// exactly the field `TaskItem.hasRecurringOccurrence` dispatches on
+    /// (that evaluator dispatch is explicitly out of scope for this
+    /// change) — it's just no longer its own direct control. Selecting
+    /// "Same day," "First day," "Last day," or a weekday below sets it as
+    /// a side effect (see each option's own `static func`), the same way
+    /// choosing "Weekday of month" already implied `.relativeDate` before
+    /// this redesign, just now covering the "Same day" case too (which
+    /// implies `.specificDate`, reusing that evaluator branch instead of
+    /// teaching the Relative Date one a new case for it).
+    ///
+    /// Every control here uses `PickedMenuPicker`, not `Picker(selection:)`
+    /// — see that type's own doc comment for why: a native `Picker` only
+    /// fires on a genuine value change, so re-confirming a value that's
+    /// already the stored default would silently never mark it picked.
     @ViewBuilder
     private var repeatsExpandedContent: some View {
-        Picker("Recurrence Mode", selection: Binding(
-            get: { task.recurrenceMode },
-            set: { task.recurrenceMode = $0 }
-        )) {
-            ForEach(RecurrenceMode.allCases) { mode in
-                Text(mode.label).tag(mode)
-            }
-        }
-        .pickerStyle(.segmented)
-        .padding(.bottom, 2)
-
         HStack(spacing: 8) {
             Text("Every")
                 .font(.body)
@@ -2903,117 +3098,81 @@ struct TaskReviewCard: View {
             }
             .fixedSize()
 
-            if task.recurrenceMode == .specificDate {
-                Picker("Repeat every", selection: Binding(
-                    get: { task.recurrenceUnit },
-                    set: { newValue in
-                        task.recurrenceUnit = newValue
-                        task.recurrenceIntervalPicked = true
-                    }
-                )) {
-                    ForEach(RecurrenceUnit.allCases) { unit in
-                        Text(unit.label(for: task.recurrenceIntervalCount).capitalized).tag(unit)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .fixedSize()
-            } else {
-                // Relative Date is always month-scoped — "the first
-                // Saturday" only means something once a month, so
-                // there's no unit to choose. `recurrenceUnit` itself is
-                // never read by `hasRelativeDateOccurrence` — retained
-                // untouched, just not shown, so switching back to
-                // Specific Date sees whatever was there before.
-                Text(task.recurrenceIntervalCount == 1 ? "month" : "months")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
+            PickedMenuPicker(
+                options: RecurrenceUnit.allCases,
+                label: { $0.label(for: task.recurrenceIntervalCount).capitalized },
+                selection: task.recurrenceUnit
+            ) { newUnit in
+                Self.selectRecurrenceUnit(newUnit, on: task)
             }
+            .fixedSize()
         }
 
-        if task.recurrenceMode == .relativeDate {
-            // Every row here got the same "wraps at the widest value"
-            // treatment as `CollapsibleAnswerRow`: the row label can't
-            // compress, and the picker's own displayed value truncates
-            // instead of wrapping. This was tightened twice on the
-            // Pattern row specifically — first the row label ("Scope" →
-            // "Pattern"), then the picker's own values ("Weekday of
-            // month" → "Weekday") — before it actually fit on-device, so
-            // Position and Weekday get the belt-and-braces protection
-            // even though their current worst-case values ("Fourth" /
-            // "Wednesday") already measured as fitting.
+        if task.recurrenceUnit == .months {
+            // Same "wraps at the widest value" treatment as
+            // `CollapsibleAnswerRow` — see that type's own doc comment.
+            // This was tightened twice on this exact row before it
+            // actually fit on-device (first the row label, "Scope" →
+            // "Pattern"; then the picker's own values, "Weekday of
+            // month" → "Weekday"), so "On the"/"Day"/"Position"/"Weekday"
+            // all keep the belt-and-braces protection even though none
+            // of their current values ("Weekday of month," "Wednesday")
+            // are any longer than what already measured as fitting.
             HStack {
-                Text("Pattern")
+                Text("On the")
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                 Spacer()
-                Picker("Pattern", selection: Binding(
-                    get: { task.relativeRecurrenceScope },
-                    set: { newScope in
-                        task.relativeRecurrenceScope = newScope
-                        task.relativeRecurrencePicked = true
-                        // "Day of month" only ever offers First/Last —
-                        // snap back to First so the picker never shows
-                        // a selection that pattern doesn't actually offer.
-                        if newScope == .dayOfMonth, task.relativeRecurrenceOrdinal != .last {
-                            task.relativeRecurrenceOrdinal = .first
-                        }
-                    }
-                )) {
-                    ForEach(RelativeRecurrenceScope.allCases) { scope in
-                        Text(scope.label).tag(scope)
-                    }
+                PickedMenuPicker(
+                    options: RelativeRecurrenceScope.allCases,
+                    label: { $0.label },
+                    selection: task.relativeRecurrenceScope
+                ) { newScope in
+                    Self.selectMonthlyScope(newScope, on: task)
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .lineLimit(1)
-                .truncationMode(.tail)
             }
 
-            HStack {
-                Text(task.relativeRecurrenceScope == .dayOfMonth ? "Day" : "Position")
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-                Spacer()
-                Picker("Position", selection: Binding(
-                    get: { task.relativeRecurrenceOrdinal },
-                    set: { newValue in
-                        task.relativeRecurrenceOrdinal = newValue
-                        task.relativeRecurrencePicked = true
-                    }
-                )) {
-                    ForEach(relativeRecurrenceOrdinalOptions) { ordinal in
-                        Text(task.relativeRecurrenceScope == .dayOfMonth && ordinal == .first ? "1st" : ordinal.label)
-                            .tag(ordinal)
+            if task.relativeRecurrenceScope == .dayOfMonth {
+                HStack {
+                    Text("Day")
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Spacer()
+                    PickedMenuPicker(
+                        options: DayOfMonthPosition.allCases,
+                        label: { $0.label },
+                        selection: Self.dayOfMonthPosition(for: task)
+                    ) { newPosition in
+                        Self.selectDayOfMonthPosition(newPosition, on: task)
                     }
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .lineLimit(1)
-                .truncationMode(.tail)
-            }
+            } else {
+                HStack {
+                    Text("Position")
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Spacer()
+                    PickedMenuPicker(
+                        options: RelativeRecurrenceOrdinal.allCases,
+                        label: { $0.label },
+                        selection: task.relativeRecurrenceOrdinal
+                    ) { newOrdinal in
+                        Self.selectRelativeOrdinal(newOrdinal, on: task)
+                    }
+                }
 
-            if task.relativeRecurrenceScope == .weekdayOfMonth {
                 HStack {
                     Text("Weekday")
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                     Spacer()
-                    Picker("Weekday", selection: Binding(
-                        get: { task.relativeRecurrenceWeekday ?? 1 },
-                        set: { newValue in
-                            task.relativeRecurrenceWeekday = newValue
-                            task.relativeRecurrencePicked = true
-                        }
-                    )) {
-                        ForEach(1...7, id: \.self) { weekday in
-                            Text(Calendar.current.weekdaySymbols[weekday - 1]).tag(weekday)
-                        }
+                    PickedMenuPicker(
+                        options: Array(1...7),
+                        label: { Calendar.current.weekdaySymbols[$0 - 1] },
+                        selection: task.relativeRecurrenceWeekday ?? 1
+                    ) { newWeekday in
+                        Self.selectRelativeWeekday(newWeekday, on: task)
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .lineLimit(1)
-                    .truncationMode(.tail)
                 }
             }
         }
@@ -3031,7 +3190,7 @@ struct TaskReviewCard: View {
     private var startsExpandedContent: some View {
         StartDateCalendarPicker(
             initialSelection: task.startDatePicked ? task.startDate : nil,
-            minimumDate: Calendar.current.startOfDay(for: .now)
+            minimumDate: nil
         ) { selectedDate in
             task.setStartDate(selectedDate)
             isStartsExpanded = false
@@ -3044,12 +3203,96 @@ struct TaskReviewCard: View {
         }
     }
 
+    /// The "Starts" row itself — shared verbatim by the recurring card
+    /// (`recurringSection`) and the non-recurring card (`cardScrollBody`),
+    /// since `task.startDate`/`.setStartDate(_:)`/`.clearStartDate()` are
+    /// the same field either way, just optional metadata for a
+    /// non-recurring task rather than its scheduling anchor. That
+    /// difference already falls out of the model for free: `startDateMissing`
+    /// only ever applies `isRecurring && ...`, so `isStartsExpanded`'s
+    /// auto-expand-if-unconfigured seeding (`init`) naturally never
+    /// triggers for a non-recurring task's blank Start Date — an unset
+    /// one is a legitimate, complete answer there, not something to chase
+    /// the user into filling — with no `isRecurring` branch needed here.
+    @ViewBuilder
+    private var startsRow: some View {
+        CollapsibleAnswerRow(
+            label: "Starts",
+            summary: startsSummaryText,
+            isNotSelected: !task.startDatePicked,
+            isExpanded: $isStartsExpanded,
+            onTapHeader: { focusedField = nil }
+        ) {
+            startsExpandedContent
+        }
+    }
+
+    /// The non-recurring card's own "Due" row — replaces the old always-
+    /// visible "Has due date" `YesNoToggle` plus its separate popover-
+    /// triggering button with one row that only reveals them on expand.
+    /// `YesNoToggle` itself is reused unchanged (not reinvented) precisely
+    /// because it's already the thing that preserves the three-state
+    /// distinction this collapse could have lost — tapping the already-
+    /// selected pill still answers back to "undecided" exactly as it did
+    /// before this was a collapsible row, and `dueDateAnswer`'s own
+    /// `Binding` (unchanged) is still the single place that writes
+    /// `dueDateDecided`/`dueDate`/`dueDatePicked` together. `Calendar`
+    /// picking still floors at today, same as before this row existed —
+    /// unlike Start Date (see `StartDateCalendarPicker`'s own doc
+    /// comment), nothing about this request asked Due Date to become
+    /// backdatable too.
+    @ViewBuilder
+    private var dueExpandedContent: some View {
+        YesNoToggle(title: "Has due date", answer: dueDatesAllowed ? dueDateAnswer : .constant(false))
+            .disabled(!dueDatesAllowed)
+            .opacity(dueDatesAllowed ? 1 : 0.4)
+            .animation(.easeInOut(duration: 0.15), value: task.dueDateDecided)
+            .animation(.easeInOut(duration: 0.15), value: dueDatesAllowed)
+
+        if dueDatesAllowed, dueDateAnswer.wrappedValue == true {
+            StartDateCalendarPicker(
+                initialSelection: task.dueDatePicked ? task.dueDate : nil,
+                minimumDate: Calendar.current.startOfDay(for: .now)
+            ) { selectedDate in
+                task.dueDatePicked = true
+                task.dueDate = selectedDate
+                isDueExpanded = false
+            }
+        }
+    }
+
+    /// The non-recurring card's own "Time" row content — Duration and
+    /// Divisible only, the identical `durationControl`/`divisibleControl`
+    /// the recurring row's own `timeExpandedContent` embeds. Divisible
+    /// stays unconditionally visible here (disabled + explained instead
+    /// of hidden) — same as before this became a collapsible row, see
+    /// `divisibleControl`'s own doc comment for why that's deliberately
+    /// different from the recurring row's "only appears when splittable"
+    /// treatment.
+    @ViewBuilder
+    private var nonRecurringTimeExpandedContent: some View {
+        durationControl
+        divisibleControl
+    }
+
+    /// The non-recurring card's own "Priority" row — `YesNoToggle`
+    /// unchanged, same reasoning as `dueExpandedContent`: reusing it
+    /// keeps `highPriorityAnswer`'s existing tri-state behavior (untap to
+    /// go back to unset) rather than rebuilding it.
+    @ViewBuilder
+    private var priorityExpandedContent: some View {
+        YesNoToggle(title: "High Priority?", answer: priorityAllowed ? highPriorityAnswer : .constant(false))
+            .disabled(!priorityAllowed)
+            .opacity(priorityAllowed ? 1 : 0.4)
+            .animation(.easeInOut(duration: 0.15), value: priorityAllowed)
+    }
+
     /// Mode picker, then — for Specific Time only — the clock wheel,
     /// Duration, and Divisible together, exactly the set requirement 2
     /// asks to fold into this row. `durationControl`/`divisibleControl`
-    /// are the identical extracted content `cardScrollBody` still shows
-    /// for a non-recurring task (see `durationApplicable`) — no second
-    /// copy of that Yes/No-pill-plus-wheel logic. Divisible is wrapped in
+    /// are the identical extracted content `nonRecurringTimeExpandedContent`
+    /// shows for a non-recurring task's own "Time" row — no second copy
+    /// of that Yes/No-pill-plus-wheel logic. Divisible is wrapped in
     /// its own condition here (unlike the standalone version, which
     /// always renders disabled+explained) so it doesn't appear at all
     /// until there's an actual duration long enough to split — the same
@@ -3061,30 +3304,59 @@ struct TaskReviewCard: View {
         HStack {
             Text("Mode")
             Spacer()
-            Picker("Time", selection: Binding(
-                get: { task.recurrenceTimeMode },
-                set: { newValue in
-                    task.recurrenceTimeMode = newValue
-                    task.recurrenceTimeModePicked = true
-                }
-            )) {
-                ForEach(HabitOccurrenceTimeMode.allCases) { mode in
-                    Text(mode.label).tag(mode)
-                }
+            // `PickedMenuPicker`, not `Picker(selection:)` — see that
+            // type's own doc comment: re-confirming "Specific Time"
+            // while it's already the selection (`recurrenceTimeMode`'s
+            // own stored default) would otherwise never fire, leaving
+            // `recurrenceTimeModePicked` stuck false.
+            PickedMenuPicker(
+                options: HabitOccurrenceTimeMode.allCases,
+                label: { $0.label },
+                selection: task.recurrenceTimeMode
+            ) { newMode in
+                Self.selectRecurrenceTimeMode(newMode, on: task)
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
         }
 
         if task.recurrenceTimeMode == .specific {
-            // `HourMinutePeriodPicker` writes to `recurrenceTimeOfDayMinutes`,
-            // a field of its own (see that property's doc comment for why
-            // this doesn't just write into `dueDate`'s time-of-day the
-            // way placement used to silently derive it) — three plain
+            // Styled like `SettingsView`'s Daily Check-In rows — tap the
+            // row, a popover opens — rather than the wheel sitting
+            // always-visible inline. That reference (`DatePicker(
+            // displayedComponents: [.hourAndMinute])`, compact style)
+            // can't be reused directly: its native wheel has no way to
+            // snap to 15-minute steps, and snapping its value after the
+            // fact would fight the wheel itself — the user scrolls to
+            // :07, releases, and watches it jump to :00 or :15, which
+            // feels broken in a way tapping a pre-quantized option never
+            // does. `HourMinutePeriodPicker` already IS three plain
             // `Picker(.wheel)`s (hour 1–12, minute in 15-minute steps,
-            // AM/PM) rather than a `DatePicker`, see that type's own doc
-            // comment for why.
-            HourMinutePeriodPicker(minutesSinceMidnight: recurrenceTimeMinutesBinding)
+            // AM/PM) whose own selectable values are already correctly
+            // quantized — nothing is snapped after the fact here, the
+            // wheel simply has no in-between stops to land on. This popover
+            // just relocates that existing, already-correct control
+            // behind a tap instead of rebuilding time entry around
+            // `DatePicker`. `recurrenceTimeOfDayMinutes` is its own field
+            // (see that property's doc comment for why this doesn't just
+            // write into `dueDate`'s time-of-day the way placement used
+            // to silently derive it).
+            HStack {
+                Text("Time")
+                Spacer()
+                Button {
+                    isShowingRecurrenceTimeOfDayPopover = true
+                } label: {
+                    Text(Self.formattedTime(minutesSinceMidnight: recurrenceTimeMinutesBinding.wrappedValue))
+                        .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $isShowingRecurrenceTimeOfDayPopover) {
+                    HourMinutePeriodPicker(minutesSinceMidnight: recurrenceTimeMinutesBinding)
+                        .padding(8)
+                        .frame(width: 280)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .presentationCompactAdaptation(.popover)
+                }
+            }
 
             durationControl
 
@@ -3151,15 +3423,7 @@ struct TaskReviewCard: View {
                     repeatsExpandedContent
                 }
 
-                CollapsibleAnswerRow(
-                    label: "Starts",
-                    summary: startsSummaryText,
-                    isNotSelected: !task.startDatePicked,
-                    isExpanded: $isStartsExpanded,
-                    onTapHeader: { focusedField = nil }
-                ) {
-                    startsExpandedContent
-                }
+                startsRow
 
                 CollapsibleAnswerRow(
                     label: "Time",
@@ -3205,76 +3469,6 @@ struct TaskReviewCard: View {
             VStack(alignment: .leading, spacing: 10) {
             Divider()
 
-            // Recurring tasks get their own "Starts" row instead (see
-            // `recurringSection`) — same underlying `task.startDate`/
-            // `.setStartDate(_:)`/`.clearStartDate()`, just presented as
-            // one of the four collapsed answer rows rather than this
-            // always-visible popover-triggering button, which stays
-            // exactly as it was for non-recurring tasks (the only
-            // remaining caller of `isShowingStartDatePicker`).
-            if !task.isRecurring {
-            HStack {
-                Text("Start Date")
-                Spacer()
-                Button {
-                    focusedField = nil
-                    isShowingStartDatePicker = true
-                } label: {
-                    Text(task.startDatePicked ? (task.startDate ?? .now).formatted(date: .complete, time: .omitted) : "Not Selected")
-                        .font(.headline)
-                        .foregroundStyle(Color.accentColor)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(Color.secondary.opacity(0.15))
-                        )
-                }
-                .buttonStyle(.plain)
-                .popover(isPresented: $isShowingStartDatePicker) {
-                    VStack(spacing: 12) {
-                        // `StartDateCalendarPicker` wraps `UICalendarView`
-                        // rather than SwiftUI's own `DatePicker` — a
-                        // `DatePicker` binds to a non-optional `Date`, so
-                        // it can't show *nothing* highlighted, and its
-                        // selection binding only fires `set` on an actual
-                        // value change, so a tap that lands on whatever
-                        // it's already (falsely) showing as selected is a
-                        // silent no-op. `UICalendarSelectionSingleDate`
-                        // has neither problem: its selection can be
-                        // genuinely nil, and its delegate fires on every
-                        // discrete tap regardless of what was selected
-                        // before — see that type's own doc comment.
-                        // `initialSelection` is computed fresh from the
-                        // model each time this popover opens (a fresh
-                        // `StartDateCalendarPicker` value, since the
-                        // popover's content is only built while
-                        // presented) — nil whenever `startDatePicked` is
-                        // false, so an untouched task opens with nothing
-                        // highlighted.
-                        StartDateCalendarPicker(
-                            initialSelection: task.startDatePicked ? task.startDate : nil,
-                            minimumDate: Calendar.current.startOfDay(for: .now)
-                        ) { selectedDate in
-                            task.setStartDate(selectedDate)
-                            isShowingStartDatePicker = false
-                        }
-
-                        if task.startDatePicked {
-                            Button("Clear", role: .destructive) {
-                                task.clearStartDate()
-                                isShowingStartDatePicker = false
-                            }
-                        }
-                    }
-                    .padding(8)
-                    .frame(width: 320)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .presentationCompactAdaptation(.popover)
-                }
-            }
-            }
-
             Toggle("Recurring?", isOn: Binding(
                 get: { task.isRecurring },
                 set: { newValue in
@@ -3319,65 +3513,51 @@ struct TaskReviewCard: View {
             if task.isRecurring {
                 recurringSection
             } else {
-                YesNoToggle(title: "Has due date", answer: dueDatesAllowed ? dueDateAnswer : .constant(false))
-                    .disabled(!dueDatesAllowed)
-                    .opacity(dueDatesAllowed ? 1 : 0.4)
-                    .animation(.easeInOut(duration: 0.15), value: task.dueDateDecided)
-                    .animation(.easeInOut(duration: 0.15), value: dueDatesAllowed)
-                if dueDatesAllowed, dueDateAnswer.wrappedValue == true {
-                    HStack {
-                        Button {
-                            focusedField = nil
-                            isShowingDatePicker = true
-                        } label: {
-                            Text(task.dueDatePicked ? (task.dueDate ?? .now).formatted(date: .complete, time: .omitted) : "Select Date")
-                                .font(.headline)
-                                .foregroundStyle(Color.accentColor)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 10)
-                                        .fill(Color.secondary.opacity(0.15))
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .popover(isPresented: $isShowingDatePicker) {
-                            DatePicker(
-                                "Due",
-                                selection: Binding(
-                                    get: { task.dueDate ?? .now },
-                                    set: { newValue in
-                                        task.dueDatePicked = true
-                                        task.dueDate = newValue
-                                        isShowingDatePicker = false
-                                    }
-                                ),
-                                in: Calendar.current.startOfDay(for: .now)...,
-                                displayedComponents: [.date]
-                            )
-                            .datePickerStyle(.graphical)
-                            .labelsHidden()
-                            .padding(8)
-                            .frame(width: 320)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .presentationCompactAdaptation(.popover)
-                        }
+                // Same "answer, not controls" shape as `recurringSection`
+                // — see this whole section's own header comment. "Due"
+                // replaces "Has due date" (Yes/No) plus its separate
+                // popover button; "Time" replaces the standalone
+                // Duration/Divisible pair; "Priority" replaces "High
+                // Priority?" (Yes/No). Hidden entirely (not just greyed)
+                // for a recurring task, same as before this was rows —
+                // High Priority isn't offered to a repeating task at all
+                // (see `TaskItem.priorityMissing`'s matching short-circuit),
+                // so the whole `else` branch, Priority included, simply
+                // doesn't render rather than needing its own disabled
+                // state.
+                VStack(alignment: .leading, spacing: 14) {
+                    CollapsibleAnswerRow(
+                        label: "Due",
+                        summary: dueSummaryText,
+                        isNotSelected: !isDueConfigured,
+                        isExpanded: $isDueExpanded,
+                        onTapHeader: { focusedField = nil }
+                    ) {
+                        dueExpandedContent
+                    }
+
+                    startsRow
+
+                    CollapsibleAnswerRow(
+                        label: "Time",
+                        summary: nonRecurringTimeSummaryText,
+                        isNotSelected: !isDurationConfigured,
+                        isExpanded: $isTimeExpanded,
+                        onTapHeader: { focusedField = nil }
+                    ) {
+                        nonRecurringTimeExpandedContent
+                    }
+
+                    CollapsibleAnswerRow(
+                        label: "Priority",
+                        summary: prioritySummaryText,
+                        isNotSelected: !isPriorityConfigured,
+                        isExpanded: $isPriorityExpanded,
+                        onTapHeader: { focusedField = nil }
+                    ) {
+                        priorityExpandedContent
                     }
                 }
-            }
-
-            // Hidden entirely (not just greyed) for a recurring task —
-            // High Priority isn't offered to a repeating task at all, so
-            // there's no "disabled" state to show, the same way this
-            // section doesn't render at all for a shelf that doesn't
-            // track priority. See `TaskItem.priorityMissing`'s matching
-            // short-circuit.
-            if !task.isRecurring {
-                YesNoToggle(title: "High Priority?", answer: priorityAllowed ? highPriorityAnswer : .constant(false))
-                    .padding(.top, 4)
-                    .disabled(!priorityAllowed)
-                    .opacity(priorityAllowed ? 1 : 0.4)
-                    .animation(.easeInOut(duration: 0.15), value: priorityAllowed)
             }
 
             if futureReminderAllowed {
@@ -3427,11 +3607,6 @@ struct TaskReviewCard: View {
                     .fixedSize()
                 }
                 .padding(.top, 4)
-            }
-
-            if durationApplicable {
-                durationControl
-                divisibleControl
             }
 
             // Grouped under one stable id (rather than tagging the
@@ -3915,6 +4090,91 @@ struct TaskReviewCard: View {
     }
 }
 
+/// One shared control for every menu-style field on the recurring card
+/// that also has to mark a "picked" flag the instant it's touched — not
+/// gated on the underlying value actually changing. SwiftUI's
+/// `Picker(selection:)` only invokes its `Binding`'s `set` on a genuine
+/// value change — the same defect class `StartDateCalendarPicker`'s own
+/// doc comment describes for `DatePicker` — so re-choosing the option
+/// already showing is silently a no-op there: "Repeats" could sit on
+/// "Not Selected" forever if the value the user actually wants happens
+/// to already be the stored default (e.g. "Days," "Specific Time,"
+/// "First"), because tapping it again never fires anything.
+///
+/// Built from `Menu` + `Button` instead of `Picker` specifically because
+/// a `Button`'s `action` always runs on tap — there's nothing to diff,
+/// nothing to suppress. One shared shape rather than five near-identical
+/// ad-hoc fixes (recurrenceIntervalPicked, recurrenceTimeModePicked, and
+/// the relative scope/day-position/ordinal/weekday equivalents, with more
+/// likely to accumulate) — every call site's `onSelect` pairs with a
+/// small `static func` (e.g. `TaskReviewCard.selectRecurrenceUnit`) that
+/// sets the field and its "picked" flag together, unconditionally.
+///
+/// The value column is also fixed to its widest option's width, so
+/// switching selections never visibly resizes it — a "Day of month" →
+/// "Day of Week" tap used to make the column jump as the picker's own
+/// intrinsic width re-fit to the new string. `measuredWidth` is read
+/// from a hidden stack rendering every option at the *same* font this
+/// row actually uses (whatever the environment supplies — no font is
+/// hardcoded here), via `.background`/`GeometryReader`/`PreferenceKey` —
+/// real SwiftUI layout measurement, not a guessed char-count × point-
+/// size, so it stays correct across Dynamic Type sizes and any future
+/// font change without needing to be re-tuned by hand.
+private struct PickedMenuPickerOptionWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct PickedMenuPicker<Option: Hashable>: View {
+    let options: [Option]
+    let label: (Option) -> String
+    let selection: Option
+    let onSelect: (Option) -> Void
+
+    @State private var measuredWidth: CGFloat?
+
+    var body: some View {
+        Menu {
+            ForEach(options, id: \.self) { option in
+                Button {
+                    onSelect(option)
+                } label: {
+                    if option == selection {
+                        Label(label(option), systemImage: "checkmark")
+                    } else {
+                        Text(label(option))
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(label(selection))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: measuredWidth, alignment: .leading)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2.weight(.semibold))
+            }
+            .foregroundStyle(Color.accentColor)
+        }
+        .background(
+            ZStack {
+                ForEach(options, id: \.self) { option in
+                    Text(label(option))
+                        .lineLimit(1)
+                        .background(GeometryReader { geometry in
+                            Color.clear.preference(key: PickedMenuPickerOptionWidthKey.self, value: geometry.size.width)
+                        })
+                }
+            }
+            .hidden()
+        )
+        .onPreferenceChange(PickedMenuPickerOptionWidthKey.self) { measuredWidth = $0 }
+    }
+}
+
 /// One row in the compact recurring-task card (`TaskReviewCard
 /// .recurringSection`): a label, its composed answer (or "Not Selected"
 /// in muted/italic styling when unconfigured), and a chevron — tapping
@@ -4000,13 +4260,17 @@ private struct StartDateCalendarPicker: UIViewRepresentable {
     /// when the task's Start Date has actually been picked before (see
     /// `TaskItem.startDatePicked`), never `.now` as a stand-in.
     let initialSelection: Date?
-    let minimumDate: Date
+    /// `nil` leaves the calendar fully open in both directions — Start
+    /// Date is a backdatable field (a task can start "3 days ago" for a
+    /// habit or chore that was already underway before it was entered),
+    /// so neither call site passes a lower bound.
+    let minimumDate: Date?
     let onSelect: (Date) -> Void
 
     func makeUIView(context: Context) -> UICalendarView {
         let calendarView = UICalendarView()
         calendarView.calendar = Calendar.current
-        calendarView.availableDateRange = DateInterval(start: minimumDate, end: .distantFuture)
+        calendarView.availableDateRange = DateInterval(start: minimumDate ?? .distantPast, end: .distantFuture)
         let selection = UICalendarSelectionSingleDate(delegate: context.coordinator)
         // `setSelected` only sets state — unlike a real tap, it never
         // invokes the delegate — so seeding an existing Start Date here

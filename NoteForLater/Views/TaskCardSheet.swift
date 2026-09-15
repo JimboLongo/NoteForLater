@@ -11,6 +11,26 @@ import SwiftData
 struct TaskCardSheet: View {
     @Bindable var task: TaskItem
     let shelves: [Shelf]
+    /// True only when the caller just created `task` and is presenting
+    /// its card for the first time in the same gesture (today, only
+    /// `ShelfListView`'s plus button — see its own `PresentedTask`
+    /// wrapper for how this stays tied to *this* presentation and can
+    /// never leak into a later one). Changes what Cancel does — see
+    /// `cancel()` — rather than a new field on `TaskItem` itself: the
+    /// model has no reliable "never saved" state to read (a task is
+    /// inserted into the context at creation, before this card ever
+    /// opens, so there's nothing to detect from the model alone), and a
+    /// transient property stored *on* `TaskItem` would need to be
+    /// reliably reset on every save path and would persist across
+    /// however many times that object gets reused, both directly
+    /// exposing this to going stale. A plain caller-supplied flag has
+    /// neither problem: it only ever exists for the one presentation the
+    /// caller explicitly marked, and reopening the same (now-saved) task
+    /// later is a *different* presentation, built fresh, that this
+    /// caller never marks — so "was this saved once" doesn't need to be
+    /// tracked or flipped anywhere; it falls out of which code path
+    /// presented the card at all.
+    var isNewlyCreated: Bool = false
     /// Called (in addition to the normal dismiss) when Cancel is tapped —
     /// lets a queue-driven caller like TaskAttributeReviewView tell Cancel
     /// apart from Mark Complete/Move/Discard, all of which should still
@@ -92,10 +112,42 @@ struct TaskCardSheet: View {
         }
     }
 
+    /// A never-saved task (see `isNewlyCreated`'s own doc comment) is
+    /// deleted outright instead of rolled back — otherwise Cancel leaves
+    /// an empty shell sitting on the shelf, since the task was already
+    /// inserted into the context the moment it was created, before this
+    /// card ever opened. `TaskItem.deleteCascading` (not a plain
+    /// `modelContext.delete(task)`) so a recurring task configured and
+    /// then cancelled doesn't leave orphaned `ScheduledBlock`/
+    /// `RecurringTaskLog`/`PushedRecurringOccurrence`/
+    /// `TaskCompletionRecord` rows behind — and specifically *not*
+    /// `snapshot?.restore(into:)` first: rolling back a value on an
+    /// object that's about to be deleted from the context is pointless
+    /// at best, and restoring `startDate`/`dueDate`/etc. can themselves
+    /// re-trigger scheduling side effects (see `TaskItem.setStartDate`)
+    /// that would just have to be torn down again a line later.
+    ///
+    /// The actual decision is pulled out as `static func cancel` (below)
+    /// — taking `task`/`isNewlyCreated`/`snapshot`/`context` explicitly
+    /// rather than reading `self.modelContext` — purely so a test can
+    /// call it directly. `@Environment(\.modelContext)` only resolves to
+    /// a real context inside a live view hierarchy; a bare
+    /// `TaskCardSheet(...)` value constructed in a test has no such
+    /// thing to read.
     private func cancel() {
-        snapshot?.restore(into: task)
+        Self.cancel(task: task, isNewlyCreated: isNewlyCreated, snapshot: snapshot, in: modelContext)
         onCancel?()
         dismiss()
+    }
+
+    /// `internal`, not `private` — see `cancel()`'s own doc comment for
+    /// why.
+    static func cancel(task: TaskItem, isNewlyCreated: Bool, snapshot: TaskEditSnapshot?, in context: ModelContext) {
+        if isNewlyCreated {
+            TaskItem.deleteCascading(task, in: context)
+        } else {
+            snapshot?.restore(into: task)
+        }
     }
 
     /// Tapping this on an already-completed task un-marks it instead —

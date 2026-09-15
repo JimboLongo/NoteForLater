@@ -57,25 +57,29 @@ enum RecurrenceMode: String, Codable, CaseIterable, Identifiable {
 /// `TaskItem.relativeRecurrenceOrdinal`/`.relativeRecurrenceWeekday` for
 /// the parameters each one reads.
 enum RelativeRecurrenceScope: String, Codable, CaseIterable, Identifiable {
-    /// "The 1st" / "the last day" of the month — only
-    /// `.first`/`.last` are ever offered for this scope (see
-    /// `TaskItem.hasRelativeDateOccurrence`'s doc comment for why any
-    /// other day-of-month is deliberately left to Specific Date instead).
+    /// "The 1st" / "the last day" of the month — only `.first`/`.last`
+    /// are ever offered as `RelativeRecurrenceOrdinal` values for this
+    /// scope (see `TaskItem.hasRelativeDateOccurrence`'s doc comment for
+    /// why any other day-of-month is deliberately left to Specific Date
+    /// instead). `TaskReviewCard`'s "Day" row folds that third option in
+    /// as "Same day" — a `DayOfMonthPosition` case that isn't a
+    /// `RelativeRecurrenceOrdinal` at all, since choosing it switches the
+    /// task to `.specificDate` rather than picking an ordinal here.
     case dayOfMonth
     /// "The first/second/third/fourth/last <weekday>" of the month.
     case weekdayOfMonth
     var id: String { rawValue }
 
-    /// Just "Day"/"Weekday," not "Day of month"/"Weekday of month" — this
-    /// is its only caller (`TaskReviewCard`'s "Pattern" row), and even the
-    /// shortened "Weekday of month" still wrapped next to the row's label
-    /// and chevron. "Of month" is redundant there anyway: the row is
-    /// nested under "Pattern" alongside Position and Weekday rows that
-    /// already establish every relative pattern is monthly.
+    /// This is its only caller (`TaskReviewCard`'s "On the" row).
+    /// Shortened to "Day"/"Weekday" once, then widened back out to these
+    /// exact strings — the row's own fixed-width column (see
+    /// `PickedMenuPicker`) removes the wrapping risk that motivated the
+    /// original shortening, so there's no longer a reason not to spell
+    /// these out.
     var label: String {
         switch self {
-        case .dayOfMonth: return "Day"
-        case .weekdayOfMonth: return "Weekday"
+        case .dayOfMonth: return "Day of month"
+        case .weekdayOfMonth: return "Day of Week"
         }
     }
 }

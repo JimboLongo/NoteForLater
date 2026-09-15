@@ -56,6 +56,7 @@ struct NoteForLaterApp: App {
         Self.backfillRemainingMinutesIfNeeded(container: sharedModelContainer)
         Self.repairDrainedRemainingMinutesIfNeeded(container: sharedModelContainer)
         Self.processPushedRecurringOccurrencesIfNeeded(container: sharedModelContainer)
+        Self.migrateIncompleteBlocksAndMealsToThreeStateIfNeeded(container: sharedModelContainer)
     }
 
     /// Runs once per calendar day, not once ever — unlike the one-time
@@ -117,6 +118,170 @@ struct NoteForLaterApp: App {
             // than silently leaving pushed occurrences stuck on a stale
             // `currentDate`.
         }
+    }
+
+    /// One-time backfill for the three-state completion redesign
+    /// (`TaskItem`/`ScheduledBlock`/`MealSelection.status`, replacing the
+    /// old bare `isCompleted: Bool`). Every existing row's `statusRaw` is
+    /// a brand-new column that defaults to `.none` with no historical
+    /// data of its own — this seeds it correctly instead of leaving every
+    /// pre-existing record reading as "never touched," using each model's
+    /// `legacyIsCompleted` (see `TaskItem.legacyIsCompleted`'s own doc
+    /// comment — the renamed-but-still-mapped old `isCompleted` column,
+    /// confirmed by a throwaway SwiftData probe to still hold the real
+    /// historical value at the point this runs).
+    ///
+    /// Three-way split per row, not just complete/incomplete:
+    /// - `legacyIsCompleted == true` → `.complete`. Actually finished,
+    ///   under the old code, before any of this existed.
+    /// - `false` and already in the past (`startTime`/`date < now`) →
+    ///   `.missed`. This is the faithful translation of what the old
+    ///   sweeps (`clearIncompletePastBlocks`/`resolveIncompleteMealSelections`)
+    ///   were about to do to it anyway — delete it and move on — not a new
+    ///   decision. Landing on `.missed` also means `resolveMissedPastBlocks`
+    ///   picks these up on the very next commit and guarantees each one a
+    ///   fresh placement, the same as if a real interactive tap had just
+    ///   landed it on `.missed` (see that function's own doc comment on
+    ///   why it exists as a redundant safety net *for exactly this case*).
+    /// - `false` and current/future → `.none`. Genuinely not reached yet;
+    ///   nothing to translate.
+    ///
+    /// `TaskItem` gets only the two-way `.complete`/`.none` split, not the
+    /// three-way one — unlike a block or meal, a bare task has no single
+    /// unambiguous day to compare against `now` (no due date, no
+    /// schedule, or scheduled far in the future are all ordinary), so
+    /// there's no non-arbitrary way to call an old incomplete task
+    /// "missed" the way a dated block or meal can be. Its `.missed`
+    /// surfaces identically to `.none` everywhere that reads it today
+    /// anyway (both fail `!isCompleted`), so this loses nothing
+    /// functionally — it just doesn't manufacture a "missed" verdict this
+    /// migration has no real basis for.
+    ///
+    /// A migrated `.complete` meal also gets `hasDeductedPantry = true` —
+    /// that deduction already happened for real, under the old
+    /// `isCompleted`-toggle pantry logic, before `hasDeductedPantry`
+    /// existed to guard it. Leaving it `false` would let a later
+    /// Complete → Missed → Complete cycle deduct the same ingredients a
+    /// second time. A migrated `.missed`/`.none` meal was never deducted,
+    /// so it's left `false`, still eligible for a real future deduction.
+    /// Blocks get no equivalent seed for `hasGuaranteedReplacement` — it
+    /// only ever gates `.missed`, and letting `resolveMissedPastBlocks`
+    /// see it unset (its ordinary default) is exactly what makes it
+    /// guarantee that first placement in the paragraph above.
+    ///
+    /// **Idempotence, the gate, and interruption — answered explicitly,
+    /// not assumed:**
+    ///
+    /// - **Gate:** `UserDefaults` key `didMigrateBlocksAndMealsToThreeState.v1`,
+    ///   checked before touching anything. It is set **only after**
+    ///   `context.save()` returns successfully — never before, and never
+    ///   speculatively. Setting it first would be the worse failure mode:
+    ///   a crash between "flag set" and "work finished" would permanently
+    ///   disable the retry that migration needs, leaving the store
+    ///   half-migrated forever with nothing left to notice or fix it.
+    ///   Setting it only after success means the only failure mode left
+    ///   is *retrying too often*, never *not retrying when it should*.
+    /// - **Interrupted partway (app killed mid-backfill):** SwiftData's
+    ///   `context.save()` is transactional — every row mutated in this
+    ///   pass commits together or not at all. Killed before `save()` is
+    ///   reached: nothing persisted, `legacyIsCompleted` and
+    ///   `hasMigratedThreeState` are both exactly as they were, next
+    ///   launch retries from an untouched, consistent starting point.
+    ///   Killed *during* `save()`: SQLite's own journal guarantees that
+    ///   resolves to fully-committed or fully-rolled-back, never a torn
+    ///   write. There is no state in which some rows are migrated and
+    ///   others aren't from a single interrupted pass.
+    /// - **Idempotence — the part that isn't free:** the one real gap,
+    ///   found by re-reading this function rather than assuming the flag
+    ///   alone was enough. The flag is set via `UserDefaults`, a
+    ///   *separate* store from the SwiftData one `save()` just committed
+    ///   to — so a crash in the narrow window *after* `save()` succeeds
+    ///   but *before* the `UserDefaults` write durably lands would leave
+    ///   the flag unset despite the data already being correctly
+    ///   migrated. The next launch would then run this function again
+    ///   against already-migrated data. Recomputing `migratedDatedStatus`
+    ///   from `legacyIsCompleted` + a *new* `now` on that second pass
+    ///   would not just redundantly repeat the first pass's answer — for
+    ///   a row still sitting at `.none` (the normal, legitimate state for
+    ///   anything genuinely undecided, whether that's because migration
+    ///   hasn't run yet or because it ran and the user simply hasn't
+    ///   acted since), enough wall-clock time passing between the two
+    ///   passes could flip `ownDay < now` from false to true and silently
+    ///   reclassify it to `.missed` — including a row the user
+    ///   deliberately cycled back to `.none` in between, since a bare
+    ///   `.none` can't tell "never migrated" apart from "migrated, still
+    ///   open." That would be exactly the silent reclassification this
+    ///   backfill must not cause. `hasMigratedThreeState` (see
+    ///   `TaskItem`'s own doc comment on it) closes this: checked before
+    ///   deriving, set in the *same* `context.save()` call as the
+    ///   `status` write it guards, so the two can never land out of sync
+    ///   the way the data store and `UserDefaults` can. A second full
+    ///   pass — however it's triggered — now touches zero already-done
+    ///   rows, making the *data-level* work idempotent regardless of
+    ///   whether the outer `UserDefaults` flag's write ever completes.
+    ///   The outer flag stays purely as a fast-path early exit for the
+    ///   overwhelmingly common case (already migrated, skip the fetch
+    ///   entirely) — the per-row flag is what actually guarantees
+    ///   correctness. Verified directly: `ThreeStateCompletionTests
+    ///   .test_migration_runTwice_secondPassIsANoOp`.
+    static func migrateIncompleteBlocksAndMealsToThreeStateIfNeeded(container: ModelContainer) {
+        let flagKey = "didMigrateBlocksAndMealsToThreeState.v1"
+        guard !UserDefaults.standard.bool(forKey: flagKey) else { return }
+
+        let context = ModelContext(container)
+        let now = Date.now
+
+        if let blocks = try? context.fetch(FetchDescriptor<ScheduledBlock>()) {
+            for block in blocks where !block.hasMigratedThreeState {
+                block.status = migratedDatedStatus(legacyIsCompleted: block.legacyIsCompleted, ownDay: block.startTime, now: now)
+                block.hasMigratedThreeState = true
+            }
+        }
+        if let meals = try? context.fetch(FetchDescriptor<MealSelection>()) {
+            for meal in meals where !meal.hasMigratedThreeState {
+                meal.status = migratedDatedStatus(legacyIsCompleted: meal.legacyIsCompleted, ownDay: meal.date, now: now)
+                if meal.status == .complete {
+                    meal.hasDeductedPantry = true
+                }
+                meal.hasMigratedThreeState = true
+            }
+        }
+        if let tasks = try? context.fetch(FetchDescriptor<TaskItem>()) {
+            for task in tasks where !task.hasMigratedThreeState {
+                task.status = migratedUndatedStatus(legacyIsCompleted: task.legacyIsCompleted)
+                task.hasMigratedThreeState = true
+            }
+        }
+        do {
+            try context.save()
+            UserDefaults.standard.set(true, forKey: flagKey)
+        } catch {
+            // Leave the flag unset so this retries next launch instead of
+            // silently leaving every existing record's status at the
+            // schema default. Safe to retry — see this function's own
+            // doc comment on idempotence.
+        }
+    }
+
+    /// The actual per-row decision `migrateIncompleteBlocksAndMealsToThreeStateIfNeeded`
+    /// applies to a block or meal — pulled out as its own pure function
+    /// (rather than left inline in that one-shot, `UserDefaults`-flag-gated
+    /// orchestration function) so it's unit-testable on its own, the same
+    /// reason `ScheduleReviewViewModel.recurringTaskOccurrenceStatus` is a
+    /// standalone function instead of inline view logic. See that
+    /// function's own doc comment for the full reasoning behind the
+    /// three-way split.
+    static func migratedDatedStatus(legacyIsCompleted: Bool, ownDay: Date, now: Date) -> OccurrenceStatus {
+        if legacyIsCompleted { return .complete }
+        return ownDay < now ? .missed : .none
+    }
+
+    /// The `TaskItem` counterpart — two-way, not three-way. See
+    /// `migrateIncompleteBlocksAndMealsToThreeStateIfNeeded`'s own doc
+    /// comment for why a bare task gets no `.missed` verdict from this
+    /// migration at all.
+    static func migratedUndatedStatus(legacyIsCompleted: Bool) -> OccurrenceStatus {
+        legacyIsCompleted ? .complete : .none
     }
 
     /// Walks `occurrence.currentDate` forward one day at a time, up to

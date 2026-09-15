@@ -9,7 +9,15 @@ import SwiftData
 /// as a page in ShelfCarouselView.
 struct InboxView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query(filter: #Predicate<TaskItem> { $0.shelf == nil && !$0.isCompleted }, sort: \TaskItem.createdAt)
+    // `$0.statusRaw != "complete"`, not `!$0.isCompleted` — SwiftData's
+    // `#Predicate` macro needs a real, persisted keypath to translate
+    // into a query; `isCompleted` is now a computed property (see
+    // `TaskItem.isCompleted`'s own doc comment) and isn't resolvable
+    // here at all. Same "not complete" meaning either way — an
+    // Inbox item this excludes for being `.missed` isn't a real scenario
+    // (nothing marks an unsorted, never-scheduled task missed), but the
+    // comparison is against the raw stored value regardless.
+    @Query(filter: #Predicate<TaskItem> { $0.shelf == nil && $0.statusRaw != "complete" }, sort: \TaskItem.createdAt)
     private var items: [TaskItem]
     @Query(sort: \Shelf.sortOrder) private var shelves: [Shelf]
     @Query(sort: \TaskItem.createdAt) private var allTasks: [TaskItem]

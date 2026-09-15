@@ -29,6 +29,24 @@ enum OccurrenceStatus: String {
         case .excused: return .none
         }
     }
+
+    /// The shorter cycle every non-habit completion surface uses:
+    /// `none → complete → missed → none`, `.excused` never reachable and
+    /// never produced. One shared implementation for `RecurringTaskLog`
+    /// (via `TaskItem.cycleRecurringOccurrence`), `TaskItem`'s own
+    /// completion, `ScheduledBlock`, and `MealSelection` — not four
+    /// hand-rolled switches that could quietly drift apart. `.excused`
+    /// folds into `.none` on the way in, purely for a `case` to stay
+    /// exhaustive without a `default:` masking a future new case; nothing
+    /// that uses this cycle ever actually produces `.excused` to begin
+    /// with, so that branch is unreachable in practice.
+    var cycledExcludingExcused: OccurrenceStatus {
+        switch self {
+        case .none: return .complete
+        case .complete: return .missed
+        case .missed, .excused: return .none
+        }
+    }
 }
 
 /// A recurring habit tracked day by day. `daysOfWeek` says which days it

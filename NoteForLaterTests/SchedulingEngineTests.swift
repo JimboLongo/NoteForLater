@@ -146,7 +146,17 @@ final class SchedulingEngineTests: XCTestCase {
 
     // MARK: - §12.9 — clearing that partial block restores remainingMinutes to full
 
-    func test_clearIncompletePastBlocks_restoresRemainingMinutes() async throws {
+    /// REVERSAL: this used to be `clearIncompletePastBlocks`, which
+    /// deleted the stale block and left the task unscheduled for a later
+    /// walk to maybe pick up. `resolveMissedPastBlocks` doesn't delete
+    /// anything and guarantees a fresh placement itself (matching the
+    /// interactive cycle's own behavior — see `cycleBlockCompletion`), so
+    /// `task.isScheduled` ends up `true` again, pointing at the new
+    /// block, not `false`. `remainingMinutes` restoring fully is still
+    /// this test's actual point, and still holds — `guaranteePlacement`
+    /// doesn't touch `remainingMinutes` itself, it only inserts a block
+    /// sized from the *original* block's own duration.
+    func test_resolveMissedPastBlocks_restoresRemainingMinutes() async throws {
         let testDay = day(2026, 1, 5)
         let yesterday = day(2026, 1, 4)
         let (shelf, rule) = makeShelf(fillStrategy: .maxDuration, maxTotalMinutes: 50)
@@ -160,12 +170,15 @@ final class SchedulingEngineTests: XCTestCase {
         let blockEnd = calendar.date(byAdding: .minute, value: 50, to: blockStart)!
         let block = ScheduledBlock(date: yesterday, startTime: blockStart, endTime: blockEnd, task: task)
         context.insert(block)
+        block.status = .missed
 
         let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: testDay)
-        await viewModel.clearIncompletePastBlocks(allBlocks: [block], cutoff: testDay)
+        viewModel.resolveMissedPastBlocks(allBlocks: [block])
 
         XCTAssertEqual(task.remainingMinutes, 120)
-        XCTAssertFalse(task.isScheduled)
+        let remainingBlocks = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        XCTAssertEqual(remainingBlocks.count, 2, "the missed block survives, and a fresh one is guaranteed alongside it")
+        XCTAssertTrue(remainingBlocks.contains { $0.id == block.id }, "the original missed block must not be deleted")
     }
 
     // MARK: - remainingMinutes starts in sync with estimatedMinutes
@@ -178,7 +191,7 @@ final class SchedulingEngineTests: XCTestCase {
 
     // MARK: - restoring more than the gap clamps to estimatedMinutes
 
-    func test_clearIncompletePastBlocks_clampsRemainingToEstimated() async throws {
+    func test_resolveMissedPastBlocks_clampsRemainingToEstimated() async throws {
         let testDay = day(2026, 1, 5)
         let yesterday = day(2026, 1, 4)
         let (shelf, rule) = makeShelf(fillStrategy: .maxDuration, maxTotalMinutes: 50)
@@ -192,9 +205,10 @@ final class SchedulingEngineTests: XCTestCase {
         let blockEnd = calendar.date(byAdding: .minute, value: 50, to: blockStart)!
         let block = ScheduledBlock(date: yesterday, startTime: blockStart, endTime: blockEnd, task: task)
         context.insert(block)
+        block.status = .missed
 
         let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: testDay)
-        await viewModel.clearIncompletePastBlocks(allBlocks: [block], cutoff: testDay)
+        viewModel.resolveMissedPastBlocks(allBlocks: [block])
 
         XCTAssertEqual(task.remainingMinutes, 120)
     }
@@ -202,11 +216,15 @@ final class SchedulingEngineTests: XCTestCase {
     // MARK: - §7.3 — a lock doesn't survive the day it was pinning past
 
     /// A lock only pins a block within its own day's layout — once that
-    /// day is over, `clearIncompletePastBlocks` clears it the same as any
-    /// other incomplete past block. Without this, a locked past-incomplete
-    /// block would keep matching `reviewableBlocks`' `startTime <
-    /// reviewCutoff` filter forever, with no in-app way to resolve it.
-    func test_clearIncompletePastBlocks_clearsLockedBlockToo() async throws {
+    /// day is over, `resolveMissedPastBlocks` resolves it the same as any
+    /// other missed past block, lock or not (deliberately ignores
+    /// `isLocked`, unchanged reasoning from before the reversal). Without
+    /// this, a locked missed block would keep matching `reviewableBlocks`'
+    /// own bound forever, with no in-app way to resolve it. Nothing is
+    /// deleted anymore, but a fresh placement is still guaranteed, so
+    /// `task.isScheduled` ends up `true` again — same as
+    /// `test_resolveMissedPastBlocks_restoresRemainingMinutes`.
+    func test_resolveMissedPastBlocks_resolvesLockedBlockToo() async throws {
         let testDay = day(2026, 1, 5)
         let yesterday = day(2026, 1, 4)
         let (shelf, rule) = makeShelf(fillStrategy: .maxDuration, maxTotalMinutes: 50)
@@ -218,12 +236,14 @@ final class SchedulingEngineTests: XCTestCase {
         let block = ScheduledBlock(date: yesterday, startTime: blockStart, endTime: blockEnd, task: task)
         block.isLocked = true
         context.insert(block)
+        block.status = .missed
 
         let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: testDay)
-        await viewModel.clearIncompletePastBlocks(allBlocks: [block], cutoff: testDay)
+        viewModel.resolveMissedPastBlocks(allBlocks: [block])
 
         XCTAssertEqual(task.remainingMinutes, 120)
-        XCTAssertFalse(task.isScheduled)
+        let remainingBlocks = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        XCTAssertTrue(remainingBlocks.contains { $0.id == block.id }, "the locked, missed block must not be deleted")
     }
 
     // MARK: - regenerateFromNow's own forward-looking clear also restores remainingMinutes
@@ -928,6 +948,12 @@ final class SchedulingEngineTests: XCTestCase {
         recurring.isRecurring = true
         recurring.recurrenceIntervalCount = 1
         recurring.recurrenceUnit = .days
+        // This test is specifically about a *timed*, block-placed
+        // recurring task's overlap behavior — explicit rather than
+        // relying on whatever `recurrenceTimeMode`'s ambient default
+        // happens to be (now `.midday`, an untimed placement that
+        // wouldn't produce a block to test overlap against at all).
+        recurring.recurrenceTimeMode = .specific
         // Anchored at 9am, the same hour the packer will start from.
         recurring.dueDate = calendar.date(byAdding: .hour, value: 9, to: testDay)!
         recurring.setEligible(true, for: rule)
@@ -1098,10 +1124,10 @@ final class SchedulingEngineTests: XCTestCase {
 
     // MARK: - TaskItem.recurrenceTimeMode
 
-    func test_recurrenceTimeMode_defaultsToSpecific() {
+    func test_recurrenceTimeMode_defaultsToMidday() {
         let shelf = Shelf(name: "S")
         let task = TaskItem(title: "T", shelf: shelf)
-        XCTAssertEqual(task.recurrenceTimeMode, .specific, "an existing recurring task with no raw value set yet must keep behaving exactly as before this field existed")
+        XCTAssertEqual(task.recurrenceTimeMode, .midday, "a genuinely untimed default, not a silently-timed one — see recurrenceTimeModeRaw's own doc comment")
     }
 
     func test_recurrenceTimeMode_getSetRoundTrips() {
@@ -1347,56 +1373,14 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertTrue(remainingBlocks.contains { $0.id == incompleteBlock.id }, "a still-open meal's block is live backlog and must not be touched")
     }
 
-    /// The flip side of the completed-purge tests: a `MealSelection` from
-    /// an earlier, unresolved day must be swept (selection and block
-    /// alike, same orphan-block concern as `purgeCompletedMealSelections`)
-    /// once the day it's for has been reviewed — otherwise it resurfaces
-    /// in every future Nightly Review forever. Also proves no pantry
-    /// deduction happens on this path: the matching pantry item's
-    /// quantity must be untouched, since an incomplete selection means
-    /// the dinner never happened.
-    func test_resolveIncompleteMealSelections_deletesBacklogSelectionAndBlockWithNoDeduction() async throws {
-        let recipe = Recipe(title: "Omelette", ingredients: ["2 eggs"])
-        context.insert(recipe)
-        let eggs = TaskItem(title: "Eggs")
-        eggs.quantity = 12
-        context.insert(eggs)
-
-        let backlogDay = day(2026, 1, 1)
-        let reviewDay = day(2026, 1, 3)
-        let selection = MealSelection(recipeID: recipe.id, recipeTitle: recipe.title, date: backlogDay)
-        context.insert(selection)
-        let start = calendar.date(byAdding: .hour, value: 17, to: backlogDay)!
-        let block = ScheduledBlock(date: backlogDay, startTime: start, endTime: calendar.date(byAdding: .hour, value: 1, to: start)!, task: nil)
-        block.isLocked = true
-        block.mealSelection = selection
-        context.insert(block)
-
-        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: reviewDay)
-        viewModel.resolveIncompleteMealSelections(reviewDate: reviewDay)
-
-        let remainingSelections = (try? context.fetch(FetchDescriptor<MealSelection>())) ?? []
-        XCTAssertFalse(remainingSelections.contains { $0.id == selection.id }, "an incomplete backlog meal selection must be resolved away once its day has been reviewed, or it resurfaces forever")
-        let remainingBlocks = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
-        XCTAssertFalse(remainingBlocks.contains { $0.id == block.id }, "the backlog selection's block must go with it — an orphan survives as a phantom \"Open slot\" row")
-        XCTAssertEqual(eggs.quantity, 12, "an incomplete meal never happened — resolving it must not trigger pantry deduction")
-    }
-
-    /// A meal still due today or later — not backlog — must survive: only
-    /// a selection whose own day is on or before the reviewed day is
-    /// resolved away.
-    func test_resolveIncompleteMealSelections_leavesFutureSelectionUntouched() async throws {
-        let reviewDay = day(2026, 1, 3)
-        let futureDay = day(2026, 1, 4)
-        let selection = MealSelection(recipeID: UUID(), recipeTitle: "Soup", date: futureDay)
-        context.insert(selection)
-
-        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: reviewDay)
-        viewModel.resolveIncompleteMealSelections(reviewDate: reviewDay)
-
-        let remaining = (try? context.fetch(FetchDescriptor<MealSelection>())) ?? []
-        XCTAssertTrue(remaining.contains { $0.id == selection.id }, "a meal planned for a day after the one being reviewed hasn't had its chance yet and must not be swept")
-    }
+    // `resolveIncompleteMealSelections` (formerly tested here) is gone —
+    // REVERSAL: with the Today gate now covering meals (see
+    // `NightlyReviewView.unresolvedGateReviewItems`), nothing can reach
+    // commit time still unresolved, so there's no more "close the book on
+    // it regardless" moment for this function to have handled. Coverage
+    // for the new behavior (an unresolved backlog meal blocks Next; a
+    // missed one is never deleted) lives in the three-state completion
+    // test suite instead.
 
     /// `insertMealBlock` calls `modelContext.insert(block)` directly,
     /// bypassing `ScheduleReviewViewModel.insertBlock` entirely — without

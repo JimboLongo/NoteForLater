@@ -129,14 +129,16 @@ final class MissedHabitVisibilityAndReviewCutoffTests: XCTestCase {
         XCTAssertTrue(result.contains { $0.habit.id == habit.id && $0.status == .complete })
     }
 
-    // MARK: - 1b. clearIncompletePastBlocks must not delete habit blocks
+    // MARK: - 1b. resolveMissedPastBlocks must not touch habit blocks, and no longer deletes anything
 
-    /// The second, independent reason a missed Specific-Time habit's row
-    /// could vanish, confirmed and fixed: a habit-linked incomplete block
-    /// must survive `clearIncompletePastBlocks` regardless of how far past
-    /// its own `startTime` the cutoff reaches.
+    /// REVERSAL: this used to be `clearIncompletePastBlocks` and deleted
+    /// an incomplete past block outright — that behavior is gone (see
+    /// `resolveMissedPastBlocks`'s own doc comment). A habit-linked block
+    /// was, and still is, never touched by this function at all —
+    /// confirmed here by leaving it at `.none` (never cycled to
+    /// `.missed`) and checking nothing about it changed.
     @MainActor
-    func test_clearIncompletePastBlocks_habitLinkedBlock_isNeverDeleted() async {
+    func test_resolveMissedPastBlocks_habitLinkedBlock_isNeverTouched() async {
         let habitStart = day(2026, 9, 1)
         let blockDay = day(2026, 9, 9)
         let habit = makeHabit(name: "Stretch", mode: .specific, startDate: habitStart)
@@ -147,25 +149,29 @@ final class MissedHabitVisibilityAndReviewCutoffTests: XCTestCase {
             task: nil, habit: habit, habitOccurrenceIndex: 0
         )
         context.insert(block)
+        // Would have been swept under the old unconditional filter —
+        // simulated here by marking it missed directly (a habit block's
+        // own status is never actually written by anything other than
+        // `toggleComplete`/`Habit.cycleOccurrence` in real use).
+        block.status = .missed
 
         let viewModel = ScheduleReviewViewModel(
             modelContext: context, calendarService: FakeCalendarService(), schedulingService: MockAISchedulingService(), targetDate: blockDay
         )
-        // Cutoff well past the block's own startTime — under the old,
-        // unconditional filter this alone would have been enough to
-        // delete it.
-        let farPastCutoff = calendar.date(byAdding: .day, value: 30, to: blockDay)!
-        await viewModel.clearIncompletePastBlocks(allBlocks: [block], cutoff: farPastCutoff)
+        viewModel.resolveMissedPastBlocks(allBlocks: [block])
 
         let remaining = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
-        XCTAssertEqual(remaining.count, 1, "a habit-linked block must never be cleared by this function")
+        XCTAssertEqual(remaining.count, 1, "a habit-linked block must never be cleared/touched by this function")
+        XCTAssertEqual(remaining.first?.status, .missed, "and its own status must be left exactly as it was")
     }
 
-    /// Sanity check on the other side: an ordinary *task*-linked incomplete
-    /// past block must still be cleared exactly as before — the habit
-    /// exclusion must not have accidentally protected everything.
+    /// REVERSAL, sanity check on the other side: an ordinary *task*-linked
+    /// missed past block is no longer deleted the way it used to be — it
+    /// survives, and the bookkeeping (`pushedCount`) that used to run
+    /// alongside the deletion still runs, so a fresh placement can still
+    /// be guaranteed for it.
     @MainActor
-    func test_clearIncompletePastBlocks_taskLinkedBlock_stillClearedAsBefore() async {
+    func test_resolveMissedPastBlocks_taskLinkedMissedBlock_survivesAndIsNotDoublePushed() async {
         let blockDay = day(2026, 9, 9)
         let task = TaskItem(title: "Test Task", estimatedMinutes: 30)
         context.insert(task)
@@ -176,15 +182,26 @@ final class MissedHabitVisibilityAndReviewCutoffTests: XCTestCase {
             task: task
         )
         context.insert(block)
+        block.status = .missed
+        XCTAssertEqual(task.pushedCount, 0)
 
         let viewModel = ScheduleReviewViewModel(
             modelContext: context, calendarService: FakeCalendarService(), schedulingService: MockAISchedulingService(), targetDate: blockDay
         )
-        let farPastCutoff = calendar.date(byAdding: .day, value: 30, to: blockDay)!
-        await viewModel.clearIncompletePastBlocks(allBlocks: [block], cutoff: farPastCutoff)
+        viewModel.resolveMissedPastBlocks(allBlocks: [block])
 
         let remaining = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
-        XCTAssertEqual(remaining.count, 0, "an ordinary task block must still be cleared")
+        XCTAssertTrue(remaining.contains { $0.id == block.id }, "an ordinary missed task block must survive — nothing deletes it anymore")
+        XCTAssertEqual(task.pushedCount, 1, "the bookkeeping this used to do alongside deletion still runs")
+
+        // Calling it again (mirroring a second commit-time sweep, or the
+        // interactive cycle having already guaranteed a placement) must
+        // not push a second time — `task.isScheduled` is what
+        // `guaranteePlacement` sets on success, and `resolveMissedPastBlocks`
+        // only ever considers a block whose task is still `false`.
+        task.isScheduled = true
+        viewModel.resolveMissedPastBlocks(allBlocks: [block])
+        XCTAssertEqual(task.pushedCount, 1, "must not double-push once the task is already (re-)scheduled")
     }
 
     // MARK: - 2. reviewCutoff no longer clamps to .now

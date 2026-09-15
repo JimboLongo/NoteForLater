@@ -20,7 +20,7 @@ struct ShelfListView: View {
     @State private var speechCapture = SpeechCaptureService()
     @State private var isShowingReceiptScanner = false
     @State private var isShowingBarcodeScanner = false
-    @State private var selectedTask: TaskItem?
+    @State private var selectedTask: PresentedTask?
     @State private var scrollProxy: ScrollViewProxy?
     @FocusState private var isCaptureFocused: Bool
 
@@ -90,7 +90,7 @@ struct ShelfListView: View {
                 }
                 ForEach(visibleTasks) { task in
                     Button {
-                        selectedTask = task
+                        selectedTask = PresentedTask(task: task, isNewlyCreated: false)
                     } label: {
                         TaskRow(task: task, showsScheduledBadge: shelf.hasEnabledSchedulingRules, showsPantryAge: shelf.isKitchen)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -135,8 +135,8 @@ struct ShelfListView: View {
         .onChange(of: speechCapture.transcript) { _, newValue in
             draftTitle = newValue
         }
-        .sheet(item: $selectedTask) { task in
-            TaskCardSheet(task: task, shelves: routableShelves)
+        .sheet(item: $selectedTask) { presented in
+            TaskCardSheet(task: presented.task, shelves: routableShelves, isNewlyCreated: presented.isNewlyCreated)
         }
     }
 
@@ -251,10 +251,25 @@ struct ShelfListView: View {
             // right place underneath/behind the sheet once dismissed,
             // but the card itself opens without waiting on it.
             if openCard {
-                selectedTask = task
+                selectedTask = PresentedTask(task: task, isNewlyCreated: true)
             }
         }
     }
+}
+
+/// Bundles a task with whether *this specific presentation* just created
+/// it, as one `.sheet(item:)` identity — rather than a second, independent
+/// `@State` bool alongside a bare `TaskItem?`, which could fall out of
+/// sync with which task is actually showing (e.g. a stale `true` left over
+/// from the plus button leaking into the next, unrelated row tap). Built
+/// fresh at each of the two call sites that set `selectedTask`, so there's
+/// nothing to reset between presentations — see `TaskCardSheet
+/// .isNewlyCreated`'s own doc comment for why the flag lives here at all
+/// rather than on `TaskItem`.
+private struct PresentedTask: Identifiable {
+    let task: TaskItem
+    let isNewlyCreated: Bool
+    var id: TaskItem.ID { task.id }
 }
 
 /// Not `private` — reused as-is by `InboxView`'s live search so a task

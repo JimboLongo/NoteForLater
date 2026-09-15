@@ -44,6 +44,10 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     func test_repeatsUnconfigured_relativeDate_intervalPickedButPatternNot() {
         let task = makeRecurringTask()
         task.recurrenceMode = .relativeDate
+        // "Pattern" is only ever asked for a monthly unit — see
+        // `TaskItem.relativeRecurrenceMissing`'s own doc comment for why
+        // this now gates on `recurrenceUnit`, not `recurrenceMode`.
+        task.recurrenceUnit = .months
         task.recurrenceIntervalPicked = true
 
         XCTAssertFalse(TaskReviewCard.isRepeatsConfigured(task: task, shelf: task.shelf))

@@ -23,12 +23,21 @@ final class RecurringTaskCardRenderTests: XCTestCase {
         context = ModelContext(container)
     }
 
-    /// Worst-case Relative Date values: `.weekdayOfMonth` (the "Weekday"
-    /// row only shows for this scope), `.fourth` (longest Position label,
-    /// tied with "Second"/"Third" but distinct from the shelf-list's own
-    /// worked example), and Wednesday (longest weekday name in English).
-    /// "Every" is left un-picked so `isRepeatsConfigured` is false and the
-    /// row auto-expands on `init`, without needing to simulate a tap.
+    /// Worst-case Relative Date values: `.months` (the "On the" row only
+    /// shows for this unit, post-redesign — the old mode toggle used to
+    /// show it regardless of `recurrenceUnit`, but that field now
+    /// actually gates it), `.weekdayOfMonth` (the "Weekday" row only
+    /// shows for this scope, and it's `RelativeRecurrenceScope`'s own
+    /// longest label, "Day of Week" vs. "Day of month"), `.fourth`
+    /// (longest Position label, tied with "Second"/"Third" but distinct
+    /// from the shelf-list's own worked example), Wednesday (longest
+    /// weekday name in English), and `.specific` (`HabitOccurrenceTimeMode`'s
+    /// own longest label, "Specific Time" vs. "AM"/"Midday"/"PM") — every
+    /// `PickedMenuPicker` on this card gets its actual widest option
+    /// selected at once, so the render shows every fixed-width column at
+    /// once. "Every" is left un-picked so `isRepeatsConfigured` is false
+    /// and the row auto-expands on `init`, without needing to simulate a
+    /// tap.
     private func makeWorstCaseRelativeTask() -> TaskItem {
         let shelf = Shelf(name: "Recurring Tasks")
         shelf.isRecurringTasks = true
@@ -36,28 +45,40 @@ final class RecurringTaskCardRenderTests: XCTestCase {
         let task = TaskItem.makeForDirectCapture(title: "Water the garden", shelf: shelf)
         context.insert(task)
         task.isRecurring = true
+        task.recurrenceUnit = .months
         task.recurrenceMode = .relativeDate
         task.relativeRecurrenceScope = .weekdayOfMonth
         task.relativeRecurrenceOrdinal = .fourth
+        task.recurrenceTimeMode = .specific
         task.relativeRecurrenceWeekday = 4 // Wednesday
         return task
     }
 
-    func test_patternRowFamily_rendersAtIPhone17Width_forVisualInspection() throws {
-        let task = makeWorstCaseRelativeTask()
-        let shelf = task.shelf!
+    /// Non-recurring worst-case values: Due picked to a real date (proves
+    /// the "decided-and-picked" state renders, not just "None"/"Not
+    /// selected"), a two-part duration ("2h 15m" — the longer of
+    /// `TaskItem.durationLabel`'s two non-trivial forms) with Divisible
+    /// fully and validly answered so nothing auto-expands or reports
+    /// missing, and High Priority — every row fully configured so all
+    /// four collapse simultaneously and the screenshot shows every one of
+    /// them in its resting, one-line state at once.
+    private func makeWorstCaseNonRecurringTask() -> TaskItem {
+        let task = TaskItem(title: "Renew the passport before the trip")
+        context.insert(task)
+        task.dueDateDecided = true
+        task.dueDate = Calendar.current.date(from: DateComponents(year: 2026, month: 9, day: 17))
+        task.dueDatePicked = true
+        task.durationDecided = true
+        task.durationAnsweredYes = true
+        task.estimatedMinutes = 135
+        task.isDivisibleDecided = true
+        task.isDivisible = true
+        task.minimumSegmentMinutes = TaskItem.validSegmentOptions(for: 135).first ?? 0
+        task.priority = .high
+        return task
+    }
 
-        let card = TaskReviewCard(
-            task: task,
-            shelves: [shelf],
-            onDiscard: {},
-            onSkip: {},
-            onMove: { _ in },
-            onNext: {},
-            onSnooze: { _ in }
-        )
-        .environment(\.modelContext, context)
-
+    private func renderAndSave(_ card: some View, to path: String) throws {
         let hosting = UIHostingController(rootView: card)
         let width = UIScreen.main.bounds.width
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: width, height: 1400))
@@ -79,12 +100,48 @@ final class RecurringTaskCardRenderTests: XCTestCase {
             hosting.view.drawHierarchy(in: hosting.view.bounds, afterScreenUpdates: true)
         }
         let data = try XCTUnwrap(image.pngData())
-        let path = "/private/tmp/claude-501/-Users-jimmylong-Desktop-NoteForLater/e4869a73-1104-4360-97d1-303c92f0e0ca/scratchpad/pattern_row_render.png"
         try data.write(to: URL(fileURLWithPath: path))
-
-        // The render itself is the evidence (inspected visually afterward);
-        // this assertion just confirms the file landed so a stale image
-        // from a previous run is never mistaken for this one.
         XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+    }
+
+    func test_patternRowFamily_rendersAtIPhone17Width_forVisualInspection() throws {
+        let task = makeWorstCaseRelativeTask()
+        let shelf = task.shelf!
+
+        let card = TaskReviewCard(
+            task: task,
+            shelves: [shelf],
+            onDiscard: {},
+            onSkip: {},
+            onMove: { _ in },
+            onNext: {},
+            onSnooze: { _ in }
+        )
+        .environment(\.modelContext, context)
+
+        try renderAndSave(
+            card,
+            to: "/private/tmp/claude-501/-Users-jimmylong-Desktop-NoteForLater/e4869a73-1104-4360-97d1-303c92f0e0ca/scratchpad/pattern_row_render.png"
+        )
+    }
+
+    func test_nonRecurringRows_renderAtIPhone17Width_forVisualInspection() throws {
+        let task = makeWorstCaseNonRecurringTask()
+
+        let card = TaskReviewCard(
+            task: task,
+            shelves: [],
+            onDiscard: {},
+            onSkip: {},
+            onMove: { _ in },
+            onNext: {},
+            onSnooze: { _ in }
+        )
+        .environment(\.modelContext, context)
+
+        try renderAndSave(
+            card,
+            to: "/private/tmp/claude-501/-Users-jimmylong-Desktop-NoteForLater/e4869a73-1104-4360-97d1-303c92f0e0ca/scratchpad/non_recurring_rows_render.png"
+        )
     }
 }

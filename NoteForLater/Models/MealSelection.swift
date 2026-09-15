@@ -27,13 +27,62 @@ final class MealSelection {
     /// step, for `planDate` (tomorrow relative to whichever day is being
     /// reviewed).
     var date: Date
-    var isCompleted: Bool = false
+    /// See `TaskItem.legacyIsCompleted`'s doc comment — identical
+    /// reasoning and mechanism, applied here so a historically-completed
+    /// meal doesn't silently read back as never-completed once
+    /// `statusRaw` takes over. Read once by `NoteForLaterApp
+    /// .migrateIncompleteBlocksAndMealsToThreeStateIfNeeded`, which also
+    /// backfills `hasDeductedPantry` for anything this seeds as
+    /// `.complete` — that pantry deduction already happened for real,
+    /// under the old code, before either of these properties existed.
+    @Attribute(originalName: "isCompleted")
+    var legacyIsCompleted: Bool = false
+    /// See `TaskItem.hasMigratedThreeState`'s doc comment — identical
+    /// reasoning and mechanism, applied here so a second migration
+    /// invocation skips an already-migrated meal instead of re-deriving
+    /// (and potentially reclassifying) its `status`.
+    var hasMigratedThreeState: Bool = false
+    /// Backing storage for `status` — see `OccurrenceStatus`'s own doc
+    /// comment. Defaults to `.none`'s raw value so a pre-migration row
+    /// (no `statusRaw` column at all yet) reads as untouched until
+    /// `migrateIncompleteBlocksAndMealsToThreeStateIfNeeded` seeds it from
+    /// `legacyIsCompleted` — matching the old `isCompleted: Bool`'s own
+    /// default of `false` in the meantime.
+    var statusRaw: String = OccurrenceStatus.none.rawValue
+    /// This meal's three-state completion — the source of truth;
+    /// `ScheduledBlock.status` on its paired block is only ever a mirror
+    /// of this (see that property's own doc comment). Never writes
+    /// `.excused` — see `OccurrenceStatus.cycledExcludingExcused`.
+    var status: OccurrenceStatus {
+        get { OccurrenceStatus(rawValue: statusRaw) ?? .none }
+        set { statusRaw = newValue.rawValue }
+    }
+    /// `statusRaw` is the only real storage — see `TaskItem.isCompleted`'s
+    /// own doc comment for the full reasoning (identical here): stays
+    /// fully settable so every existing call site keeps compiling
+    /// unchanged, and setting `false` always lands on `.none`, never
+    /// preserves `.missed`.
+    var isCompleted: Bool {
+        get { status == .complete }
+        set { status = newValue ? .complete : .none }
+    }
+    /// Set the first (and only ever) time `status` transitions into
+    /// `.complete` — checked *instead of* the current status before
+    /// deducting from the pantry, so cycling Complete → Missed → Complete
+    /// deducts exactly once, not twice. Never cleared back to `false`:
+    /// there's no restock on leaving `.complete` (the deduction math
+    /// clamps ingredient quantities at zero and isn't cleanly
+    /// reversible), so once real pantry state has been adjusted for this
+    /// meal, it stays adjusted regardless of how the meal's own status
+    /// keeps cycling afterward.
+    var hasDeductedPantry: Bool = false
 
     init(recipeID: UUID, recipeTitle: String, date: Date) {
         self.id = UUID()
         self.recipeID = recipeID
         self.recipeTitle = recipeTitle
         self.date = Calendar.current.startOfDay(for: date)
-        self.isCompleted = false
+        self.statusRaw = OccurrenceStatus.none.rawValue
+        self.hasDeductedPantry = false
     }
 }

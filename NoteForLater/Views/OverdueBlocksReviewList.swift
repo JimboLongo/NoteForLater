@@ -82,6 +82,29 @@ enum ReviewItem: Identifiable {
         }
     }
 
+    /// Whether this row currently blocks the Today step's "Next" gate —
+    /// see `NightlyReviewView.unresolvedGateReviewItems`'s own doc
+    /// comment for the full reasoning behind what counts as unresolved.
+    /// Extracted here, out of that view property's filter closure, so
+    /// it's directly testable without a SwiftUI/`@Query` harness — the
+    /// same reason `ScheduleReviewViewModel.recurringTaskOccurrenceStatus`
+    /// is already a standalone function rather than inline view logic.
+    func blocksGate(context: ModelContext) -> Bool {
+        switch self {
+        case .habit: return false // unreachable — see `unresolvedGateReviewItems`'s own doc comment
+        case .recurringTask(let occurrence): return occurrence.status == .none
+        case .block(let block):
+            if let task = block.task, task.isRecurring, task.recurrenceTimeMode == .specific {
+                return ScheduleReviewViewModel.recurringTaskOccurrenceStatus(task: task, on: block.date, context: context) == .none
+            }
+            // An ordinary (non-recurring) task block — gated on its own
+            // `status` now, same as every other row here.
+            return block.status == .none
+        case .meal(let selection, _): return selection.status == .none
+        case .completedTask: return false
+        }
+    }
+
     // `internal` (not `fileprivate`) so `NightlyReviewSortOrderTests` can
     // exercise the real sort logic in `groupedByDay` directly, rather than
     // duplicating it in test code — a duplicated comparator could drift
@@ -159,22 +182,14 @@ enum ReviewItem: Identifiable {
 struct OverdueBlocksReviewList: View {
     let items: [ReviewItem]
     /// Fired every time a row's circle is tapped. What it actually does
-    /// is the caller's choice, not this view's: Nightly Review's Today
-    /// step stages the tap in local state and only writes the real model
-    /// on Next (see `isEffectivelyCompleted` below), while a caller that
-    /// wants the old immediate-write behavior can still flip a block's
-    /// completion (`ScheduleReviewViewModel.toggleComplete`) or a habit
-    /// occurrence's (`ScheduleReviewViewModel.toggleHabitOccurrence`)
-    /// directly from here. Never fired for `.completedTask` — that row
-    /// has no live model to toggle.
+    /// is the caller's choice, not this view's — every row writes
+    /// immediately now (Nightly Review's Today step used to stage
+    /// `.block`/`.meal` taps and only commit on Next; that's gone, since
+    /// a three-state cycle needs each tap to see the row's real, current
+    /// status to know what the next one should produce). Never fired for
+    /// `.completedTask` — that row has no live model to toggle.
     let onToggle: (ReviewItem) -> Void
     var onDone: (() -> Void)? = nil
-    /// Overrides a row's rendered completion state without reading
-    /// `block.isCompleted`/`occurrence.isCompleted` directly — how
-    /// Nightly Review's Today step shows a tap as pending-but-reversible
-    /// before Next actually commits it. `nil` (the default) falls back
-    /// to reading the model directly, unchanged from before this existed.
-    var isEffectivelyCompleted: ((ReviewItem) -> Bool)? = nil
     /// Set by the caller to a `ReviewItem.id` to scroll that row into
     /// view (e.g. Nightly Review's "N habits still unmarked" jump-to
     /// button, for a long list where the gate is blocking on a row
@@ -262,20 +277,15 @@ struct OverdueBlocksReviewList: View {
     private func row(for item: ReviewItem) -> some View {
         switch item {
         case .block(let block):
-            blockRow(block, isCompleted: isEffectivelyCompleted?(item) ?? block.isCompleted)
+            blockRow(block)
         case .habit(let occurrence):
-            // No `isEffectivelyCompleted` override here — a habit
-            // occurrence's own `status` is always live (see
-            // `NightlyReviewView`'s frozen-snapshot-with-live-refresh
-            // design), never staged, so there's nothing to override.
             habitRow(occurrence)
         case .recurringTask(let occurrence):
-            // Same reasoning as `.habit` — always live, never staged.
             recurringTaskRow(occurrence)
         case .completedTask(let record, _):
             completedTaskRow(record)
         case .meal(let selection, let targetTime):
-            mealRow(selection, targetTime: targetTime, isCompleted: isEffectivelyCompleted?(item) ?? selection.isCompleted)
+            mealRow(selection, targetTime: targetTime)
         }
     }
 
@@ -284,64 +294,47 @@ struct OverdueBlocksReviewList: View {
     /// the `Spacer()`'s blank space and the lock icon tappable too, not
     /// just wherever the row happens to draw something.
     ///
-    /// **Goes 3-state for a recurring task's own Specific-Time block**
-    /// (`block.task?.isRecurring == true`) — ignores the passed
-    /// `isCompleted`/`isEffectivelyCompleted` entirely and reads live
-    /// through `RecurringTaskLog` instead (see `ScheduleReviewViewModel
+    /// Three-state for every block now, not just a recurring task's own
+    /// Specific-Time one — the only difference between the two branches
+    /// is *where* the status comes from. A recurring task's block reads
+    /// live through `RecurringTaskLog` instead (see `ScheduleReviewViewModel
     /// .recurringTaskOccurrenceStatus`), the same source of truth
-    /// `TaskItem.cycleRecurringOccurrence` writes to — `block.isCompleted`
-    /// is only ever a mirror for this task, never consulted directly here.
-    /// Every other block keeps the plain 2-state circle unchanged; the
-    /// caller's `onToggle` is what actually decides which path a tap
-    /// takes (see `NightlyReviewView.todayStep`'s own `isRecurring` check).
+    /// `TaskItem.cycleRecurringOccurrence` writes to — `block.status` is
+    /// only ever a mirror for this task, never consulted directly here.
+    /// An ordinary task block reads `block.status` directly instead — it
+    /// *is* the source of truth for that one (see `ScheduledBlock.status`'s
+    /// own doc comment). The caller's `onToggle` is what actually decides
+    /// which cycle a tap advances (see `NightlyReviewView.todayStep`'s
+    /// own `isRecurring` check) — this only decides what to display.
     @ViewBuilder
-    private func blockRow(_ block: ScheduledBlock, isCompleted: Bool) -> some View {
-        if let task = block.task, task.isRecurring {
-            let status = ScheduleReviewViewModel.recurringTaskOccurrenceStatus(task: task, on: block.date, context: modelContext)
-            HStack(alignment: .top, spacing: 12) {
-                habitSelectionCircle(status: status)
-                    .padding(.vertical, 4)
-                VStack(alignment: .leading) {
-                    Text(timeRangeText(block))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(block.displayTitle)
-                        .strikethrough(status == .complete)
-                }
-                Spacer()
-                if block.isLocked {
-                    Image(systemName: "lock.fill")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+    private func blockRow(_ block: ScheduledBlock) -> some View {
+        let status: OccurrenceStatus = {
+            if let task = block.task, task.isRecurring {
+                return ScheduleReviewViewModel.recurringTaskOccurrenceStatus(task: task, on: block.date, context: modelContext)
             }
-            .contentShape(Rectangle())
-            .onTapGesture { onToggle(.block(block)) }
-            .opacity(status == .none ? 1 : 0.5)
-            .listRowBackground((block.task?.shelf?.color ?? Color.clear).opacity(0.2))
-        } else {
-            HStack(alignment: .top, spacing: 12) {
-                selectionCircle(isSelected: isCompleted)
-                    .padding(.vertical, 4)
-                VStack(alignment: .leading) {
-                    Text(timeRangeText(block))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(block.displayTitle)
-                        .strikethrough(isCompleted)
-                }
-                Spacer()
-                if block.isLocked {
-                    Image(systemName: "lock.fill")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+            return block.status
+        }()
+        HStack(alignment: .top, spacing: 12) {
+            habitSelectionCircle(status: status)
+                .padding(.vertical, 4)
+            VStack(alignment: .leading) {
+                Text(timeRangeText(block))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(block.displayTitle)
+                    .strikethrough(status == .complete)
             }
-            .contentShape(Rectangle())
-            .onTapGesture { onToggle(.block(block)) }
-            .opacity(isCompleted ? 0.5 : 1)
-            .listRowBackground((block.task?.shelf?.color ?? Color.clear).opacity(0.2))
+            Spacer()
+            if block.isLocked {
+                Image(systemName: "lock.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
+        .contentShape(Rectangle())
+        .onTapGesture { onToggle(.block(block)) }
+        .opacity(status == .none ? 1 : 0.5)
+        .listRowBackground((block.task?.shelf?.color ?? Color.clear).opacity(0.2))
     }
 
     /// Same full-row tap target as `blockRow`.
@@ -398,17 +391,17 @@ struct OverdueBlocksReviewList: View {
     /// only ever depends on `selection.id`, so passing `targetTime` again
     /// here (rather than the exact value this row was built with)
     /// doesn't change which item the caller ends up toggling.
-    private func mealRow(_ selection: MealSelection, targetTime: Date, isCompleted: Bool) -> some View {
+    private func mealRow(_ selection: MealSelection, targetTime: Date) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            selectionCircle(isSelected: isCompleted)
+            habitSelectionCircle(status: selection.status)
                 .padding(.vertical, 4)
             Text("Cooked: \(selection.recipeTitle)")
-                .strikethrough(isCompleted)
+                .strikethrough(selection.status == .complete)
             Spacer()
         }
         .contentShape(Rectangle())
         .onTapGesture { onToggle(.meal(selection, targetTime: targetTime)) }
-        .opacity(isCompleted ? 0.5 : 1)
+        .opacity(selection.status == .none ? 1 : 0.5)
     }
 
     /// Read-only — no `onTapGesture` at all. `record`'s underlying task

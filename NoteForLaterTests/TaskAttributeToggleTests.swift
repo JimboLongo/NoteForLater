@@ -470,6 +470,9 @@ final class TaskAttributeToggleTests: XCTestCase {
         shelf.isRecurringTasks = true
         let task = TaskItem.makeForDirectCapture(title: "Water the garden", shelf: shelf)
         task.recurrenceMode = .relativeDate
+        // "Pattern" is only ever asked for a monthly unit now — see
+        // `TaskItem.relativeRecurrenceMissing`'s own doc comment.
+        task.recurrenceUnit = .months
 
         XCTAssertTrue(task.missingAttributeNames(consideringShelf: shelf).contains("Pattern"))
     }

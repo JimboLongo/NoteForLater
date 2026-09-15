@@ -89,7 +89,81 @@ final class TaskItem {
     var tags: [String] = []
     var priorityRaw: String = Priority.unset.rawValue
     var isScheduled: Bool = false
-    var isCompleted: Bool = false
+    /// The pre-three-state `isCompleted: Bool` column, kept alive under a
+    /// new Swift name so its data survives the schema change instead of
+    /// being silently discarded — `@Attribute(originalName:)` keeps this
+    /// mapped to the same underlying storage the old stored `isCompleted`
+    /// used, so a lightweight migration doesn't touch it at all. Written
+    /// once, by the old code, before this property existed; never written
+    /// again after that. Read exactly once, by `NoteForLaterApp
+    /// .migrateIncompleteBlocksAndMealsToThreeStateIfNeeded`, to seed
+    /// `status` correctly for data that predates it — **without this,
+    /// every historically-completed task would silently read back as
+    /// never-completed** the moment `statusRaw` (a brand-new column with
+    /// no historical data of its own) took over as the source of truth.
+    /// Confirmed empirically (a throwaway SwiftData migration probe, not
+    /// assumed) before relying on it: a stored property that becomes
+    /// computed loses its old column's data on the very first open with
+    /// the new schema unless the old column is kept mapped like this.
+    /// Dead weight after the migration runs — left in place rather than
+    /// removed, since removing it later is a no-risk cleanup and adding
+    /// it back after shipping without it would not recover lost data.
+    @Attribute(originalName: "isCompleted")
+    var legacyIsCompleted: Bool = false
+    /// Set the moment `NoteForLaterApp
+    /// .migrateIncompleteBlocksAndMealsToThreeStateIfNeeded` derives this
+    /// row's `status` from `legacyIsCompleted` — checked *before* deriving,
+    /// not just recorded after, so a second invocation (the one realistic
+    /// path: that function's own `UserDefaults` completion flag failing to
+    /// persist after a successful `context.save()` — a crash in that
+    /// narrow window) skips this row entirely rather than re-deriving it.
+    /// Re-deriving would silently reclassify a row the app has touched
+    /// since — including a task the user deliberately cycled back to
+    /// `.none` — because `.none` is indistinguishable from "not yet
+    /// migrated" by itself. Committed in the *same* `context.save()` call
+    /// as the `status` write it guards, so SwiftData's transaction
+    /// guarantee (all-or-nothing) means the two can never land out of
+    /// sync: either both persist or neither does. Permanent dead weight
+    /// after that one save succeeds, same as `legacyIsCompleted`.
+    var hasMigratedThreeState: Bool = false
+    /// Backing storage for `status` — see `OccurrenceStatus`'s own doc
+    /// comment. Defaults to `.none`'s raw value so a pre-migration row
+    /// (no `statusRaw` column at all yet) reads as untouched until
+    /// `migrateIncompleteBlocksAndMealsToThreeStateIfNeeded` seeds it from
+    /// `legacyIsCompleted` — matching the old `isCompleted: Bool`'s own
+    /// default of `false` in the meantime.
+    var statusRaw: String = OccurrenceStatus.none.rawValue
+    /// The task's own three-state completion — `.missed` is reachable
+    /// for any task now, not only a recurring occurrence's day-scoped
+    /// one (that's still `RecurringTaskLog`, untouched). Never writes
+    /// `.excused` — see `OccurrenceStatus.cycledExcludingExcused`, the
+    /// one shared cycle this and `ScheduledBlock`/`MealSelection` all
+    /// use.
+    var status: OccurrenceStatus {
+        get { OccurrenceStatus(rawValue: statusRaw) ?? .none }
+        set { statusRaw = newValue.rawValue }
+    }
+    /// `statusRaw` is the only real storage — this and `status` are both
+    /// just views onto it, so there's nothing to keep in sync and
+    /// nothing that can drift out of sync. Stays fully settable
+    /// (`get`/`set`, not get-only) so every existing call site
+    /// (`task.isCompleted = true`, `setCompleted`, shelf swipe actions,
+    /// `DailyDigestCheckInView`, ...) keeps compiling and working
+    /// unchanged — none of them need to know a third state exists.
+    ///
+    /// The one deliberate, load-bearing consequence: **setting `false`
+    /// always lands on `.none`, never preserves `.missed`.** A bare bool
+    /// write has no way to express three states, so it can only ever
+    /// mean "not complete, undecided" — not "reassert whatever
+    /// missed-ness was already there." Only code that's aware of the
+    /// three-state cycle can ever produce `.missed` at all (it writes
+    /// `.status` directly), so this only ever collapses a state nothing
+    /// *un*-aware of `.missed` could have meant to preserve in the first
+    /// place. Setting `true` is unambiguous either way.
+    var isCompleted: Bool {
+        get { status == .complete }
+        set { status = newValue ? .complete : .none }
+    }
     /// True only between "Next" on the Nightly Review Today step and the
     /// push that follows — see `NightlyReviewView.advance()`'s
     /// today→inbox transition. Not durable state on a surviving task:
@@ -206,11 +280,20 @@ final class TaskItem {
     /// `isCompleted` — a recurring task has no single, one-time
     /// completion state the way a plain block does, the same reason
     /// habits needed `HabitLog` instead of reusing `ScheduledBlock` for
-    /// this. Defaults to `.specific` so every recurring task that existed
-    /// before this field did keeps behaving exactly as it always has.
-    var recurrenceTimeModeRaw: String = HabitOccurrenceTimeMode.specific.rawValue
+    /// this.
+    ///
+    /// Defaults to `.midday` — a genuinely untimed placement, not a
+    /// silently-timed one — so a fresh recurring task's "Time" row reads
+    /// a real, sensible value ("Midday") the instant it's expanded,
+    /// instead of an empty-feeling "Specific Time" with the clock
+    /// sitting on whatever `recurrenceTimeOfDayMinutes` happens to
+    /// default to. This only affects a `TaskItem` constructed after this
+    /// change — an already-persisted row keeps whatever concrete value
+    /// SwiftData already wrote for it, the same way every stored-property
+    /// default here only ever governs brand new rows going forward.
+    var recurrenceTimeModeRaw: String = HabitOccurrenceTimeMode.midday.rawValue
     /// Whether "Time" (AM/Midday/PM/Specific, above) has actually been
-    /// deliberately set — `.specific` is `recurrenceTimeModeRaw`'s real
+    /// deliberately set — `.midday` is `recurrenceTimeModeRaw`'s real
     /// stored default, not evidence anyone chose it. Same "picked" shape
     /// as `recurrenceIntervalPicked`.
     var recurrenceTimeModePicked: Bool = false
@@ -523,16 +606,50 @@ final class TaskItem {
     @discardableResult
     func cycleRecurringOccurrence(on date: Date, context: ModelContext, calendar: Calendar = .current) -> OccurrenceStatus {
         let log = RecurringTaskLog.logOrCreate(taskID: id, on: date, context: context, calendar: calendar)
-        let next: OccurrenceStatus
-        switch log.status {
-        case .none: next = .complete
-        case .complete: next = .missed
-        case .missed, .excused: next = .none
-        }
+        let next = log.status.cycledExcludingExcused
         log.status = next
         log.lastModified = .now
         if let block = (scheduledBlocks ?? []).first(where: { calendar.isDate($0.date, inSameDayAs: date) }) {
-            block.isCompleted = next == .complete
+            // `.status`, not `.isCompleted` — the block is still only a
+            // *mirror* of this log (unchanged: `RecurringTaskLog` stays
+            // the source of truth for a recurring task's occurrence),
+            // but writing the real status directly lets that mirror
+            // preserve `.missed` distinctly from `.none` too, instead of
+            // collapsing both to `isCompleted == false` the way the old
+            // plain-bool write here necessarily did.
+            block.status = next
+        }
+        if next == .complete {
+            TaskCompletionRecord.upsert(for: self, in: context)
+        } else {
+            TaskCompletionRecord.remove(for: self, in: context)
+        }
+        return next
+    }
+
+    /// The plain (not day-scoped) completion cycle — 2-Minute tasks, and
+    /// any other task's own completion where there's no `ScheduledBlock`
+    /// driving it, cycle through here instead of a two-way `setCompleted`
+    /// toggle. Same shared `cycledExcludingExcused` cycle
+    /// `cycleRecurringOccurrence` uses, applied directly to this task's
+    /// own `status` — a non-recurring task has no separate day-scoped log
+    /// the way a recurring occurrence does; the task itself already *is*
+    /// the one, not-date-scoped occurrence.
+    ///
+    /// Mirrors onto `scheduledBlocks` the same way `setCompleted` already
+    /// does, for the same reason — harmless no-op for a 2-Minute task
+    /// (never has one), correct if some other caller ever cycles a task
+    /// that does. A task *with* a block is still expected to have its
+    /// completion driven from the block's own circle
+    /// (`ScheduleReviewViewModel.toggleComplete`, which mirrors block →
+    /// task, the opposite direction) — this method is for the surfaces
+    /// where the task itself is the only thing to cycle.
+    @discardableResult
+    func cycleCompletion(in context: ModelContext) -> OccurrenceStatus {
+        let next = status.cycledExcludingExcused
+        status = next
+        for block in scheduledBlocks ?? [] {
+            block.status = next
         }
         if next == .complete {
             TaskCompletionRecord.upsert(for: self, in: context)
@@ -788,6 +905,58 @@ final class TaskItem {
             task.makeRecurring()
         }
         return task
+    }
+
+    /// Deletes `task` along with every record keyed to it that plain
+    /// `context.delete(task)` leaves behind. `scheduledBlocks`
+    /// *nullifies* rather than deletes (`.nullify` — see that
+    /// relationship's own declaration), so those need an explicit
+    /// delete; `RecurringTaskLog`/`PushedRecurringOccurrence`/
+    /// `TaskCompletionRecord` all key by a copied `taskID`, not a
+    /// `@Relationship`, specifically so they survive the task being
+    /// edited or deleted elsewhere (see each type's own doc comment) —
+    /// which means nothing cleans them up on its own once deletion is
+    /// actually what's wanted.
+    ///
+    /// `task.tags` needs nothing further here: it's a plain `[String]`
+    /// stored directly on the task, not a separate per-task association
+    /// row, so it goes with the object. The *shared* `Tag` catalog
+    /// entries a session might have created (`TaskReviewCard.addTag()`)
+    /// are deliberately left alone — see `Tag`'s own doc comment: that's
+    /// app-wide vocabulary ("every tag name ever attached to a task or
+    /// inbox item"), not this task's data, and other tasks may already
+    /// be reading it.
+    ///
+    /// Operates on whatever's actually associated with `task.id` right
+    /// now, not a diff of what this session touched — a `ScheduledBlock`
+    /// from auto-placement or a manual calendar drag gets cleaned up
+    /// exactly the same as one the card's own controls created, since a
+    /// task that's being deleted because it was never saved shouldn't
+    /// leave anything behind regardless of how that state came to exist.
+    static func deleteCascading(_ task: TaskItem, in context: ModelContext) {
+        let taskID = task.id
+        for block in task.scheduledBlocks ?? [] {
+            context.delete(block)
+        }
+        let logs = (try? context.fetch(FetchDescriptor<RecurringTaskLog>(
+            predicate: #Predicate { $0.taskID == taskID }
+        ))) ?? []
+        for log in logs {
+            context.delete(log)
+        }
+        let pushedOccurrences = (try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>(
+            predicate: #Predicate { $0.taskID == taskID }
+        ))) ?? []
+        for occurrence in pushedOccurrences {
+            context.delete(occurrence)
+        }
+        let completionRecords = (try? context.fetch(FetchDescriptor<TaskCompletionRecord>(
+            predicate: #Predicate { $0.taskID == taskID }
+        ))) ?? []
+        for record in completionRecords {
+            context.delete(record)
+        }
+        context.delete(task)
     }
 
     /// The soonest day *after* `date` where at least one of this task's
@@ -1316,14 +1485,22 @@ final class TaskItem {
         isRecurring && !recurrenceTimeModePicked
     }
 
-    /// Only applies when `recurrenceMode == .relativeDate` — a Specific
-    /// Date task is never asked this question at all. Same reasoning as
-    /// `recurrenceIntervalMissing`: "Day of Month, First" (i.e. "the 1st
-    /// of the month") is a real, storable default, not a placeholder, so
-    /// only `relativeRecurrencePicked` can tell "never touched" apart
-    /// from "deliberately the 1st."
+    /// Only applies when `recurrenceUnit == .months` — daily/weekly
+    /// recurrence never asks this question at all, since "on the 1st" or
+    /// "the last Saturday" only mean something once a month. Gated on
+    /// `recurrenceUnit`, not `recurrenceMode` (a prior version of this
+    /// check) — `TaskReviewCard`'s combined "On the" row can resolve to
+    /// *either* mode (the "Same day" choice sets `.specificDate`, "First
+    /// day"/"Last day"/a weekday set `.relativeDate`), so `recurrenceMode`
+    /// alone can no longer tell "never touched this question" apart from
+    /// "deliberately chose Same day" — `recurrenceMode == .specificDate`
+    /// is what *both* of those states look like. `relativeRecurrencePicked`
+    /// is still the one flag both branches share, exactly as before: "Day
+    /// of Month, First" (i.e. "the 1st of the month") is a real, storable
+    /// default, not a placeholder, so only this flag can tell "never
+    /// touched" apart from "deliberately the 1st."
     private func relativeRecurrenceMissing(on shelf: Shelf?) -> Bool {
-        isRecurring && recurrenceMode == .relativeDate && !relativeRecurrencePicked
+        isRecurring && recurrenceUnit == .months && !relativeRecurrencePicked
     }
 
     /// True if "Has next step" is Yes but nothing's actually been typed,

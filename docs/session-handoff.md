@@ -8,6 +8,28 @@ repeatedly this session — the crash-surface item at the bottom of this file
 exists only because a test actually ran and something broke, not because
 anyone inferred it.
 
+**SwiftData trap, general — not specific to any one change:** turning an
+existing `@Model` stored property into a computed one (e.g. `isCompleted:
+Bool` → a computed property backed by a new `statusRaw` stored field)
+silently zeroes that property's history the moment the app opens the store
+with the new schema. Lightweight migration adds the new stored column with
+its Swift default and does not carry the old column's data into it — there
+is no compile error, no runtime warning, nothing to notice until old
+records start reading back as if they'd never happened. Confirmed with a
+throwaway probe (write a row under the old shape, reopen the same `.store`
+file under the new shape, read it back) rather than assumed — the
+probe showed a row saved as `isCompleted: true` reading back
+`statusRaw: "none"` after nothing but opening it. The fix: before removing
+the old stored property, rename it and keep it mapped to the same column
+with `@Attribute(originalName: "isCompleted") var legacyIsCompleted: Bool`,
+so the old data survives under the new name; a one-time migration pass then
+reads `legacyIsCompleted` to seed the new field correctly. Applied to
+`TaskItem`/`ScheduledBlock`/`MealSelection.isCompleted` → `.status` this
+session (`NoteForLaterApp.migrateIncompleteBlocksAndMealsToThreeStateIfNeeded`).
+The next person converting any stored field to computed needs to do the
+rename-and-backfill *before* shipping the schema change, not discover the
+data loss after.
+
 ---
 
 ## Shipped this session

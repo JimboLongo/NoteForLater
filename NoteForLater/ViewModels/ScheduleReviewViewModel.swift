@@ -1731,44 +1731,111 @@ final class ScheduleReviewViewModel {
 
     // MARK: - Today: complete / push to another day
 
-    /// The timeline's tap-to-complete circle goes through here rather than
-    /// flipping `block.isCompleted` directly — same Habit Tracker sync
-    /// `markComplete` does, but both directions: un-tapping a habit block
-    /// also resets that day's log, so the Habit Tracker (and its rolling
-    /// stats, which read straight from the log) never disagrees with what
-    /// the calendar shows. A task-backed block instead syncs
-    /// `task.isCompleted` (so the shelf row fades/strikes through) and a
-    /// `TaskCompletionRecord` (so the Task Stats page has it even after
-    /// `regenerateFromNow` eventually purges the task itself).
+    /// The timeline's tap-to-complete circle goes through here. A habit
+    /// block stays exactly as it's always been — a plain two-state
+    /// toggle, `HabitLog` (its own real, `.excused`-capable cycle) is
+    /// that occurrence's actual source of truth, and out of scope for
+    /// the three-state change. Un-tapping a habit block also resets that
+    /// day's log, so the Habit Tracker (and its rolling stats, which read
+    /// straight from the log) never disagrees with what the calendar
+    /// shows. Everything else (an ordinary task block, or a meal block)
+    /// delegates to `cycleBlockCompletion` — see that function's own doc
+    /// comment.
     func toggleComplete(_ block: ScheduledBlock) {
-        block.isCompleted.toggle()
-        if let task = block.task {
-            // A recurring task's TaskItem is shared across every
-            // occurrence's own block (see `Shelf.isRecurringTasks`) —
-            // completion lives entirely on the block for these, same as
-            // a habit's does, rather than mirrored onto the shared task
-            // (which one occurrence finishing shouldn't mark done for
-            // every other occurrence, past or future).
-            if !task.isRecurring {
-                task.isCompleted = block.isCompleted
-                if block.isCompleted {
-                    upsertCompletionRecord(for: task)
-                } else {
-                    removeCompletionRecord(for: task)
-                }
-                // Task-side completion only — a habit occurrence's own
-                // completion (below) never touches shelf-task scheduling
-                // at all, so it has nothing to do with this flag.
-                ScheduleDirtyState.shared.isDirty = true
-            }
+        guard let habit = block.habit else {
+            cycleBlockCompletion(block)
+            return
         }
-        guard let habit = block.habit else { return }
+        block.isCompleted.toggle()
         // Only this block's own occurrence (BrushTeeth.1 vs .2, say) is
         // affected — the day-level status/streak/calendar stay pending
         // until every occurrence is resolved (see `Habit.status`).
         let status: OccurrenceStatus = block.isCompleted ? .complete : .none
         habitLog(for: habit, on: block.date).setOccurrence(block.habitOccurrenceIndex, to: status)
         HabitStatsRefreshCoordinator.shared.habitLogsChanged()
+    }
+
+    /// The three-state counterpart to the old two-state `toggleComplete`,
+    /// for an ordinary (non-recurring, non-habit) task block or a meal
+    /// block — "shelf task blocks" and "dinner on the calendar," the two
+    /// kinds this change actually covers. Cycles `block.status`
+    /// (`OccurrenceStatus.cycledExcludingExcused`, the one shared cycle
+    /// every completion surface now uses — `TaskItem
+    /// .cycleRecurringOccurrence`/`.cycleCompletion` are the other two
+    /// callers) and mirrors it onto whichever real record the block
+    /// represents:
+    ///
+    /// - A task block: `task.status` directly, not through the lossy
+    ///   `isCompleted` setter — `.missed` needs to survive the mirror the
+    ///   way it couldn't when this only ever flipped a plain `Bool` (see
+    ///   `TaskItem.isCompleted`'s own doc comment). Landing on `.missed`
+    ///   immediately guarantees a fresh placement — mirrors "marking
+    ///   missed pushes immediately," the same reasoning a recurring
+    ///   task's own interactive cycle already documents at `pushIfMissed`
+    ///   — guarded on `!task.isScheduled` so re-cycling the same stale
+    ///   block Missed → None → Missed again within one session can't
+    ///   create a second placement while the first is still live.
+    /// - A meal block: `MealSelection.status` directly. Landing on
+    ///   `.complete` runs pantry deduction exactly once, guarded by
+    ///   `hasDeductedPantry` rather than the current status, so cycling
+    ///   Complete → Missed → Complete doesn't deduct twice.
+    ///
+    /// A recurring task's own block never reaches here at all — that's
+    /// still `TaskItem.cycleRecurringOccurrence`'s own, separate
+    /// immediate-write cycle (via `pushIfMissed`/
+    /// `cycleRecurringTaskReviewOccurrence` in `NightlyReviewView`,
+    /// `onCycleRecurringTaskOccurrence` on the calendar), untouched by
+    /// this — `toggleComplete` never even calls this for one, and
+    /// `NightlyReviewView`'s own `.block` tap handler branches on
+    /// `task.isRecurring` before ever reaching this function.
+    @discardableResult
+    func cycleBlockCompletion(_ block: ScheduledBlock) -> OccurrenceStatus {
+        let next = block.status.cycledExcludingExcused
+        block.status = next
+
+        if let task = block.task, !task.isRecurring {
+            task.status = next
+            if next == .complete {
+                upsertCompletionRecord(for: task)
+            } else {
+                removeCompletionRecord(for: task)
+            }
+            // Task-side completion only — a habit/meal's own completion
+            // never touches shelf-task scheduling at all, so it has
+            // nothing to do with this flag.
+            ScheduleDirtyState.shared.isDirty = true
+            if next == .missed, !block.hasGuaranteedReplacement {
+                task.isScheduled = false
+                task.pushedCount += 1
+                // The old block stays (nothing deletes it anymore — see
+                // this function's own doc comment) but is no longer an
+                // active placement, so whatever of its duration wasn't
+                // actually worked needs to go back to the task's own
+                // ledger, the same restoration a real delete always
+                // carried alongside it (`removeBlock`'s own doc comment)
+                // — the missing half of that if this were skipped here.
+                restoreRemainingMinutes(for: block)
+                guaranteePlacement(for: task, missedDate: block.date, missedStartTime: block.startTime, durationMinutes: block.durationMinutes)
+                block.hasGuaranteedReplacement = true
+            }
+        }
+
+        if let selection = block.mealSelection {
+            selection.status = next
+            if next == .complete, !selection.hasDeductedPantry {
+                let recipes = (try? modelContext.fetch(FetchDescriptor<Recipe>())) ?? []
+                let kitchenShelves = (try? modelContext.fetch(FetchDescriptor<Shelf>(
+                    predicate: #Predicate { $0.isKitchen }
+                ))) ?? []
+                let pantryItems = (kitchenShelves.first?.tasks ?? []).filter { !$0.isCompleted }
+                if let recipe = recipes.first(where: { $0.id == selection.recipeID }) {
+                    PantryDeductionService.deduct(recipe: recipe, pantryItems: pantryItems)
+                    selection.hasDeductedPantry = true
+                }
+            }
+        }
+
+        return next
     }
 
     /// See `TaskCompletionRecord.upsert(for:in:)`.
@@ -1847,8 +1914,11 @@ final class ScheduleReviewViewModel {
     /// record — a dinner picked and checked off weeks ago would still
     /// surface in tonight's Today step alongside tonight's own meal.
     func purgeCompletedMealSelections() {
+        // `$0.statusRaw == "complete"`, not `$0.isCompleted` — `#Predicate`
+        // needs a real, persisted keypath; `isCompleted` is computed now
+        // (see `MealSelection.isCompleted`'s own doc comment).
         let completed = (try? modelContext.fetch(FetchDescriptor<MealSelection>(
-            predicate: #Predicate { $0.isCompleted }
+            predicate: #Predicate { $0.statusRaw == "complete" }
         ))) ?? []
         guard !completed.isEmpty else { return }
 
@@ -1870,40 +1940,6 @@ final class ScheduleReviewViewModel {
         }
 
         for selection in completed {
-            modelContext.delete(selection)
-        }
-    }
-
-    /// The flip side of `purgeCompletedMealSelections`: a `MealSelection`
-    /// that's still *incomplete* by the time its own day (or an earlier
-    /// one — same "unresolved backlog" idea `NightlyReviewView
-    /// .todayMealSelections` already applies) has been reviewed has
-    /// nothing left to wait for either. Without this it would otherwise
-    /// resurface in every future Nightly Review forever, the same
-    /// never-resolves bug `purgeCompletedMealSelections` fixed for the
-    /// completed side. No pantry deduction on this path — an incomplete
-    /// selection means the dinner never happened, so nothing should be
-    /// deducted for it. `reviewDate` is the caller's frozen day, not a
-    /// live re-read, for the same staleness reason `clearIncompletePastBlocks`
-    /// takes its own `cutoff` as a parameter rather than reading `.now`.
-    func resolveIncompleteMealSelections(reviewDate: Date) {
-        let cutoff = Calendar.current.startOfDay(for: reviewDate)
-        let incomplete = (try? modelContext.fetch(FetchDescriptor<MealSelection>(
-            predicate: #Predicate { !$0.isCompleted && $0.date <= cutoff }
-        ))) ?? []
-        guard !incomplete.isEmpty else { return }
-
-        // Same orphan-block problem `purgeCompletedMealSelections` has —
-        // `ScheduledBlock.mealSelection` nullifies rather than cascades,
-        // so the block has to be deleted explicitly too.
-        let incompleteIDs = Set(incomplete.map(\.id))
-        let allBlocks = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
-        for block in allBlocks where block.mealSelection.map({ incompleteIDs.contains($0.id) }) ?? false {
-            removeBlock(block)
-            blocks.removeAll { $0.id == block.id }
-        }
-
-        for selection in incomplete {
             modelContext.delete(selection)
         }
     }
@@ -2205,22 +2241,24 @@ final class ScheduleReviewViewModel {
     /// **The Today-step "Next" gate's core predicate — habits only.**
     /// `NightlyReviewView.unresolvedHabitOccurrences`'s logic, extracted
     /// so it's unit-testable without constructing a live view (its
-    /// `@Query` properties make that impractical). Deliberately scoped to
-    /// habit occurrences alone, not blocks or meals: those only ever
-    /// expose a single `isCompleted` boolean with no "explicitly decided
-    /// not done" state distinct from "haven't looked at it," and leaving
-    /// one incomplete is the normal input the push-forward pipeline
-    /// (`NightlyReviewView.advance()`'s recurring-push/re-guarantee-
-    /// placement logic, and the meal backlog in `todayMealSelections`) is
-    /// built to absorb — gating on those would block the review on any
-    /// ordinary night with leftover work, with no way to clear it short
-    /// of falsely marking it complete. A habit occurrence is different:
-    /// `Habit.cycleOccurrence` always reaches complete/missed/excused in
-    /// a bounded number of taps, and `.none` is the one status this
-    /// app's habit-review design treats as "not actually looked at,"
-    /// never as an accepted final state — do not widen this to include
-    /// blocks/meals without re-deciding that; see the caller's own
-    /// comment for the fuller reasoning.
+    /// `@Query` properties make that impractical).
+    ///
+    /// Ordinary task blocks and meals are gated separately now (see
+    /// `NightlyReviewView.unresolvedGateReviewItems`, which covers both) —
+    /// not folded into this same function, since a habit occurrence's own
+    /// eligible-status set (`complete`/`missed`/`excused`, `Habit
+    /// .cycleOccurrence`'s own four-state cycle) is different from a task
+    /// block or meal's (`complete`/`missed`, `OccurrenceStatus
+    /// .cycledExcludingExcused`'s three-state one, `.excused` never
+    /// reachable). Both share the same underlying idea now, though:
+    /// `.none` is "not actually looked at yet," never an accepted final
+    /// state, and both reach a genuine terminal state in a bounded number
+    /// of taps — this stopped being habit-specific the moment `.missed`
+    /// became a real, deliberate answer for a block or meal too, instead
+    /// of a stand-in for "not done" that the push-forward pipeline
+    /// (`ScheduleReviewViewModel.cycleBlockCompletion`'s guaranteed-
+    /// placement trigger, the meal backlog in `todayMealSelections`) was
+    /// built to silently absorb.
     static func unresolvedHabitOccurrences(_ occurrences: [HabitReviewOccurrence]) -> [HabitReviewOccurrence] {
         occurrences.filter { $0.status == .none }
     }
@@ -2247,50 +2285,50 @@ final class ScheduleReviewViewModel {
     /// `NightlyReviewView.reviewableBlocks`'s core logic, extracted for
     /// the same reason as `completedTasksWithNoBlock` above.
     ///
-    /// A complete and an incomplete block are bounded in opposite
-    /// directions, deliberately: an *incomplete* block shows regardless
-    /// of age (`startTime < reviewDisplayCutoff`, no lower bound) — a
-    /// backlog left over from a busy week shouldn't quietly disappear,
-    /// see this property's non-extracted doc comment for the original
-    /// reasoning. A *complete* block instead needs `startTime >=
-    /// completedSinceBound` — no upper bound, so one knocked out ahead of
-    /// its scheduled day still shows without waiting for that future
-    /// day's own review — but WITH a lower bound, unlike the old
-    /// `startTime < reviewDisplayCutoff || $0.isCompleted` this replaces.
-    /// That unconditional `isCompleted` was structurally the same
-    /// unbounded-OR as the old MealSelection bug (`$0.isCompleted ||
-    /// $0.date <= cutoffDay`, still live and unfixed in
-    /// `NightlyReviewView.todayMealSelections` as of this writing): masked
-    /// today by `purgeCompletedBlocks` deleting every completed block the
-    /// moment a review's Today step commits, but a completed block from
-    /// any day, however long ago, would show forever the instant that
-    /// purge is ever skipped. Splitting into "isCompleted ? boundA :
-    /// boundB" rather than "boundB || isCompleted" is what actually closes
-    /// that — the old OR shape meant adding *any* bound to the isCompleted
-    /// side changed nothing, since `boundB` already covered every date
-    /// isCompleted could otherwise reach (a plain Boolean identity: `A ||
-    /// (B && ¬A) ≡ A || B`, for any A/B).
+    /// `.none` and a *resolved* status (`.complete`/`.missed`) are
+    /// bounded in opposite directions, deliberately: an unresolved
+    /// (`.none`) block shows regardless of age (`startTime <
+    /// reviewDisplayCutoff`, no lower bound) — a backlog left over from a
+    /// busy week shouldn't quietly disappear, see this property's
+    /// non-extracted doc comment for the original reasoning. A *resolved*
+    /// block instead needs `startTime >= completedSinceBound` — no upper
+    /// bound, so one resolved ahead of its scheduled day still shows
+    /// without waiting for that future day's own review — but WITH a
+    /// lower bound, so a resolved block from a review already closed out
+    /// doesn't resurface the instant a later review runs. **This is now
+    /// what actually bounds the `.missed` backlog** — `.missed` isn't
+    /// deleted anymore (see `resolveMissedPastBlocks`'s own doc comment
+    /// for the reversal), so this recency window is the only thing
+    /// keeping an old, already-resolved missed block from piling up in
+    /// every future Today step forever, exactly the role
+    /// `RecurringTaskLog`'s own `.none`-only "still open" filter already
+    /// plays for recurring tasks.
     static func reviewableBlocks(allBlocks: [ScheduledBlock], reviewDisplayCutoff: Date, completedSinceBound: Date) -> [ScheduledBlock] {
         allBlocks
             .filter {
-                $0.mealSelection == nil
-                    && ($0.isCompleted ? $0.startTime >= completedSinceBound : $0.startTime < reviewDisplayCutoff)
+                guard $0.mealSelection == nil else { return false }
+                switch $0.status {
+                case .none: return $0.startTime < reviewDisplayCutoff
+                case .complete, .missed, .excused: return $0.startTime >= completedSinceBound
+                }
             }
             .sorted { $0.startTime < $1.startTime }
     }
 
     /// `NightlyReviewView.todayMealSelections`'s core logic, extracted for
-    /// the same reason as `reviewableBlocks` above — this was in fact the
-    /// exact shape that property's own doc comment already named as
-    /// precedent (`$0.isCompleted || $0.date <= cutoffDay`), still live
-    /// and unfixed here until now. Same completed/incomplete split, same
-    /// reasoning: an incomplete selection shows regardless of age (no
-    /// lower bound), a completed one needs `date >= completedSinceBound`
-    /// so one from a day already closed out doesn't resurface the instant
-    /// `purgeCompletedMealSelections` is ever skipped.
+    /// the same reason as `reviewableBlocks` above — same `.none`-vs-
+    /// resolved split, same reasoning: an unresolved selection shows
+    /// regardless of age (no lower bound), a resolved one (`.complete` or
+    /// — now that missed meals aren't deleted either, see
+    /// `ScheduleReviewViewModel`'s meal-reversal doc comments —
+    /// `.missed`) needs `date >= completedSinceBound` so it doesn't
+    /// resurface once a later review has closed the book on it.
     static func todayMealSelections(allMealSelections: [MealSelection], cutoffDay: Date, completedSinceBound: Date) -> [MealSelection] {
         allMealSelections.filter {
-            $0.isCompleted ? $0.date >= completedSinceBound : $0.date <= cutoffDay
+            switch $0.status {
+            case .none: return $0.date <= cutoffDay
+            case .complete, .missed, .excused: return $0.date >= completedSinceBound
+            }
         }
     }
 
@@ -2685,7 +2723,13 @@ final class ScheduleReviewViewModel {
             log.status = .missed
             log.lastModified = .now
             if let block = (task.scheduledBlocks ?? []).first(where: { Calendar.current.isDate($0.date, inSameDayAs: missedDay) }) {
-                block.isCompleted = false
+                // `.status`, not `.isCompleted` — same reasoning as
+                // `TaskItem.cycleRecurringOccurrence`'s own mirror write:
+                // this block is still only ever a mirror of
+                // `RecurringTaskLog` (unchanged), but writing the real
+                // status now lets that mirror preserve `.missed`
+                // distinctly from `.none` too.
+                block.status = .missed
             }
             if let occurrence = pushRecurringOccurrenceIfNeeded(task: task, missedDay: missedDay, context: context) {
                 created.append((occurrence, task, missedDay))
@@ -2855,73 +2899,68 @@ final class ScheduleReviewViewModel {
     /// overdue block one at a time: unschedules every one of them (same as
     /// swiping it away in the review list) so a following
     /// `regenerateFromNow` is free to place them again starting from right
-    /// now. Covers any previous day in full, plus today up to right now —
-    /// not a block later today, which hasn't happened yet and isn't
-    /// "not completed," just not-yet-due. A locked block is left exactly
-    /// where it is, same as `regenerateFromNow`'s own routine
-    /// forward-looking clear respects it — locked means "don't move this,"
-    /// full stop, whether or not it's been completed yet.
-    /// Unlike `deleteBlock` (whose calendar-event removal is fire-and-forget
-    /// — fine for a single swipe, where nothing downstream depends on it
-    /// having landed yet), this `await`s each deletion: the caller always
-    /// calls `regenerateFromNow` right after this, and that pulls fresh
-    /// free/busy from the calendar to decide what's open — a pushed event
-    /// that hasn't actually finished being deleted yet would still show
-    /// that time as busy, and the freed task wouldn't actually get a slot
-    /// back despite being unscheduled again.
-    /// `cutoff` defaults to right now — as of this writing there's no
-    /// other actual caller (grepped while verifying `NightlyReviewView
-    /// .reviewCutoff`'s widened-cutoff change), only Nightly Review's own
-    /// handoff, passing whichever day was picked in Choose Day, not
-    /// real-now — so a task left unchecked there gets freed up for
-    /// tomorrow's generation even when `reviewDate` isn't today. The
-    /// default stays `.now` regardless, both as the sensible fallback for
-    /// a future caller and because it's what an ordinary intra-day
-    /// Regenerate would want if one ever calls this directly instead of
-    /// its own separate `clearBlocksBeforeToday`.
+    /// now. **REVERSAL:** this used to be `clearIncompletePastBlocks` and
+    /// deleted the stale block outright (its Google Calendar event too).
+    /// Nothing is deleted from the calendar now — `.missed` is a real,
+    /// permanent record, not a state to sweep away, and
+    /// `reviewableBlocks`'s own `.none`-only "still needs a decision"
+    /// filter is what keeps an already-resolved missed block from
+    /// resurfacing in review, not deletion. One direct, visible
+    /// consequence worth naming: the block's synced Google Calendar
+    /// event (if it had been approved) also survives now, indefinitely —
+    /// a stale "missed" event stays on the user's actual calendar rather
+    /// than getting cleaned up.
     ///
-    /// Never clears a habit-linked block (`$0.habit == nil` below),
-    /// regardless of `cutoff` — a habit has no "shelf" or
-    /// `remainingMinutes` for clearing to restore the way a task's does;
-    /// its completion record of record is `HabitLog`
-    /// (`markUnresolvedHabitOccurrencesAsMissed` marks it missed there
-    /// independent of this function entirely), and deleting the block on
-    /// top of that just made a missed Specific-Time habit's calendar row
-    /// disappear for a second, unrelated reason beyond `DayTimelineGridView
-    /// .openHabitOccurrences`'s own missed/excused filter. A stale
-    /// habit block from days ago sitting unresolved isn't a bug the way a
-    /// stale task block would be — `AISchedulingService
-    /// .placeHabitsAndRecurringTasks` generates each day's habit blocks
-    /// keyed by that day and occurrence index, never conditioned on
-    /// whether an *earlier* day's block for the same habit still exists —
-    /// verified directly before relying on it, not assumed.
-    func clearIncompletePastBlocks(allBlocks: [ScheduledBlock], cutoff: Date = .now) async {
-        // Deliberately ignores isLocked — a lock only pins a block within
-        // a day's own layout. Once that day is over, protecting it here
-        // would make it immortal: it still matches reviewableBlocks'
-        // `startTime < reviewCutoff` filter, so it would keep resurfacing
-        // in every future Today step with no in-app way to resolve it.
-        // Clearing isn't destructive — the task survives and
-        // remainingMinutes is restored below, so it just goes back to the
-        // shelf to be rescheduled. Locking still protects present/future
-        // blocks everywhere else (regenerateFromNow etc).
-        let toClear = allBlocks.filter { !$0.isCompleted && $0.startTime < cutoff && $0.habit == nil }
-        for block in toClear {
-            block.task?.isScheduled = false
-            block.task?.pushedCount += 1
-            if let eventID = block.googleEventID {
-                try? await calendarService.deleteEvent(eventID: eventID)
-            }
-            removeBlock(block)
-            blocks.removeAll { $0.id == block.id }
+    /// The interactive cycle (`cycleBlockCompletion`) already guarantees
+    /// a fresh placement the moment a tap lands a task block on
+    /// `.missed` — this exists as the same kind of redundant, *guarded*
+    /// safety net `pushMissedRecurringOccurrences` already is for
+    /// recurring tasks, not the primary trigger anymore. It only
+    /// actually does anything for a `.missed` block whose task never got
+    /// re-placed some other way — concretely, the one-time migration
+    /// backfill (old incomplete-and-past records translated straight to
+    /// `.missed`) never goes through the interactive cycle at all, so
+    /// this is what actually guarantees placement for those. Guarded on
+    /// `ScheduledBlock.hasGuaranteedReplacement` — see that property's
+    /// own doc comment for why `task.isScheduled` alone can't tell
+    /// "already handled" apart from "still reads scheduled from this
+    /// exact block's own now-missed placement."
+    ///
+    /// Never touches a habit-linked block (`$0.habit == nil` below) —
+    /// unchanged reasoning from before this reversal: a habit's
+    /// completion record of record is `HabitLog`
+    /// (`markUnresolvedHabitOccurrencesAsMissed` marks it missed there,
+    /// independent of this function entirely), not this function's
+    /// concern either way.
+    func resolveMissedPastBlocks(allBlocks: [ScheduledBlock]) {
+        // `task?.isRecurring != true` — a recurring task's own missed
+        // block also carries `.status == .missed` (see `TaskItem
+        // .cycleRecurringOccurrence`'s mirror write), but that task's
+        // next placement is `PushedRecurringOccurrence`'s job
+        // (`pushMissedRecurringOccurrences`/`pushIfMissed`), not
+        // `guaranteePlacement`'s — that's scoped to rule-based shelf
+        // eligibility (`TaskItem.nextEligibleDay`), which a recurring
+        // task doesn't place through at all. Matches the old
+        // `clearIncompletePastBlocks`-era split exactly:
+        // `missedNonRecurringPlacements` was always its own,
+        // separately-`!task.isRecurring`-filtered list, never folded
+        // into the same sweep as the recurring push.
+        let toResolve = allBlocks.filter {
+            $0.status == .missed && $0.habit == nil && !$0.hasGuaranteedReplacement && $0.task?.isRecurring != true
         }
-        // Flushed explicitly rather than left to autosave — the caller
-        // always runs `regenerateFromNow` right after this, which does its
-        // own heavy run of fetches/inserts/deletes and repeatedly reads
-        // relationships (e.g. `habit.scheduledBlocks`) touching these same
-        // objects; leaving this batch of deletes unsaved going into that
-        // has been the difference between a clean regenerate and a crash.
-        try? modelContext.save()
+        for block in toResolve {
+            guard let task = block.task else { continue }
+            task.isScheduled = false
+            task.pushedCount += 1
+            // Same restoration `cycleBlockCompletion` already does for
+            // the interactive path — see its own comment. This block
+            // stays (nothing deletes it), but its duration wasn't
+            // actually worked, so it needs to go back to the task's own
+            // ledger before a fresh placement is guaranteed.
+            restoreRemainingMinutes(for: block)
+            guaranteePlacement(for: task, missedDate: block.date, missedStartTime: block.startTime, durationMinutes: block.durationMinutes)
+            block.hasGuaranteedReplacement = true
+        }
     }
 
     /// Relocates `task`'s existing block to `startTime` on `targetDate`,
