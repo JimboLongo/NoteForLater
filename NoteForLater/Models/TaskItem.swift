@@ -1596,8 +1596,7 @@ final class TaskItem {
     /// never actually shown. See `startDateMissing` for the question a
     /// recurring task is asked instead.
     private func dueDateMissing(on shelf: Shelf?) -> Bool {
-        guard shelf?.effectiveTracksDueDates ?? true else { return false }
-        guard !isRecurring else { return false }
+        guard CardRow.due.isShown(task: self, shelf: shelf) else { return false }
         return !dueDateDecided || (dueDate != nil && !dueDatePicked)
     }
 
@@ -1609,7 +1608,12 @@ final class TaskItem {
     /// finished, rather than surfacing in the attribute review the way an
     /// ordinary task's missing due date does.
     private func startDateMissing(on shelf: Shelf?) -> Bool {
-        isRecurring && !startDatePicked
+        guard CardRow.canStartBy.isShown(task: self, shelf: shelf) else { return false }
+        // Always shown, but only ever *required* for a recurring task —
+        // the recurrence anchor there, optional metadata otherwise.
+        // `.shown` is a precondition for missing, not a promise of it
+        // (see `CardRow.Visibility`).
+        return isRecurring && !startDatePicked
     }
 
     /// Same reasoning as `startDateMissing`, for "Every" — a recurring
@@ -1617,14 +1621,16 @@ final class TaskItem {
     /// ("every 1 day"), not a placeholder, so only `recurrenceIntervalPicked`
     /// can tell "never touched" apart from "deliberately every 1 day."
     private func recurrenceIntervalMissing(on shelf: Shelf?) -> Bool {
-        isRecurring && !recurrenceIntervalPicked
+        guard CardRow.repeats.isShown(task: self, shelf: shelf) else { return false }
+        return !recurrenceIntervalPicked
     }
 
     /// Same reasoning again, for "Time" (AM/Midday/PM/Specific) — `.specific`
     /// is `recurrenceTimeModeRaw`'s real stored default, not evidence
     /// anyone chose it.
     private func recurrenceTimeModeMissing(on shelf: Shelf?) -> Bool {
-        isRecurring && !recurrenceTimeModePicked
+        guard CardRow.timeMode.isShown(task: self, shelf: shelf) else { return false }
+        return !recurrenceTimeModePicked
     }
 
     /// Only applies when `recurrenceUnit == .months` — daily/weekly
@@ -1642,7 +1648,10 @@ final class TaskItem {
     /// default, not a placeholder, so only this flag can tell "never
     /// touched" apart from "deliberately the 1st."
     private func relativeRecurrenceMissing(on shelf: Shelf?) -> Bool {
-        isRecurring && recurrenceUnit == .months && !relativeRecurrencePicked
+        // "Pattern" is asked inside the Repeats row, so it shares that
+        // row's visibility rather than having one of its own.
+        guard CardRow.repeats.isShown(task: self, shelf: shelf) else { return false }
+        return recurrenceUnit == .months && !relativeRecurrencePicked
     }
 
     /// True if "Has next step" is Yes but nothing's actually been typed,
@@ -1656,7 +1665,7 @@ final class TaskItem {
     /// that tracks Next Step, and a shelf that doesn't track it never
     /// looks at `nextStepDecided`/`nextStepAnsweredYes` at all.
     private func nextStepMissing(on shelf: Shelf?) -> Bool {
-        guard shelf?.effectiveTracksNextStep ?? true else { return false }
+        guard CardRow.nextStep.isShown(task: self, shelf: shelf) else { return false }
         return !nextStepDecided || (nextStepAnsweredYes && nextStep.isEmpty)
     }
 
@@ -1667,8 +1676,7 @@ final class TaskItem {
     /// shelf-level short-circuit shape as the untracked-attribute case
     /// above, just gated on the task instead of the shelf.
     private func priorityMissing(on shelf: Shelf?) -> Bool {
-        guard shelf?.effectiveTracksPriority ?? true else { return false }
-        guard !isRecurring else { return false }
+        guard CardRow.priority.isShown(task: self, shelf: shelf) else { return false }
         return priority == .unset
     }
 
@@ -1695,8 +1703,7 @@ final class TaskItem {
     /// `durationPicked`. False (not missing) once anything at all has
     /// been chosen from the wheel, "None" included.
     private func durationMissing(on shelf: Shelf?) -> Bool {
-        guard shelf?.effectiveTracksDuration ?? true else { return false }
-        guard !recurringAndUntimed else { return false }
+        guard CardRow.duration.isShown(task: self, shelf: shelf) else { return false }
         return !durationPicked
     }
 
@@ -1706,7 +1713,8 @@ final class TaskItem {
     /// since "eligible for none of these" isn't a real answer a task can
     /// land on.
     private func eligibleSchedulesMissing(on shelf: Shelf?) -> Bool {
-        !(shelf?.schedulingRules ?? []).isEmpty && includedSchedulingRuleIDs.isEmpty
+        guard CardRow.eligibleSchedules.isShown(task: self, shelf: shelf) else { return false }
+        return includedSchedulingRuleIDs.isEmpty
     }
 
     /// Same shape as `durationMissing` — true only if Divisible has never
@@ -1724,16 +1732,12 @@ final class TaskItem {
     /// the card and the missing-badge agree by construction rather than
     /// by both remembering to special-case it.
     private func divisibleMissing(on shelf: Shelf?) -> Bool {
-        guard shelf?.effectiveTracksDuration ?? true else { return false }
-        guard !recurringAndUntimed else { return false }
-        // Too short to split — the row isn't shown, so it can't be
-        // unanswered. See `divisibleMinimumDurationMinutes`.
-        guard estimatedMinutes >= Self.divisibleMinimumDurationMinutes else { return false }
-        // Long enough in principle, but no segment size evenly divides
-        // it (70 minutes, say) — a separate check from the threshold
-        // above, not a redundant one: 70 clears the hour bar and still
-        // has no valid option.
-        guard !Self.validSegmentOptions(for: estimatedMinutes).isEmpty else { return false }
+        // Every reason this row might not apply — untimed recurring,
+        // a shelf that doesn't track duration, a duration under the
+        // hour threshold, a duration nothing evenly divides — lives in
+        // `CardRow.divisible`'s own visibility rule, shared with the
+        // card so the row and this check can't disagree.
+        guard CardRow.divisible.isShown(task: self, shelf: shelf) else { return false }
         return !divisiblePicked
     }
 
