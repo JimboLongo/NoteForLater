@@ -8,6 +8,38 @@ repeatedly this session — the crash-surface item at the bottom of this file
 exists only because a test actually ran and something broke, not because
 anyone inferred it.
 
+**Deletion practice, general — a deletion list is a hypothesis, not an
+inventory. Re-derive every site by reading it at delete time.**
+
+Stage 4b started from a list of eight call sites to delete, written during
+planning and reviewed and approved before any code was touched. **Three of
+the eight were wrong.** Re-reading each site at delete time caught all
+three; working from the list would not have.
+
+The worst was `DayTimelineGridView.openRecurringTaskOccurrences(mode:)`,
+listed as dead Specific-Time machinery. It is the opposite: it matches
+untimed modes, so after the change it became the path *every* recurring
+task takes. Deleting it would have removed recurring tasks from the day
+view entirely — a silent, total feature loss, from a line in an approved
+plan. The other two (`OverdueBlocksReviewList.blocksGate`'s `.specific`
+branch, and the task arm of the stale-block sweep) were both still
+reachable: the migration deliberately keeps *past* blocks, so paths that
+read historical blocks stay live.
+
+**Approval does not make an entry correct.** The reviewer is reading the
+same summary that was written from the same misreading; they are checking
+the shape of the plan, not re-deriving each site. Treat every entry as
+"this looked dead when I wrote it down" and re-confirm against the code.
+
+Three signals that a line in a deletion list is not actually dead:
+1. **It names a mode/flag/state by value.** `== .specific` is dead if that
+   value is unreachable; `== mode` where `mode` is a parameter is not the
+   same thing at all, and reads almost identically in a list.
+2. **It reads history.** Anything touching past or completed rows survives
+   a migration that only cleans up future ones.
+3. **It sits in a function with another caller's arm in it.** Shared
+   habit/task bodies were where every mistake here clustered.
+
 **Testing practice, general — sabotage each rule against the EXISTING
 suite before adding new tests.** Break the rule deliberately, run what's
 already there, and see what fails. A rule that no test catches is
@@ -29,6 +61,22 @@ actually unprotected, rather than letting you write coverage for the ones
 you happened to think of. Fail-then-pass on a *new* test proves that test
 works; sabotage against the *old* suite proves what the old suite was
 missing. They answer different questions.
+
+**Test-harness trap, and a likely cause of "uncovered" scheduling code:** a
+test that constructs `MockAISchedulingService` (the production packer — the
+name is a leftover) or `ScheduleReviewViewModel` **must be `async`**. A
+synchronous one crashes the whole test host with `malloc: pointer being
+freed was not allocated` *before any assertion runs*, so the run reports
+`Executed 0 tests` and `** TEST FAILED **` with no failing test named. It
+is not specific to a view model's `deinit`, and not specific to doing
+anything with the object — bare construction in a sync test is enough.
+
+This is worth knowing beyond the fix, because of how it presents: a first
+attempt to cover this code looks like a crash *in the production code*, not
+like a rule about the harness. `placeHabitsAndRecurringTasks` had zero
+tests calling it at all, and that is the most plausible reason why.
+Whenever a scheduling path looks mysteriously untestable, try `async`
+before concluding the code is broken.
 
 **Testing practice, general — the render baselines now actually compare,
 and the story of why they didn't is worth keeping.**
