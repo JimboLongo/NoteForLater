@@ -30,7 +30,34 @@ struct ShelfEditView: View {
     @State private var tracksTaskStats: Bool
 
     private let columns = [GridItem(.adaptive(minimum: 44))]
-    private static let durationOptions = [0, 2, 5, 15, 30, 45, 60, 90, 120, 240, 480]
+    /// What a shelf can stamp onto a task, derived from the task card's own
+    /// wheel rather than re-listed beside it.
+    ///
+    /// These two lists used to be written out separately and drifted: the
+    /// shelf offered `2` and `5` after the task wheel had dropped them, so a
+    /// shelf could stamp a duration onto a task that the card could then
+    /// neither display as a wheel position nor edit — the same orphaned-value
+    /// shape as the row-visibility bugs `CardRow` exists to prevent. A shelf
+    /// default must always be a value the user can subsequently change.
+    ///
+    /// `0` is prepended and is shelf-only: it means "stamp nothing", which
+    /// isn't a duration a task can be set to and so has no place on the task
+    /// wheel. It renders as "Not Selected" via `TaskItem.durationLabel`.
+    private static let durationOptions = [0] + TaskReviewCard.durationOptions
+
+    /// `durationOptions`, plus this shelf's own stored value slotted in if
+    /// it isn't one of them — the same guarantee `durationWheelOptions`
+    /// gives the task card, for the same reason: a `Picker` whose selection
+    /// isn't among its tags renders blank and silently discards the value on
+    /// the next save. Today no shelf holds an off-list value (checked
+    /// against the live store when `2` and `5` were removed), so this is
+    /// purely defensive — but it's what makes removing options safe in
+    /// general rather than safe by luck.
+    private var durationPickerOptions: [Int] {
+        let options = Self.durationOptions
+        guard !options.contains(defaultDurationMinutes) else { return options }
+        return (options + [defaultDurationMinutes]).sorted()
+    }
 
     @State private var showingIconPicker = false
     @State private var showingColorPicker = false
@@ -131,8 +158,8 @@ struct ShelfEditView: View {
                 if tracksDuration {
                     Section {
                         Picker("Default Duration", selection: $defaultDurationMinutes) {
-                            ForEach(Self.durationOptions, id: \.self) { minutes in
-                                Text(minutes == 2 ? "≤2 min" : TaskItem.durationLabel(for: minutes)).tag(minutes)
+                            ForEach(durationPickerOptions, id: \.self) { minutes in
+                                Text(TaskItem.durationLabel(for: minutes)).tag(minutes)
                             }
                         }
                     } footer: {
