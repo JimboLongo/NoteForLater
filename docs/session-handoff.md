@@ -30,48 +30,66 @@ you happened to think of. Fail-then-pass on a *new* test proves that test
 works; sabotage against the *old* suite proves what the old suite was
 missing. They answer different questions.
 
-**Testing practice, general — the render diff is a regression net, not a
-change-verification tool, and it is not run by the suite.**
-`RecurringTaskCardRenderTests` renders byte-deterministic PNGs of the card
-(`UIHostingController` + `UIGraphicsImageRenderer`) — but read what it
-actually asserts: `XCTAssertTrue(FileManager.default.fileExists(...))`. It
-**emits** images and checks the file got written. It never compares against
-a stored baseline. A visual regression cannot turn this suite red; the
-comparison is a manual step someone has to remember to run. Textbook
-*"tests whose failure mode is silence"* — the names read like baselines, so
-a green run is easy to mistake for visual coverage it doesn't provide.
-Until that's fixed, "539/539 passing" says nothing about rendering.
+**Testing practice, general — the render baselines now actually compare,
+and the story of why they didn't is worth keeping.**
 
-Run manually, its value comes entirely from fixtures that *don't* change:
-an unexpected byte delta on an untouched fixture is a real signal that
-something moved.
+`RecurringTaskCardRenderTests` renders the card through
+`UIHostingController` + `UIGraphicsImageRenderer` and compares against PNGs
+checked into `NoteForLaterTests/RenderBaselines/`. Any pixel difference
+fails the test.
 
-Its value drops to near zero when a change touches every fixture. Stage 3
-of the card work (adding the 2-Minute toggle, renaming "Starts" → "Can
-Start By", hiding Tags for recurring) changed all four baselines, so "it
-differs" carried no information — every fixture was *supposed* to differ,
-and a diff that says so can't distinguish the intended delta from an
-unintended one riding along with it.
+**It did not do this for most of its life.** It rendered a PNG to a scratch
+directory and asserted `FileManager.fileExists` — it *emitted* images and
+checked the write succeeded. Nothing compared them. No visual regression
+could turn the suite red, and yet "the render tests pass" was cited as
+verification across several stages of the card work. The names read like
+baselines, so a green run looked like visual coverage it never provided.
+That is *"tests whose failure mode is silence"* in its purest form, and the
+lesson generalizes past this file: **read what a test asserts, not what it
+is called.** A test whose assertion cannot fail is worse than no test,
+because it is counted.
 
-When that happens, don't treat a red diff as verification. Do this instead:
-1. State up front which fixtures should change and how, before running it.
-2. Pin the deltas as real assertions — `CardRow.scrollBodyOrder` is the
-   control for row presence/absence and ordering, and it fails specifically.
-3. Use the PNGs only to eyeball what an assertion can't see: a label
-   rename, a row's visual position.
-4. Re-baseline, and the net is back for the *next* change.
+**Exact comparison, not tolerance — and why.** Tolerance sounds like the
+robust choice and isn't. What actually breaks these is an Xcode or
+simulator-iOS bump changing glyph rasterization across *every* character on
+the card: a large-area change, not a small-delta one. A tolerance loose
+enough to absorb that would also be loose enough to hide a renamed label,
+which is the thing the suite exists to catch. Exact keeps the signal clean
+and makes the noise legible instead — *all* fixtures red means the
+environment moved, *one* fixture red means the code did. A `manifest.json`
+records the iOS version, width and scale at record time, and the failure
+message calls out any drift so nobody has to work that out from scratch.
 
-Useful mechanics, since step 1 is the only hard part: keep a copy of the
-previous render, then `PIL.ImageChops.difference(...).getbbox()` gives the
-exact changed rectangle. A bbox confined to the rows you expected to touch
-is a much stronger statement than "the files differ" — it says *nothing
-else moved*. Used that way it survives the every-fixture-changed case: when
-the "Time" row dropped its redundant duration suffix, the bbox was two rows
-tall and proved the rest of the card was untouched.
+Measured, rather than assumed: rendering is stable across repeat runs *and*
+across rebuilds (verified with a no-op source edit forcing recompilation).
+The brittleness is environment bumps, not ordinary work.
 
-To diff against an *uncommitted* change, `git stash` → run the render test
-→ copy the PNGs aside → `git stash pop` → run again. Beats trying to
-reconstruct what the previous render looked like.
+**Reading a failure.** Artifacts land in `RenderBaselines/__Failures__/`
+(gitignored): `.diff.png` paints changed pixels red over a dimmed render,
+alongside `.actual.png` and `.expected.png`. The message carries the
+changed-pixel count and a bounding box. One caveat learned from sabotaging
+it: the card's rows share an alignment guide, so changing one label's
+*width* re-flows every row by a subpixel and re-rasterizes all text — a
+one-character edit legitimately lights up 7% of the card. A tight bbox
+proves a change is localized; a wide one does not prove the opposite.
+
+**Re-recording.** `TEST_RUNNER_RECORD_RENDER_BASELINES=1` — note the
+prefix, `xcodebuild` forwards only `TEST_RUNNER_`-prefixed variables into
+the test process and setting it unprefixed silently does nothing. Then run
+`python3 scripts/optimize-render-baselines.py`: `UIImage.pngData()` writes
+PNGs ~30% larger than needed, and these live in git forever. A size-budget
+test fails if you skip it, because a forgotten optimisation step is exactly
+as invisible as the missing comparison was.
+
+**Still true, and the reason the above matters:** a render diff is a
+regression net, not a change-verification tool. Its value comes from
+fixtures that *don't* change. When a change touches every fixture — stage 3
+of the card work changed all four — "it differs" carries no information,
+and a red diff is not verification. Then: state up front which fixtures
+should change and how; lean on `CardRow.scrollBodyOrder` as the real
+control for row presence and ordering, since it fails specifically; use the
+images only for what an assertion can't see, like a rename or a row's
+position; re-record, and the net is back for the next change.
 
 **SwiftData trap, general — not specific to any one change:** turning an
 existing `@Model` stored property into a computed one (e.g. `isCompleted:

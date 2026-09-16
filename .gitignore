@@ -8,3 +8,6 @@ xcuserdata/
 
 # macOS
 .DS_Store
+
+# Render-diff artifacts, written only when a baseline comparison fails.
+NoteForLaterTests/RenderBaselines/__Failures__/

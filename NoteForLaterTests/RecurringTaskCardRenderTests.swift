@@ -9,8 +9,24 @@ import SwiftData
 /// same model) and rasterizes it to a PNG, rather than reasoning about
 /// string lengths — two shortened strings ("Scope" → "Pattern," then
 /// "Weekday of month" → "Weekday") still wrapped on-device, so an estimate
-/// isn't trustworthy evidence here. The PNG is written to a fixed path for
-/// manual visual inspection.
+/// isn't trustworthy evidence here.
+///
+/// **These tests compare against baselines checked into
+/// `NoteForLaterTests/RenderBaselines/` and fail on any pixel difference.**
+///
+/// They did not always. Until now `renderAndSave` wrote a PNG to a scratch
+/// directory and asserted `FileManager.fileExists` — it *emitted* images and
+/// checked the write succeeded. Nothing compared them, so no visual
+/// regression could ever turn this suite red, while the names read like
+/// baselines and "539/539 passing" was repeatedly cited as covering
+/// rendering across several stages of the card work. That is the spec's
+/// *"tests whose failure mode is silence"* rule in its purest form, and it
+/// is why the comparison lives here now rather than in whoever remembers to
+/// run `cmp` by hand.
+///
+/// On failure, see `RenderBaselines/__Failures__/` — the diff overlay, the
+/// actual render and the baseline are all written there, and the failure
+/// message carries the changed-pixel count and bounding box.
 final class RecurringTaskCardRenderTests: XCTestCase {
     private var container: ModelContainer!
     private var context: ModelContext!
@@ -77,10 +93,29 @@ final class RecurringTaskCardRenderTests: XCTestCase {
         return task
     }
 
-    private func renderAndSave(_ card: some View, to path: String) throws {
+    // MARK: - Rendering
+
+    /// Pinned deliberately rather than read from the environment.
+    ///
+    /// `width` used to be `UIScreen.main.bounds.width`, which quietly made
+    /// every baseline a function of *which simulator you happened to pick* —
+    /// run the suite on an iPhone 16e and every fixture fails for a reason
+    /// that has nothing to do with the code. 402pt is the iPhone 17 / 17 Pro
+    /// point width (the user's own device); hard-coding it makes the render
+    /// device-independent, so the baselines are valid on any simulator.
+    ///
+    /// `scale` is pinned to 2 rather than inherited from the device (3 on a
+    /// Pro) purely for file size: these are checked into git, and every
+    /// re-record adds another full copy to history forever. Scale 2 is 4x
+    /// smaller than scale 3 and still resolves a one-character label change
+    /// unambiguously.
+    private static let renderWidth: CGFloat = 402
+    private static let renderHeight: CGFloat = 1400
+    private static let renderScale: CGFloat = 2
+
+    private func render(_ card: some View) -> UIImage {
         let hosting = UIHostingController(rootView: card)
-        let width = UIScreen.main.bounds.width
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: width, height: 1400))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: Self.renderWidth, height: Self.renderHeight))
         window.rootViewController = hosting
         window.makeKeyAndVisible()
         hosting.view.frame = window.bounds
@@ -94,16 +129,314 @@ final class RecurringTaskCardRenderTests: XCTestCase {
             hosting.view.layoutIfNeeded()
         }
 
-        let renderer = UIGraphicsImageRenderer(bounds: hosting.view.bounds)
-        let image = renderer.image { _ in
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = Self.renderScale
+        format.opaque = true
+        // Forces an 8-bit sRGB buffer. Left at its default the simulator
+        // renders wide-gamut — 64 bits per pixel, 16 per channel — and the
+        // baseline then can't survive its own round-trip: writing it to PNG
+        // quantises to 8 bits, so comparing a fresh 16-bit render against the
+        // reloaded 8-bit file differs by ±1 on roughly 10% of pixels purely
+        // from rounding. Every fixture failed on identical content until this
+        // line existed.
+        format.preferredRange = .standard
+        let renderer = UIGraphicsImageRenderer(bounds: hosting.view.bounds, format: format)
+        return renderer.image { _ in
             hosting.view.drawHierarchy(in: hosting.view.bounds, afterScreenUpdates: true)
         }
-        let data = try XCTUnwrap(image.pngData())
-        try data.write(to: URL(fileURLWithPath: path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: path))
     }
 
-    func test_patternRowFamily_rendersAtIPhone17Width_forVisualInspection() throws {
+    // MARK: - Baseline comparison
+
+    /// Where the checked-in baselines live. Located from `#filePath` rather
+    /// than the test bundle so no pbxproj resource registration is needed —
+    /// this target registers its files explicitly, and a resource folder is
+    /// one more thing to get wrong for no benefit.
+    static var baselineDirectory: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("RenderBaselines")
+    }
+
+    /// Failure artifacts land next to the baselines — the first place anyone
+    /// looks — and are gitignored. A red test that only says "the PNGs
+    /// differ" is nearly useless; this directory is the actual output.
+    static var failureDirectory: URL {
+        baselineDirectory.appendingPathComponent("__Failures__")
+    }
+
+    /// Set `RECORD_RENDER_BASELINES=1` to overwrite every baseline with the
+    /// current render. Deliberately not automatic: silently re-recording on
+    /// mismatch is how a snapshot suite becomes a rubber stamp.
+    ///
+    /// From the command line the variable must be prefixed —
+    /// `TEST_RUNNER_RECORD_RENDER_BASELINES=1` — because `xcodebuild` does
+    /// not pass the calling shell's environment into the test process; it
+    /// forwards only `TEST_RUNNER_`-prefixed variables, stripping the prefix
+    /// on the way in. Setting it unprefixed looks like it works and silently
+    /// does nothing. In a scheme's Test → Arguments → Environment Variables,
+    /// use the unprefixed name.
+    private var isRecording: Bool {
+        ProcessInfo.processInfo.environment["RECORD_RENDER_BASELINES"] == "1"
+    }
+
+    /// Renders `card` and asserts it matches the checked-in baseline
+    /// **exactly**, pixel for pixel.
+    ///
+    /// **Why exact and not a tolerance.** Tolerance sounds like the robust
+    /// choice and isn't, because it doesn't address what actually breaks
+    /// these: an Xcode or simulator-iOS bump changes glyph rasterization
+    /// across *every* character on the card. That's a large-area change, not
+    /// a small-delta one, so a tolerance loose enough to absorb it would also
+    /// be loose enough to hide a renamed label — the exact thing the suite
+    /// exists to catch. Exact comparison keeps the signal clean and makes the
+    /// noise legible instead: *all* fixtures red at once means the
+    /// environment moved (re-record), *one* fixture red means the code did.
+    /// The manifest check below says which, in the failure message, so nobody
+    /// has to work that out from scratch.
+    ///
+    /// Comparison is on decoded sRGB pixels, not on the PNG file bytes — a
+    /// different libpng or encoder setting would change the file without
+    /// changing a single pixel, and that must not fail.
+    private func assertMatchesBaseline(
+        _ card: some View,
+        named name: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let image = render(card)
+        let baselineURL = Self.baselineDirectory.appendingPathComponent("\(name).png")
+
+        if isRecording {
+            try FileManager.default.createDirectory(at: Self.baselineDirectory, withIntermediateDirectories: true)
+            try XCTUnwrap(image.pngData()).write(to: baselineURL)
+            try Self.writeManifest()
+            return
+        }
+
+        guard FileManager.default.fileExists(atPath: baselineURL.path) else {
+            try writeFailureArtifact(image, named: "\(name).actual")
+            XCTFail(
+                """
+                No baseline for "\(name)".
+                Current render written to \(Self.failureDirectory.path)/\(name).actual.png — \
+                check it looks right, then record it:
+                  TEST_RUNNER_RECORD_RENDER_BASELINES=1 xcodebuild test -project NoteForLater.xcodeproj \
+                -scheme NoteForLater -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+                -only-testing:NoteForLaterTests/RecurringTaskCardRenderTests
+                """,
+                file: file, line: line
+            )
+            return
+        }
+
+        let actual = try Self.pixels(of: image)
+        let expectedImage = try XCTUnwrap(UIImage(contentsOfFile: baselineURL.path))
+        let expected = try Self.pixels(of: expectedImage)
+
+        guard actual.width == expected.width, actual.height == expected.height else {
+            try writeFailureArtifact(image, named: "\(name).actual")
+            XCTFail(
+                """
+                "\(name)" changed size: baseline \(expected.width)x\(expected.height), \
+                now \(actual.width)x\(actual.height).\(Self.environmentNote())
+                Actual render: \(Self.failureDirectory.path)/\(name).actual.png
+                """,
+                file: file, line: line
+            )
+            return
+        }
+
+        guard actual.bytes != expected.bytes else { return }
+
+        let report = Self.diff(actual: actual, expected: expected)
+        try writeFailureArtifact(image, named: "\(name).actual")
+        try writeFailureArtifact(expectedImage, named: "\(name).expected")
+        try writeFailureData(report.overlayPNG, named: "\(name).diff")
+
+        XCTFail(
+            """
+            "\(name)" does not match its baseline.
+            \(report.changedPixels) of \(actual.width * actual.height) pixels differ \
+            (\(String(format: "%.3f", report.changedFraction * 100))%).
+            Changed region: x \(report.bbox.minX)–\(report.bbox.maxX), \
+            y \(report.bbox.minY)–\(report.bbox.maxY) \
+            (\(report.bbox.maxX - report.bbox.minX + 1)x\(report.bbox.maxY - report.bbox.minY + 1)px).
+            \(Self.environmentNote())
+            Written to \(Self.failureDirectory.path)/:
+              \(name).diff.png      — changed pixels in red over a dimmed render
+              \(name).actual.png    — what the code renders now
+              \(name).expected.png  — the checked-in baseline
+            If this change is intended, re-record:
+              TEST_RUNNER_RECORD_RENDER_BASELINES=1 xcodebuild test -project NoteForLater.xcodeproj \
+            -scheme NoteForLater -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -only-testing:NoteForLaterTests/RecurringTaskCardRenderTests
+            """,
+            file: file, line: line
+        )
+    }
+
+    // MARK: - Pixel plumbing
+
+    private struct Bitmap {
+        let width: Int
+        let height: Int
+        let bytes: [UInt8]   // RGBA, 4 bytes per pixel
+    }
+
+    /// Decodes into a fixed sRGB RGBA buffer. Going through an explicit
+    /// context rather than reading `cgImage` bytes directly normalizes
+    /// colorspace, bitmap layout and row padding, so two images that look
+    /// identical can't compare unequal over how they happen to be stored.
+    /// NOTE on `withUnsafeMutableBytes`: the buffer must be held open across
+    /// the `draw`. Writing this the obvious way —
+    /// `CGContext(data: &bytes, ...)` and then drawing on the next line —
+    /// compiles, runs, and is undefined behaviour: `&bytes` yields a pointer
+    /// valid only for the duration of that one call, so the draw lands in
+    /// memory the array no longer owns. It happened not to misbehave here,
+    /// which is the worst way for UB to present — fixed on sight rather than
+    /// left to bite later.
+    private static func pixels(of image: UIImage) throws -> Bitmap {
+        let cgImage = try XCTUnwrap(image.cgImage)
+        let width = cgImage.width
+        let height = cgImage.height
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        let drew = bytes.withUnsafeMutableBytes { raw -> Bool in
+            guard let context = CGContext(
+                data: raw.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return false }
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        XCTAssertTrue(drew, "Could not create an sRGB bitmap context for comparison")
+        return Bitmap(width: width, height: height, bytes: bytes)
+    }
+
+    private struct DiffReport {
+        let changedPixels: Int
+        let changedFraction: Double
+        let bbox: (minX: Int, minY: Int, maxX: Int, maxY: Int)
+        let overlayPNG: Data
+    }
+
+    /// Builds the bounding box of changed pixels and an overlay image — the
+    /// render dimmed to grey with every differing pixel painted red. The
+    /// bbox is the part worth reading: "the files differ" is noise, whereas
+    /// "everything that moved is inside these two rows" is a statement that
+    /// the rest of the card is untouched.
+    private static func diff(actual: Bitmap, expected: Bitmap) -> DiffReport {
+        var changed = 0
+        var minX = Int.max, minY = Int.max, maxX = -1, maxY = -1
+        var overlay = [UInt8](repeating: 0, count: actual.bytes.count)
+
+        for y in 0..<actual.height {
+            for x in 0..<actual.width {
+                let i = (y * actual.width + x) * 4
+                let same = actual.bytes[i] == expected.bytes[i]
+                    && actual.bytes[i + 1] == expected.bytes[i + 1]
+                    && actual.bytes[i + 2] == expected.bytes[i + 2]
+                    && actual.bytes[i + 3] == expected.bytes[i + 3]
+                if same {
+                    // Dim to grey so the red reads at a glance.
+                    let luma = UInt8((Int(actual.bytes[i]) + Int(actual.bytes[i + 1]) + Int(actual.bytes[i + 2])) / 3)
+                    let dimmed = 160 + luma / 4
+                    overlay[i] = dimmed; overlay[i + 1] = dimmed; overlay[i + 2] = dimmed; overlay[i + 3] = 255
+                } else {
+                    changed += 1
+                    minX = min(minX, x); maxX = max(maxX, x)
+                    minY = min(minY, y); maxY = max(maxY, y)
+                    overlay[i] = 255; overlay[i + 1] = 0; overlay[i + 2] = 0; overlay[i + 3] = 255
+                }
+            }
+        }
+
+        let png = overlayPNG(bytes: overlay, width: actual.width, height: actual.height)
+        return DiffReport(
+            changedPixels: changed,
+            changedFraction: Double(changed) / Double(actual.width * actual.height),
+            bbox: (minX, minY, maxX, maxY),
+            overlayPNG: png
+        )
+    }
+
+    private static func overlayPNG(bytes: [UInt8], width: Int, height: Int) -> Data {
+        var mutable = bytes
+        // Same lifetime rule as `pixels(of:)` above — `makeImage()` copies,
+        // so it's safe, but only from inside the closure.
+        let cgImage: CGImage? = mutable.withUnsafeMutableBytes { raw in
+            CGContext(
+                data: raw.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )?.makeImage()
+        }
+        guard let cgImage else { return Data() }
+        return UIImage(cgImage: cgImage).pngData() ?? Data()
+    }
+
+    // MARK: - Environment manifest
+
+    /// What the baselines were recorded under. Its whole job is to turn the
+    /// brittleness of exact comparison from *confusing* into *routine*: when
+    /// the simulator's iOS version has moved, the failure says so instead of
+    /// leaving someone to diff PNGs wondering what they broke.
+    private static var manifestURL: URL { baselineDirectory.appendingPathComponent("manifest.json") }
+
+    private static var currentEnvironment: [String: String] {
+        [
+            "iosVersion": UIDevice.current.systemVersion,
+            "width": "\(Int(renderWidth))",
+            "height": "\(Int(renderHeight))",
+            "scale": "\(Int(renderScale))",
+        ]
+    }
+
+    private static func writeManifest() throws {
+        let data = try JSONSerialization.data(
+            withJSONObject: currentEnvironment, options: [.prettyPrinted, .sortedKeys]
+        )
+        try data.write(to: manifestURL)
+    }
+
+    private static func environmentNote() -> String {
+        guard let data = try? Data(contentsOf: manifestURL),
+              let recorded = try? JSONSerialization.jsonObject(with: data) as? [String: String]
+        else { return "" }
+        let current = currentEnvironment
+        let drift = current.filter { recorded[$0.key] != $0.value }
+        guard !drift.isEmpty else { return "" }
+        let detail = drift
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key): baseline \(recorded[$0.key] ?? "?") vs now \($0.value)" }
+            .joined(separator: ", ")
+        return """
+
+            NOTE: the render environment has changed since these baselines were \
+            recorded (\(detail)). If every fixture is failing, that's the cause — \
+            re-record rather than hunting for a code regression.
+            """
+    }
+
+    private func writeFailureArtifact(_ image: UIImage, named name: String) throws {
+        try writeFailureData(image.pngData() ?? Data(), named: name)
+    }
+
+    private func writeFailureData(_ data: Data, named name: String) throws {
+        try FileManager.default.createDirectory(at: Self.failureDirectory, withIntermediateDirectories: true)
+        try data.write(to: Self.failureDirectory.appendingPathComponent("\(name).png"))
+    }
+
+    func test_patternRowFamily_matchesBaseline() throws {
         let task = makeWorstCaseRelativeTask()
         let shelf = task.shelf!
 
@@ -118,13 +451,10 @@ final class RecurringTaskCardRenderTests: XCTestCase {
         )
         .environment(\.modelContext, context)
 
-        try renderAndSave(
-            card,
-            to: "/private/tmp/claude-501/-Users-jimmylong-Desktop-NoteForLater/e4869a73-1104-4360-97d1-303c92f0e0ca/scratchpad/pattern_row_render.png"
-        )
+        try assertMatchesBaseline(card, named: "pattern_row_render")
     }
 
-    func test_nonRecurringRows_renderAtIPhone17Width_forVisualInspection() throws {
+    func test_nonRecurringRows_matchBaseline() throws {
         let task = makeWorstCaseNonRecurringTask()
 
         let card = TaskReviewCard(
@@ -138,10 +468,7 @@ final class RecurringTaskCardRenderTests: XCTestCase {
         )
         .environment(\.modelContext, context)
 
-        try renderAndSave(
-            card,
-            to: "/private/tmp/claude-501/-Users-jimmylong-Desktop-NoteForLater/e4869a73-1104-4360-97d1-303c92f0e0ca/scratchpad/non_recurring_rows_render.png"
-        )
+        try assertMatchesBaseline(card, named: "non_recurring_rows_render")
     }
 
     /// A task whose shelf turns on *every* tracking flag and carries a
@@ -187,15 +514,13 @@ final class RecurringTaskCardRenderTests: XCTestCase {
             onDiscard: {}, onSkip: {}, onMove: { _ in }, onNext: {}, onSnooze: { _ in }
         )
         .environment(\.modelContext, context)
-        try renderAndSave(card, to: "\(Self.renderDirectory)/\(name).png")
+        try assertMatchesBaseline(card, named: name)
     }
-
-    static let renderDirectory = "/private/tmp/claude-501/-Users-jimmylong-Desktop-NoteForLater/e4869a73-1104-4360-97d1-303c92f0e0ca/scratchpad"
 
     /// Baselines for the row-list consolidation: the whole point of that
     /// change is that presentation is untouched, so these renders should
-    /// come out byte-identical before and after. Rendering was confirmed
-    /// deterministic across runs before relying on that.
+    /// come out pixel-identical before and after. Rendering was confirmed
+    /// deterministic across repeat runs before relying on that.
     func test_fullTailRows_recurring_render() throws {
         try renderCard(makeFullTailTask(recurring: true), to: "tail_recurring")
     }
@@ -214,4 +539,43 @@ final class RecurringTaskCardRenderTests: XCTestCase {
         shelf.hasNextStep = false
         try renderCard(task, to: "tail_nontracking")
     }
+
+    /// Guards the repo against the cost of these baselines.
+    ///
+    /// `UIImage.pngData()` writes PNGs about 4x larger than the content
+    /// needs — the five fixtures came to 12.2 MB as recorded, and *every*
+    /// re-record adds another full copy to git history permanently.
+    /// `scripts/optimize-render-baselines.py` re-encodes them losslessly to
+    /// 2.9 MB.
+    ///
+    /// That script is easy to forget, and a forgotten optimisation step is
+    /// invisible — which is the same shape of problem as the missing
+    /// comparison this whole file just fixed. So it's asserted rather than
+    /// documented: re-record, skip the script, and the suite says so.
+    func test_baselinesAreLosslesslyCompressed() throws {
+        let budget = 1_200_000
+        let files = try FileManager.default.contentsOfDirectory(
+            at: Self.baselineDirectory, includingPropertiesForKeys: [.fileSizeKey]
+        ).filter { $0.pathExtension == "png" }
+
+        XCTAssertFalse(files.isEmpty, "No baselines found at \(Self.baselineDirectory.path)")
+
+        let oversized = try files
+            .map { (name: $0.lastPathComponent, size: try $0.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) }
+            .filter { $0.size > budget }
+            .sorted { $0.size > $1.size }
+
+        XCTAssertTrue(
+            oversized.isEmpty,
+            """
+            \(oversized.count) baseline(s) are larger than \(budget / 1024) KB, which means \
+            they were recorded but not re-encoded:
+            \(oversized.map { "  \($0.name) — \($0.size / 1024) KB" }.joined(separator: "\n"))
+            Run: python3 scripts/optimize-render-baselines.py
+            It is pixel-lossless (it verifies that itself), so the comparison \
+            tests above keep passing.
+            """
+        )
+    }
 }
+
