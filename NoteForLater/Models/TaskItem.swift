@@ -408,6 +408,19 @@ final class TaskItem {
     /// Habits are unaffected — `Habit` has its own time-mode storage and
     /// keeps all four modes.
     var recurrenceTimeMode: HabitOccurrenceTimeMode {
+        // ASYMMETRIC ON PURPOSE — do not "fix" these into agreement.
+        //
+        // get: reports what is stored, `.specific` included. The migration
+        //      finds legacy rows by reading this. Coerce here and it can
+        //      never see one, so it silently migrates nothing while still
+        //      setting its completion flag — the failure would be invisible.
+        // set: refuses `.specific`, so no new row can reach a state the app
+        //      no longer serves.
+        //
+        // Covered by `test_recurrenceTimeMode_getterReportsLegacySpecificHonestly`
+        // and `test_recurrenceTimeMode_setterCoercesSpecificToMidday`, which
+        // fail in opposite directions if either half is made to match the
+        // other.
         get { HabitOccurrenceTimeMode(rawValue: recurrenceTimeModeRaw) ?? .midday }
         set { recurrenceTimeModeRaw = (newValue == .specific ? .midday : newValue).rawValue }
     }
