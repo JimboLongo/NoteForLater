@@ -2168,8 +2168,27 @@ struct TaskReviewCard: View {
     /// conditions `TaskItem.divisibleMissing` short-circuits on, so the
     /// row and the missing badge agree by construction.
     static func showsDivisibleRow(task: TaskItem) -> Bool {
-        task.estimatedMinutes >= TaskItem.divisibleMinimumDurationMinutes
+        showsDurationRow(task: task)
+            && task.estimatedMinutes >= TaskItem.divisibleMinimumDurationMinutes
             && !TaskItem.validSegmentOptions(for: task.estimatedMinutes).isEmpty
+    }
+
+    /// Whether the Duration row is shown at all. Hidden for a recurring
+    /// task on AM/Midday/PM — an untimed occurrence never gets a calendar
+    /// block, so neither Duration nor Divisible means anything for it.
+    /// Reads `TaskItem.recurringAndUntimed`, the same property
+    /// `durationMissing`/`divisibleMissing` gate on, so the row and the
+    /// missing badge can't disagree.
+    ///
+    /// This gate used to live implicitly in `timeExpandedContent`'s
+    /// `recurrenceTimeMode == .specific` branch, which is where Duration
+    /// and Divisible were rendered before they were flattened into their
+    /// own rows. Flattening dropped it, and both rows started appearing
+    /// for untimed recurring tasks — stated here rather than left to be
+    /// rediscovered, since nothing about the row list makes the
+    /// dependency obvious.
+    static func showsDurationRow(task: TaskItem) -> Bool {
+        !task.recurringAndUntimed
     }
 
     /// Same reasoning as `isRepeatsConfigured`. `TaskItem.priorityMissing`
@@ -2201,7 +2220,7 @@ struct TaskReviewCard: View {
             if !isRepeatsConfigured(task: task, shelf: shelf) { return .repeats }
             if !isStartsConfigured(task: task, shelf: shelf) { return .starts }
             if !isTimeConfigured(task: task, shelf: shelf, segmentOptions: segmentOptions) { return .time }
-            if !isDurationConfigured(task: task, shelf: shelf) { return .duration }
+            if showsDurationRow(task: task), !isDurationConfigured(task: task, shelf: shelf) { return .duration }
             if showsDivisibleRow(task: task), !isDivisibleConfigured(task: task, shelf: shelf) { return .divisible }
         } else {
             if !isDueConfigured(task: task, shelf: shelf) { return .due }
@@ -2232,7 +2251,8 @@ struct TaskReviewCard: View {
     static func initialExpandedRows(task: TaskItem, shelf: Shelf?, segmentOptions: [Int], isNewlyCreated: Bool) -> Set<ExpandableRow> {
         if isNewlyCreated {
             if task.isRecurring {
-                var rows: Set<ExpandableRow> = [.repeats, .starts, .time, .duration, .ends]
+                var rows: Set<ExpandableRow> = [.repeats, .starts, .time, .ends]
+                if showsDurationRow(task: task) { rows.insert(.duration) }
                 if showsDivisibleRow(task: task) { rows.insert(.divisible) }
                 return rows
             }
@@ -2716,6 +2736,10 @@ struct TaskReviewCard: View {
 
     private var showsDivisibleRow: Bool {
         durationAllowed && Self.showsDivisibleRow(task: task)
+    }
+
+    private var showsDurationRow: Bool {
+        Self.showsDurationRow(task: task)
     }
 
     /// Duration as a single wheel — no Yes/No question in front of it
@@ -3538,20 +3562,28 @@ struct TaskReviewCard: View {
                     timeExpandedContent
                 }
 
-                CollapsibleAnswerRow(
-                    label: "Duration",
-                    summary: durationSummaryText,
-                    isNotSelected: !isDurationConfigured,
-                    isExpanded: isDurationExpanded,
-                    onTapHeader: { focusedField = nil }
-                ) {
-                    durationControl
+                // Hidden entirely for AM/Midday/PM — an untimed recurring
+                // occurrence never gets a calendar block, so it has no
+                // duration to state and nothing to split. See
+                // `showsDurationRow`. This gate is what was lost when
+                // these two moved out of the "Time" row.
+                if showsDurationRow {
+                    CollapsibleAnswerRow(
+                        label: "Duration",
+                        summary: durationSummaryText,
+                        isNotSelected: !isDurationConfigured,
+                        isExpanded: isDurationExpanded,
+                        onTapHeader: { focusedField = nil }
+                    ) {
+                        durationControl
+                    }
                 }
 
-                // Only when the duration is long enough to split and something
-                // evenly divides it — see `showsDivisibleRow`. Dynamic: changing
-                // the Duration wheel adds or removes this row immediately, since
-                // it reads `task.estimatedMinutes` on every body pass.
+                // Additionally requires a duration long enough to split
+                // that something evenly divides — see `showsDivisibleRow`.
+                // Dynamic: changing the Duration wheel adds or removes
+                // this row immediately, since it reads
+                // `task.estimatedMinutes` on every body pass.
                 if showsDivisibleRow {
                     CollapsibleAnswerRow(
                         label: "Divisible",

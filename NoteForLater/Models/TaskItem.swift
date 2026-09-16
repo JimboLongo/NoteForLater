@@ -1676,9 +1676,17 @@ final class TaskItem {
     /// Time — an untimed occurrence never gets a calendar block, so
     /// Duration and Divisible are meaningless for it, not just
     /// unanswered. Shared by `durationMissing`/`divisibleMissing` so
-    /// neither flags a question the card itself greys out and offers no
-    /// way to answer (see `TaskReviewCard.durationAllowed`).
-    private var recurringAndUntimed: Bool {
+    /// neither flags a question the card doesn't ask.
+    ///
+    /// `internal`, not `private`, so the card's own row-visibility
+    /// predicates (`TaskReviewCard.showsDurationRow`/`.showsDivisibleRow`)
+    /// read this exact definition rather than restating it. They
+    /// restating it separately is what let the two drift apart in the
+    /// first place — the rows kept rendering for an untimed recurring
+    /// task after Duration/Divisible were flattened out of the "Time"
+    /// row, while this guard went on correctly reporting them
+    /// not-missing.
+    var recurringAndUntimed: Bool {
         isRecurring && recurrenceTimeMode != .specific
     }
 

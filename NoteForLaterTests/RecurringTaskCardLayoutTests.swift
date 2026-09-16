@@ -549,7 +549,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
 
         let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: true)
 
-        XCTAssertEqual(rows, [.repeats, .starts, .time, .duration, .ends], "no .divisible — the default 0-minute duration is below the threshold")
+        XCTAssertEqual(rows, [.repeats, .starts, .time, .ends], "no .duration/.divisible — a fresh recurring task defaults to Midday, which is untimed")
     }
 
     /// A reopened, already-saved, fully-configured task opens fully
@@ -589,10 +589,88 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     func test_fillingRepeatsOnNewTask_wouldCollapseOnlyRepeats() {
         let task = makeRecurringTask()
         let seeded = TaskReviewCard.initialExpandedRows(task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: true)
-        XCTAssertEqual(seeded, [.repeats, .starts, .time, .duration, .ends], "starting point: everything open")
+        XCTAssertEqual(seeded, [.repeats, .starts, .time, .ends], "starting point: everything that applies is open — Duration/Divisible don't, since a fresh recurring task is Midday/untimed")
 
         TaskReviewCard.selectRecurrenceUnit(task.recurrenceUnit, on: task) // answers Repeats (Specific Date needs nothing else)
 
         XCTAssertTrue(TaskReviewCard.isRepeatsConfigured(task: task, shelf: task.shelf), "this is the condition each self-collapse call site checks before removing just .repeats from expandedRows")
+    }
+
+    // MARK: - Untimed recurring: Duration/Divisible rows don't exist
+
+    /// Regression test. Duration and Divisible used to be rendered inside
+    /// `timeExpandedContent`'s `recurrenceTimeMode == .specific` branch;
+    /// flattening them into their own rows dropped that gate and both
+    /// started appearing for AM/Midday/PM recurring tasks, where an
+    /// untimed occurrence never gets a calendar block and neither field
+    /// means anything.
+    ///
+    /// Nothing caught it because the existing coverage asserts
+    /// `durationMissing`/`divisibleMissing` are false for untimed tasks —
+    /// which stayed true the whole time. The *rows* were never asserted.
+    /// That gap is the actual lesson: "not reported missing" and "not
+    /// shown" were two separate facts with nothing tying them together.
+    func test_untimedRecurringTask_hidesDurationAndDivisibleRows() {
+        for mode in [HabitOccurrenceTimeMode.am, .midday, .pm] {
+            let task = makeRecurringTask()
+            task.recurrenceTimeModePicked = true
+            task.recurrenceTimeMode = mode
+            // A duration that would otherwise clear every other bar —
+            // 120 minutes is well past the divisible threshold and has
+            // plenty of valid segment sizes.
+            TaskItem.selectDuration(120, on: task)
+
+            XCTAssertFalse(TaskReviewCard.showsDurationRow(task: task), "\(mode) must not show a Duration row")
+            XCTAssertFalse(TaskReviewCard.showsDivisibleRow(task: task), "\(mode) must not show a Divisible row")
+        }
+    }
+
+    /// The other side of the same gate: Specific Time is the one
+    /// recurring mode that does get a calendar block, so both rows show.
+    func test_specificTimeRecurringTask_showsDurationAndDivisibleRows() {
+        let task = makeRecurringTask()
+        task.recurrenceTimeModePicked = true
+        task.recurrenceTimeMode = .specific
+        TaskItem.selectDuration(120, on: task)
+
+        XCTAssertTrue(TaskReviewCard.showsDurationRow(task: task))
+        XCTAssertTrue(TaskReviewCard.showsDivisibleRow(task: task))
+    }
+
+    /// A non-recurring task has no time-mode concept at all, so the gate
+    /// must never suppress its Duration row.
+    func test_nonRecurringTask_alwaysShowsDurationRow() {
+        let task = TaskItem(title: "Ordinary", estimatedMinutes: 30)
+
+        XCTAssertTrue(TaskReviewCard.showsDurationRow(task: task))
+    }
+
+    /// The row-visibility predicate and the missing-check must agree —
+    /// this is the pairing whose absence let the regression through.
+    func test_untimedRecurring_rowHiddenAndNotReportedMissing_together() {
+        let task = makeRecurringTask()
+        task.recurrenceTimeModePicked = true
+        task.recurrenceTimeMode = .am
+        TaskItem.selectDuration(120, on: task)
+
+        let missing = task.missingAttributeNames(consideringShelf: task.shelf)
+        XCTAssertFalse(TaskReviewCard.showsDurationRow(task: task))
+        XCTAssertFalse(missing.contains("Duration"), "hidden and not-missing must hold together")
+        XCTAssertFalse(TaskReviewCard.showsDivisibleRow(task: task))
+        XCTAssertFalse(missing.contains("Divisible"))
+    }
+
+    /// Seeding must not expand a row that can't render.
+    func test_initialExpandedRows_untimedRecurringNewTask_omitsDurationAndDivisible() {
+        let task = makeRecurringTask()
+        task.recurrenceTimeModePicked = true
+        task.recurrenceTimeMode = .am
+        TaskItem.selectDuration(120, on: task)
+
+        let rows = TaskReviewCard.initialExpandedRows(
+            task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: true
+        )
+
+        XCTAssertEqual(rows, [.repeats, .starts, .time, .ends])
     }
 }
