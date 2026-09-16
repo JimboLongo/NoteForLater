@@ -949,11 +949,14 @@ final class SchedulingEngineTests: XCTestCase {
         recurring.recurrenceIntervalCount = 1
         recurring.recurrenceUnit = .days
         // This test is specifically about a *timed*, block-placed
-        // recurring task's overlap behavior — explicit rather than
-        // relying on whatever `recurrenceTimeMode`'s ambient default
-        // happens to be (now `.midday`, an untimed placement that
-        // wouldn't produce a block to test overlap against at all).
-        recurring.recurrenceTimeMode = .specific
+        // recurring task's overlap behavior, which needs Specific Time to
+        // produce a block at all. A task can't be set to that mode any
+        // more — the setter refuses it (see `TaskItem.recurrenceTimeMode`)
+        // — so this writes the raw column, giving the pre-migration row
+        // shape `migrateRecurringSpecificTimeTasksIfNeeded` clears. The
+        // placement machinery is retired but not yet deleted (stage 4b),
+        // so its overlap invariant stays covered until it goes.
+        recurring.recurrenceTimeModeRaw = HabitOccurrenceTimeMode.specific.rawValue
         // Anchored at 9am, the same hour the packer will start from.
         recurring.dueDate = calendar.date(byAdding: .hour, value: 9, to: testDay)!
         recurring.setEligible(true, for: rule)
@@ -1130,13 +1133,45 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertEqual(task.recurrenceTimeMode, .midday, "a genuinely untimed default, not a silently-timed one — see recurrenceTimeModeRaw's own doc comment")
     }
 
-    func test_recurrenceTimeMode_getSetRoundTrips() {
+    /// Was a plain round-trip over `allCases`. **Updated, not deleted:**
+    /// `.specific` deliberately no longer round-trips for a task, so the
+    /// old assertion described behavior that's been removed. Split into the
+    /// two halves that are now true.
+    func test_recurrenceTimeMode_roundTripsEverySelectableMode() {
         let shelf = Shelf(name: "S")
         let task = TaskItem(title: "T", shelf: shelf)
-        for mode in HabitOccurrenceTimeMode.allCases {
+        for mode in HabitOccurrenceTimeMode.taskSelectableCases {
             task.recurrenceTimeMode = mode
             XCTAssertEqual(task.recurrenceTimeMode, mode)
         }
+    }
+
+    /// The setter is where "a recurring task is never Specific Time" is
+    /// actually enforced — not the picker, which only controls what's
+    /// *offered*. Assigning it anyway lands on `.midday`.
+    func test_recurrenceTimeMode_setterCoercesSpecificToMidday() {
+        let task = TaskItem(title: "T", shelf: Shelf(name: "S"))
+        task.recurrenceTimeMode = .specific
+        XCTAssertEqual(task.recurrenceTimeMode, .midday)
+        XCTAssertEqual(task.recurrenceTimeModeRaw, HabitOccurrenceTimeMode.midday.rawValue)
+    }
+
+    /// The getter, by contrast, must report what's stored rather than
+    /// coercing — otherwise `migrateRecurringSpecificTimeTasksIfNeeded`
+    /// could never find a legacy row to migrate, and would look correct
+    /// while doing nothing.
+    func test_recurrenceTimeMode_getterReportsLegacySpecificHonestly() {
+        let task = TaskItem(title: "T", shelf: Shelf(name: "S"))
+        task.recurrenceTimeModeRaw = HabitOccurrenceTimeMode.specific.rawValue
+        XCTAssertEqual(task.recurrenceTimeMode, .specific, "the migration depends on seeing this")
+    }
+
+    /// An unreadable raw value falls back to `.midday`, the stored default
+    /// — not to `.specific`, which is the one mode a task may not hold.
+    func test_recurrenceTimeMode_unknownRawValueFallsBackToMidday() {
+        let task = TaskItem(title: "T", shelf: Shelf(name: "S"))
+        task.recurrenceTimeModeRaw = "not-a-mode"
+        XCTAssertEqual(task.recurrenceTimeMode, .midday)
     }
 
     // MARK: - remainingMinutes must survive every block deletion

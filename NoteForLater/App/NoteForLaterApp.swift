@@ -58,6 +58,7 @@ struct NoteForLaterApp: App {
         Self.processPushedRecurringOccurrencesIfNeeded(container: sharedModelContainer)
         Self.migrateIncompleteBlocksAndMealsToThreeStateIfNeeded(container: sharedModelContainer)
         Self.migrateDurationDivisibleToSingleWheelIfNeeded(container: sharedModelContainer)
+        Self.migrateRecurringSpecificTimeTasksIfNeeded(container: sharedModelContainer)
     }
 
     /// Runs once per calendar day, not once ever — unlike the one-time
@@ -316,6 +317,58 @@ struct NoteForLaterApp: App {
                     task.divisiblePicked = false
                 }
                 task.hasMigratedSingleWheel = true
+            }
+        }
+        do {
+            try context.save()
+            UserDefaults.standard.set(true, forKey: flagKey)
+        } catch {
+            // Leave the flag unset so this retries next launch. Safe to
+            // retry — see this function's own doc comment on idempotence.
+        }
+    }
+
+    /// Moves any recurring task still on Specific Time onto Midday, and
+    /// clears the calendar blocks that mode had created for it.
+    ///
+    /// Specific Time is no longer offered for recurring tasks (see
+    /// `HabitOccurrenceTimeMode.taskSelectableCases`). Without this, a task
+    /// already on it would keep the retired behaviour indefinitely — a real
+    /// `ScheduledBlock` per occurrence, completion living on the block
+    /// instead of in `RecurringTaskLog`, and a card offering no way back,
+    /// since the mode it's on isn't in the picker any more.
+    ///
+    /// **Only future, incomplete blocks are removed.** A past or completed
+    /// block is history: it records that the occurrence happened, and
+    /// `ScheduleReviewViewModel.isRecurringTaskOccurrenceComplete` still
+    /// reads exactly those. Deleting them would silently un-complete work
+    /// the user actually did.
+    ///
+    /// **Habits are untouched.** They keep all four modes, and Specific
+    /// Time is the mode most of them are on. The fetch is over `TaskItem`
+    /// and the `isRecurring` guard is explicit, so a habit-linked block
+    /// (`block.habit != nil`, `block.task == nil`) is never even considered.
+    ///
+    /// Gate and idempotence follow the established shape — a `UserDefaults`
+    /// flag set only *after* `context.save()` succeeds, so an interrupted
+    /// run retries rather than leaving the store half-migrated, plus a
+    /// per-row `TaskItem.hasMigratedOffSpecificTime` committed in that same
+    /// save, which is what actually makes a second pass a no-op whether or
+    /// not the outer flag's write ever landed.
+    static func migrateRecurringSpecificTimeTasksIfNeeded(container: ModelContainer, today: Date = .now, calendar: Calendar = .current) {
+        let flagKey = "didMigrateRecurringSpecificTimeTasks.v1"
+        guard !UserDefaults.standard.bool(forKey: flagKey) else { return }
+
+        let context = ModelContext(container)
+        let startOfToday = calendar.startOfDay(for: today)
+        if let tasks = try? context.fetch(FetchDescriptor<TaskItem>()) {
+            for task in tasks where !task.hasMigratedOffSpecificTime {
+                defer { task.hasMigratedOffSpecificTime = true }
+                guard task.isRecurring, task.recurrenceTimeMode == .specific else { continue }
+                task.recurrenceTimeMode = .midday
+                for block in (task.scheduledBlocks ?? []) where block.date >= startOfToday && block.status != .complete {
+                    context.delete(block)
+                }
             }
         }
         do {

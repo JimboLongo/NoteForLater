@@ -55,7 +55,13 @@ final class DayTimelineProjectionAndStreakTests: XCTestCase {
         task.isRecurring = true
         task.recurrenceUnit = .days
         task.recurrenceIntervalCount = 1
-        task.recurrenceTimeMode = .specific
+        // Legacy row shape: the setter refuses `.specific` for tasks now
+        // (see `TaskItem.recurrenceTimeMode`), so this writes the raw
+        // column directly, which is exactly the pre-migration state
+        // `migrateRecurringSpecificTimeTasksIfNeeded` exists to clear. The
+        // machinery under test is retired but not yet deleted — see stage
+        // 4b — so it stays covered until it goes.
+        task.recurrenceTimeModeRaw = HabitOccurrenceTimeMode.specific.rawValue
         context.insert(task)
         return task
     }
@@ -68,7 +74,11 @@ final class DayTimelineProjectionAndStreakTests: XCTestCase {
         task.isRecurring = true
         task.recurrenceUnit = .months
         task.recurrenceIntervalCount = 1
-        task.recurrenceTimeMode = mode
+        // Raw, not through the setter: it coerces `.specific` to `.midday`
+        // for tasks now (see `TaskItem.recurrenceTimeMode`), and the
+        // Specific-Time callers below are exercising the pre-migration row
+        // shape on purpose. Every other mode is unaffected by writing raw.
+        task.recurrenceTimeModeRaw = mode.rawValue
         context.insert(task)
         return task
     }

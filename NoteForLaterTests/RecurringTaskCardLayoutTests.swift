@@ -105,28 +105,35 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
         XCTAssertTrue(TaskReviewCard.isTimeConfigured(task: task, shelf: task.shelf, segmentOptions: []))
     }
 
-    /// Specific Time with the mode picked but no duration yet — still
-    /// unconfigured, since Duration is now folded into this row.
-    /// Renamed in spirit: Duration is its own row now, so the "Time" row
-    /// is Mode-only and answering the mode fully configures it. What's
-    /// still unanswered is Duration, asserted directly.
-    func test_durationUnconfigured_specific_modePickedButNoDuration() {
+    /// Was `test_durationUnconfigured_specific_modePickedButNoDuration`,
+    /// asserting Duration **unconfigured** for a mode-picked recurring
+    /// task. **Inverted deliberately.**
+    ///
+    /// Answering the mode fully configures the Mode-only "Time" row — that
+    /// half is unchanged. What changed is the second half: Duration is no
+    /// longer a question a recurring task is asked, so it can't be
+    /// outstanding. `isDurationConfigured` reads `missingAttributeNames`,
+    /// which guards on `CardRow` visibility, so a hidden row is never
+    /// reported missing — the `.shown ⟺ missable` invariant doing its job.
+    func test_recurringTask_modePicked_neverHasDurationOutstanding() {
         let task = makeRecurringTask()
         task.recurrenceTimeModePicked = true
-        task.recurrenceTimeMode = .specific
+        task.recurrenceTimeMode = .midday
 
         XCTAssertTrue(TaskReviewCard.isTimeConfigured(task: task, shelf: task.shelf, segmentOptions: []), "Time is Mode-only now")
-        XCTAssertFalse(TaskReviewCard.isDurationConfigured(task: task, shelf: task.shelf))
+        XCTAssertTrue(TaskReviewCard.isDurationConfigured(task: task, shelf: task.shelf), "Duration isn't asked of a recurring task")
     }
 
-    /// Specific Time, mode + duration both picked, duration NOT
-    /// splittable (`segmentOptions` empty, e.g. a prime number of
-    /// minutes) — Divisible must not be required, since it wouldn't even
-    /// appear as a row.
-    func test_timeConfigured_specific_unsplittableDuration_divisibleNotRequired() {
+    /// Mode + duration both picked, duration NOT splittable
+    /// (`segmentOptions` empty, e.g. a prime number of minutes) —
+    /// Divisible must not be required, since it wouldn't even appear as a
+    /// row. Dropped "specific" from the name: the fixture is a plain
+    /// recurring task now, and the unsplittable duration is the whole
+    /// point of the test.
+    func test_timeConfigured_unsplittableDuration_divisibleNotRequired() {
         let task = makeRecurringTask()
         task.recurrenceTimeModePicked = true
-        task.recurrenceTimeMode = .specific
+        task.recurrenceTimeMode = .midday
         task.durationPicked = true
         task.estimatedMinutes = 7 // no proper divisors — matches `TaskItem.validSegmentOptions`'s own rule
 
@@ -134,30 +141,30 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
         XCTAssertTrue(TaskReviewCard.isTimeConfigured(task: task, shelf: task.shelf, segmentOptions: []))
     }
 
-    /// Specific Time, mode + duration picked, duration IS splittable, but
-    /// Divisible itself hasn't been answered — must read unconfigured,
-    /// since the row now appears and asks the question.
-    /// Same rename reasoning — Divisible has its own row and its own
-    /// check now. Uses 60 minutes rather than 30: below
-    /// `TaskItem.divisibleMinimumDurationMinutes` the row isn't shown at
-    /// all, so a 30-minute fixture would assert nothing.
-    func test_divisibleUnconfigured_specific_splittableDurationNotAnswered() {
+    /// Was `test_divisibleUnconfigured_specific_splittableDurationNotAnswered`.
+    /// **Inverted for the same reason as the Duration test above** —
+    /// Divisible is hidden for every recurring task now, so a splittable
+    /// duration no longer leaves it outstanding.
+    func test_recurringTask_splittableDuration_neverHasDivisibleOutstanding() {
         let task = makeRecurringTask()
         task.recurrenceTimeModePicked = true
-        task.recurrenceTimeMode = .specific
+        task.recurrenceTimeMode = .midday
         task.durationPicked = true
         task.estimatedMinutes = 60
 
-        XCTAssertTrue(TaskReviewCard.showsDivisibleRow(task: task), "sanity: 60 minutes shows the Divisible row")
-        XCTAssertFalse(TaskReviewCard.isDivisibleConfigured(task: task, shelf: task.shelf))
+        XCTAssertEqual(CardRow.divisible.visibility(task: task, shelf: task.shelf), .hidden,
+                       "60 minutes would clear the threshold, but recurring hides Divisible outright")
+        XCTAssertTrue(TaskReviewCard.isDivisibleConfigured(task: task, shelf: task.shelf),
+                      "a hidden row is never outstanding")
     }
 
-    /// Full Specific Time configuration — mode, duration, and Divisible
-    /// (explicitly answered "No") all decided.
-    func test_timeConfigured_specific_fullyAnswered() {
+    /// Everything answered — mode, duration, and Divisible (explicitly
+    /// "No"). Was named "_specific_"; the fixture is a plain recurring
+    /// task now and the test is about full configuration, not the mode.
+    func test_timeConfigured_fullyAnswered() {
         let task = makeRecurringTask()
         task.recurrenceTimeModePicked = true
-        task.recurrenceTimeMode = .specific
+        task.recurrenceTimeMode = .midday
         task.durationPicked = true
         task.estimatedMinutes = 30
         task.divisiblePicked = true
@@ -208,7 +215,9 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
         task.relativeRecurrenceOrdinal = .last
         task.relativeRecurrenceWeekday = 3
         task.relativeRecurrencePicked = true
-        task.recurrenceTimeMode = .specific
+        // `.pm` rather than `.specific` — the round-trip is what's under
+        // test, and a task can no longer hold Specific Time.
+        task.recurrenceTimeMode = .pm
         task.recurrenceTimeModePicked = true
         task.recurrenceTimeOfDayMinutes = 17 * 60 + 45
         task.recurrenceEndDate = Calendar.current.date(byAdding: .month, value: 6, to: .now)
@@ -258,7 +267,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
         XCTAssertEqual(task.relativeRecurrenceOrdinal, .last)
         XCTAssertEqual(task.relativeRecurrenceWeekday, 3)
         XCTAssertTrue(task.relativeRecurrencePicked)
-        XCTAssertEqual(task.recurrenceTimeMode, .specific)
+        XCTAssertEqual(task.recurrenceTimeMode, .pm)
         XCTAssertTrue(task.recurrenceTimeModePicked)
         XCTAssertEqual(task.recurrenceTimeOfDayMinutes, 17 * 60 + 45)
         XCTAssertNotNil(task.recurrenceEndDate)
@@ -625,16 +634,23 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
         }
     }
 
-    /// The other side of the same gate: Specific Time is the one
-    /// recurring mode that does get a calendar block, so both rows show.
-    func test_specificTimeRecurringTask_showsDurationAndDivisibleRows() {
+    /// Was `test_specificTimeRecurringTask_showsDurationAndDivisibleRows`,
+    /// asserting `showsDurationRow` **true**. **Inverted deliberately.**
+    ///
+    /// It was "the other side of the same gate": Specific Time was the one
+    /// recurring mode that got a calendar block, so it was the one that
+    /// needed a length. There is no other side any more — a task can't be
+    /// Specific Time, so no recurring task gets a block and none shows
+    /// Duration. The gate itself (`recurringAndUntimed`) is unchanged; what
+    /// changed is that nothing can land on the other side of it.
+    func test_noRecurringTask_showsDurationOrDivisibleRows() {
         let task = makeRecurringTask()
         task.recurrenceTimeModePicked = true
-        task.recurrenceTimeMode = .specific
+        task.recurrenceTimeMode = .midday
         TaskItem.selectDuration(120, on: task)
 
-        XCTAssertTrue(TaskReviewCard.showsDurationRow(task: task))
-        XCTAssertTrue(TaskReviewCard.showsDivisibleRow(task: task))
+        XCTAssertFalse(TaskReviewCard.showsDurationRow(task: task))
+        XCTAssertEqual(CardRow.divisible.visibility(task: task, shelf: task.shelf), .hidden)
     }
 
     /// A non-recurring task has no time-mode concept at all, so the gate

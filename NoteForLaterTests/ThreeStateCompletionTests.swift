@@ -329,7 +329,13 @@ final class ThreeStateCompletionTests: XCTestCase {
         // pre-existing path.
         let task = TaskItem(title: "Recurring", estimatedMinutes: 15)
         task.isRecurring = true
-        task.recurrenceTimeMode = .specific
+        // Legacy row shape: the setter refuses `.specific` for tasks now
+        // (see `TaskItem.recurrenceTimeMode`), so this writes the raw
+        // column directly, which is exactly the pre-migration state
+        // `migrateRecurringSpecificTimeTasksIfNeeded` exists to clear. The
+        // machinery under test is retired but not yet deleted — see stage
+        // 4b — so it stays covered until it goes.
+        task.recurrenceTimeModeRaw = HabitOccurrenceTimeMode.specific.rawValue
         context.insert(task)
         let block = makeBlock(for: task, on: day(2026, 1, 5))
         // block.status left at .none, but the recurring path ignores it —

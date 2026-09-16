@@ -375,9 +375,41 @@ final class TaskItem {
         set { recurrenceUnitRaw = newValue.rawValue }
     }
 
+    /// Falls back to `.midday`, which is also `recurrenceTimeModeRaw`'s
+    /// stored default — so an unreadable raw value and a never-written one
+    /// land in the same place.
+    ///
+    /// It used to fall back to `.specific`, which is now the one mode a
+    /// recurring task may not hold (`HabitOccurrenceTimeMode
+    /// .taskSelectableCases`). A single unrecognised string would have
+    /// resurrected the retired Specific-Time path for that task —
+    /// reinstating the calendar block and the second completion store —
+    /// without anything having set it.
+    /// **The setter refuses `.specific`, coercing it to `.midday`.** This is
+    /// what makes "a recurring task is never Specific Time" an invariant
+    /// rather than a convention — the same call as stage 3's
+    /// `assignShelf`/`setRecurring` mutual exclusion, and for the same
+    /// reason: leaving it to every call site to remember is how the row
+    /// lists drifted in the first place.
+    ///
+    /// It matters beyond tidiness. The machinery that served Specific-Time
+    /// recurring tasks — block creation in `AISchedulingService`, the
+    /// placeholder pipeline in `PushedRecurringOccurrence`, the projected
+    /// occurrences in `ScheduleReviewViewModel` — is being removed. A task
+    /// that could still reach `.specific` afterwards would sit in a state
+    /// nothing serves: no calendar block, and excluded from the untimed
+    /// sections too.
+    ///
+    /// **The getter deliberately does not coerce.** It reports what's
+    /// actually stored, so `migrateRecurringSpecificTimeTasksIfNeeded` can
+    /// still find pre-existing rows to migrate. Hiding them behind a
+    /// coercing getter would make the migration a no-op that looks correct.
+    ///
+    /// Habits are unaffected — `Habit` has its own time-mode storage and
+    /// keeps all four modes.
     var recurrenceTimeMode: HabitOccurrenceTimeMode {
-        get { HabitOccurrenceTimeMode(rawValue: recurrenceTimeModeRaw) ?? .specific }
-        set { recurrenceTimeModeRaw = newValue.rawValue }
+        get { HabitOccurrenceTimeMode(rawValue: recurrenceTimeModeRaw) ?? .midday }
+        set { recurrenceTimeModeRaw = (newValue == .specific ? .midday : newValue).rawValue }
     }
 
     var recurrenceMode: RecurrenceMode {
@@ -1128,6 +1160,11 @@ final class TaskItem {
     /// can. Same shape and reasoning as
     /// `ScheduledBlock.hasMigratedThreeState`.
     var hasMigratedSingleWheel: Bool = false
+
+    /// Per-row guard for `NoteForLaterApp
+    /// .migrateRecurringSpecificTimeTasksIfNeeded`, same role as
+    /// `hasMigratedSingleWheel` above.
+    var hasMigratedOffSpecificTime: Bool = false
 
     /// The chunk sizes worth offering as a minimum segment, in general —
     /// not a uniform step, just the values that make sense to a person.

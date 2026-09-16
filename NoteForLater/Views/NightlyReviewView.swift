@@ -1941,13 +1941,6 @@ struct TaskReviewCard: View {
     /// the settled state (scrim gone, square at rest). See `showToast`.
     @State private var toastVisible = false
     @State private var isShowingSnoozeWheel = false
-    /// The recurring card's own Specific-Time clock — styled like
-    /// `SettingsView`'s Daily Check-In rows (tap the row, a popover
-    /// opens) rather than an always-visible wheel. See
-    /// `timeExpandedContent`'s own doc comment for why this is a
-    /// popover around the existing `HourMinutePeriodPicker`, not a
-    /// native `DatePicker`.
-    @State private var isShowingRecurrenceTimeOfDayPopover = false
     @State private var snoozeDays = 1
     /// Which rows are currently expanded — a brand-new, never-saved task
     /// (`isNewlyCreated`) seeds *every* row at once, the card working like
@@ -3578,7 +3571,9 @@ struct TaskReviewCard: View {
             // own stored default) would otherwise never fire, leaving
             // `recurrenceTimeModePicked` stuck false.
             PickedMenuPicker(
-                options: HabitOccurrenceTimeMode.allCases,
+                // Not `allCases` — a recurring task can't be Specific Time.
+                // Habits still offer all four.
+                options: HabitOccurrenceTimeMode.taskSelectableCases,
                 label: { $0.label },
                 selection: task.recurrenceTimeMode
             ) { newMode in
@@ -3587,55 +3582,6 @@ struct TaskReviewCard: View {
             }
         }
 
-        if task.recurrenceTimeMode == .specific {
-            // Styled like `SettingsView`'s Daily Check-In rows — tap the
-            // row, a popover opens — rather than the wheel sitting
-            // always-visible inline. That reference (`DatePicker(
-            // displayedComponents: [.hourAndMinute])`, compact style)
-            // can't be reused directly: its native wheel has no way to
-            // snap to 15-minute steps, and snapping its value after the
-            // fact would fight the wheel itself — the user scrolls to
-            // :07, releases, and watches it jump to :00 or :15, which
-            // feels broken in a way tapping a pre-quantized option never
-            // does. `HourMinutePeriodPicker` already IS three plain
-            // `Picker(.wheel)`s (hour 1–12, minute in 15-minute steps,
-            // AM/PM) whose own selectable values are already correctly
-            // quantized — nothing is snapped after the fact here, the
-            // wheel simply has no in-between stops to land on. This popover
-            // just relocates that existing, already-correct control
-            // behind a tap instead of rebuilding time entry around
-            // `DatePicker`. `recurrenceTimeOfDayMinutes` is its own field
-            // (see that property's doc comment for why this doesn't just
-            // write into `dueDate`'s time-of-day the way placement used
-            // to silently derive it).
-            HStack {
-                Text("Time")
-                Spacer()
-                Button {
-                    isShowingRecurrenceTimeOfDayPopover = true
-                } label: {
-                    Text(Self.formattedTime(minutesSinceMidnight: recurrenceTimeMinutesBinding.wrappedValue))
-                        .foregroundStyle(Color.accentColor)
-                }
-                .buttonStyle(.plain)
-                .popover(isPresented: $isShowingRecurrenceTimeOfDayPopover) {
-                    HourMinutePeriodPicker(minutesSinceMidnight: recurrenceTimeMinutesBinding)
-                        .padding(8)
-                        .frame(width: 280)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .presentationCompactAdaptation(.popover)
-                }
-                // The wheel is scrolled, not tapped once — checking
-                // completeness on every tick (like the Menu pickers
-                // above) would risk collapsing the row mid-scroll.
-                // Popover dismiss is this control's actual "I'm done"
-                // moment, the same role a calendar tap plays for
-                // Starts/Due.
-                .onChange(of: isShowingRecurrenceTimeOfDayPopover) { wasShowing, isShowing in
-                    if wasShowing, !isShowing, isTimeConfigured { expandedRows.remove(.timeMode) }
-                }
-            }
-        }
     }
 
     @ViewBuilder

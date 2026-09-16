@@ -24,7 +24,7 @@ final class CardRowVisibilityTests: XCTestCase {
         TaskItem(title: "T", estimatedMinutes: minutes)
     }
 
-    private func recurringTask(mode: HabitOccurrenceTimeMode = .specific, minutes: Int = 0) -> TaskItem {
+    private func recurringTask(mode: HabitOccurrenceTimeMode = .midday, minutes: Int = 0) -> TaskItem {
         let task = TaskItem(title: "R", estimatedMinutes: minutes)
         task.isRecurring = true
         task.recurrenceTimeMode = mode
@@ -72,12 +72,24 @@ final class CardRowVisibilityTests: XCTestCase {
         }
     }
 
-    /// The exact regression that shipped: an untimed recurring occurrence
-    /// never gets a calendar block, so it has no duration to state and
-    /// nothing to split.
-    func test_hidden_durationAndDivisible_forUntimedRecurringTask() {
+    /// The exact regression that shipped: a recurring occurrence never gets
+    /// a calendar block, so it has no duration to state and nothing to
+    /// split.
+    ///
+    /// **This used to be "…forUntimedRecurringTask", and sat beside
+    /// `test_shown_durationAndDivisible_forSpecificTimeRecurringTask`
+    /// asserting the opposite for the other mode.** That pairing is gone:
+    /// Specific Time is no longer a state a task can reach, so "untimed
+    /// recurring" and "recurring" are the same set, and the two tests
+    /// became the same assertion. Merged rather than left as a duplicate,
+    /// and the inversion is deliberate — the old `shown` expectation
+    /// described a task kind that no longer exists.
+    ///
+    /// Driven off `taskSelectableCases` rather than a hand-written mode
+    /// list, so adding a mode later can't quietly skip this.
+    func test_hidden_durationAndDivisible_forEveryRecurringTask() {
         let shelf = trackingShelf()
-        for mode in [HabitOccurrenceTimeMode.am, .midday, .pm] {
+        for mode in HabitOccurrenceTimeMode.taskSelectableCases {
             // 120 minutes clears every other bar, so only the mode can hide these.
             let task = recurringTask(mode: mode, minutes: 120)
             XCTAssertEqual(CardRow.duration.visibility(task: task, shelf: shelf), .hidden, "Duration must be hidden for \(mode)")
@@ -85,11 +97,13 @@ final class CardRowVisibilityTests: XCTestCase {
         }
     }
 
-    func test_shown_durationAndDivisible_forSpecificTimeRecurringTask() {
-        let task = recurringTask(mode: .specific, minutes: 120)
-        let shelf = trackingShelf()
-        XCTAssertEqual(CardRow.duration.visibility(task: task, shelf: shelf), .shown)
-        XCTAssertEqual(CardRow.divisible.visibility(task: task, shelf: shelf), .shown)
+    /// The mode a recurring task may not be in. Pairs with the test above:
+    /// that one says every *reachable* mode hides Duration, this one says
+    /// the unreachable mode is genuinely unreachable.
+    func test_taskSelectableCases_excludesSpecific_butHabitsKeepIt() {
+        XCTAssertFalse(HabitOccurrenceTimeMode.taskSelectableCases.contains(.specific))
+        XCTAssertEqual(HabitOccurrenceTimeMode.taskSelectableCases, [.am, .midday, .pm])
+        XCTAssertTrue(HabitOccurrenceTimeMode.allCases.contains(.specific), "habits still offer all four")
     }
 
     func test_hidden_divisible_belowTheHourThreshold() {
@@ -231,36 +245,48 @@ final class CardRowVisibilityTests: XCTestCase {
     func test_visibilityMatrix_onAFullyTrackingShelf() {
         let shelf = trackingShelf()
         let plain = plainTask(minutes: 120)
-        let timed = recurringTask(mode: .specific, minutes: 120)
-        let untimed = recurringTask(mode: .am, minutes: 120)
+        let recurring = recurringTask(mode: .midday, minutes: 120)
 
-        // (row, plain, specific-time recurring, untimed recurring)
-        // All three fixtures sit on an ordinary shelf, so the 2-Minute
-        // column is covered separately by the tests below.
-        let expected: [(CardRow, CardRow.Visibility, CardRow.Visibility, CardRow.Visibility)] = [
-            (.nextStep,          .shown,  .shown,  .shown),
-            (.recurringToggle,   .shown,  .shown,  .shown),
-            (.twoMinuteToggle,   .shown,  .hidden, .hidden),
-            (.canStartBy,        .shown,  .shown,  .shown),
-            (.duration,          .shown,  .shown,  .hidden),
-            (.divisible,         .shown,  .shown,  .hidden),
-            (.tags,              .shown,  .hidden, .hidden),
-            (.shelf,             .shown,  .shown,  .shown),
-            (.eligibleSchedules, .shown,  .shown,  .shown),
-            (.remindIn,          .shown,  .shown,  .shown),
-            (.due,               .shown,  .hidden, .hidden),
-            (.priority,          .shown,  .hidden, .hidden),
-            (.repeats,           .hidden, .shown,  .shown),
-            (.timeMode,          .hidden, .shown,  .shown),
-            (.ends,              .hidden, .shown,  .shown),
-            (.pushIfMissed,      .hidden, .shown,  .shown),
+        // (row, plain, recurring)
+        //
+        // This table had three columns: plain, *Specific-Time* recurring,
+        // and untimed recurring. Specific Time is no longer a state a
+        // recurring task can be in (`HabitOccurrenceTimeMode
+        // .taskSelectableCases`), so that column described a task kind that
+        // no longer exists and has been removed rather than left asserting
+        // against an unreachable fixture.
+        //
+        // The two recurring columns had differed on exactly Duration and
+        // Divisible — shown for Specific Time, hidden when untimed. Those
+        // are now hidden for *every* recurring task, which is the whole
+        // user-visible point of the change and is asserted directly in
+        // `test_hidden_durationAndDivisible_forEveryRecurringTask` below.
+        //
+        // Both fixtures sit on an ordinary shelf, so the 2-Minute column is
+        // covered separately by the tests below.
+        let expected: [(CardRow, CardRow.Visibility, CardRow.Visibility)] = [
+            (.nextStep,          .shown,  .shown),
+            (.recurringToggle,   .shown,  .shown),
+            (.twoMinuteToggle,   .shown,  .hidden),
+            (.canStartBy,        .shown,  .shown),
+            (.duration,          .shown,  .hidden),
+            (.divisible,         .shown,  .hidden),
+            (.tags,              .shown,  .hidden),
+            (.shelf,             .shown,  .shown),
+            (.eligibleSchedules, .shown,  .shown),
+            (.remindIn,          .shown,  .shown),
+            (.due,               .shown,  .hidden),
+            (.priority,          .shown,  .hidden),
+            (.repeats,           .hidden, .shown),
+            (.timeMode,          .hidden, .shown),
+            (.ends,              .hidden, .shown),
+            (.pushIfMissed,      .hidden, .shown),
         ]
 
         XCTAssertEqual(expected.count, CardRow.allCases.count, "every CardRow case must appear in this table")
-        for (row, plainExpected, timedExpected, untimedExpected) in expected {
+        for (row, plainExpected, recurringExpected) in expected {
             XCTAssertEqual(row.visibility(task: plain, shelf: shelf), plainExpected, "\(row) / plain")
-            XCTAssertEqual(row.visibility(task: timed, shelf: shelf), timedExpected, "\(row) / specific-time recurring")
-            XCTAssertEqual(row.visibility(task: untimed, shelf: shelf), untimedExpected, "\(row) / untimed recurring")
+            XCTAssertEqual(row.visibility(task: recurring, shelf: shelf), recurringExpected, "\(row) / recurring")
         }
     }
 
@@ -279,12 +305,14 @@ final class CardRowVisibilityTests: XCTestCase {
     }
 
     func test_scrollBodyOrder_recurring() {
-        let task = recurringTask(mode: .specific, minutes: 120)
+        let task = recurringTask(mode: .midday, minutes: 120)
         XCTAssertEqual(
             CardRow.scrollBodyOrder(task: task, shelf: trackingShelf()),
             // No .twoMinuteToggle and no .tags — both hidden for a
             // recurring task (mutual exclusion, and the spec's Tags rule).
-            [.recurringToggle, .repeats, .canStartBy, .timeMode, .duration, .divisible,
+            // No .duration or .divisible either: every recurring task is an
+            // untimed list item now, so neither row applies to any of them.
+            [.recurringToggle, .repeats, .canStartBy, .timeMode,
              .ends, .pushIfMissed, .remindIn, .shelf, .eligibleSchedules]
         )
     }
@@ -330,7 +358,7 @@ final class CardRowVisibilityTests: XCTestCase {
         let shelf = trackingShelf()
         let fixtures = [
             plainTask(), plainTask(minutes: 120),
-            recurringTask(mode: .specific, minutes: 120), recurringTask(mode: .am, minutes: 120),
+            recurringTask(mode: .pm, minutes: 120), recurringTask(mode: .am, minutes: 120),
         ]
         for task in fixtures {
             guard let seeded = TaskReviewCard.initialExpandedRow(task: task, shelf: shelf, segmentOptions: []) else { continue }
@@ -344,7 +372,7 @@ final class CardRowVisibilityTests: XCTestCase {
     /// that can't appear, and nothing drawn-and-expandable left out.
     func test_initialExpandedRows_newTask_isExactlyTheDrawnExpandableRows() {
         let shelf = trackingShelf()
-        for task in [plainTask(minutes: 120), recurringTask(mode: .specific, minutes: 120), recurringTask(mode: .am, minutes: 120)] {
+        for task in [plainTask(minutes: 120), recurringTask(mode: .pm, minutes: 120), recurringTask(mode: .am, minutes: 120)] {
             let seeded = TaskReviewCard.initialExpandedRows(task: task, shelf: shelf, segmentOptions: [], isNewlyCreated: true)
             let expected = Set(CardRow.scrollBodyOrder(task: task, shelf: shelf).filter(\.isExpandable))
             XCTAssertEqual(seeded, expected)

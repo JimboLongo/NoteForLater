@@ -146,7 +146,13 @@ final class RecurringTaskReviewTests: XCTestCase {
         task.isRecurring = true
         task.recurrenceUnit = .months
         task.recurrenceIntervalCount = 1
-        task.recurrenceTimeMode = .specific
+        // Legacy row shape: the setter refuses `.specific` for tasks now
+        // (see `TaskItem.recurrenceTimeMode`), so this writes the raw
+        // column directly, which is exactly the pre-migration state
+        // `migrateRecurringSpecificTimeTasksIfNeeded` exists to clear. The
+        // machinery under test is retired but not yet deleted — see stage
+        // 4b — so it stays covered until it goes.
+        task.recurrenceTimeModeRaw = HabitOccurrenceTimeMode.specific.rawValue
         context.insert(task)
 
         let occurrence = PushedRecurringOccurrence(taskID: task.id, originalDate: anchor)
@@ -176,7 +182,13 @@ final class RecurringTaskReviewTests: XCTestCase {
         task.isRecurring = true
         task.recurrenceUnit = .months
         task.recurrenceIntervalCount = 1
-        task.recurrenceTimeMode = .specific
+        // Legacy row shape: the setter refuses `.specific` for tasks now
+        // (see `TaskItem.recurrenceTimeMode`), so this writes the raw
+        // column directly, which is exactly the pre-migration state
+        // `migrateRecurringSpecificTimeTasksIfNeeded` exists to clear. The
+        // machinery under test is retired but not yet deleted — see stage
+        // 4b — so it stays covered until it goes.
+        task.recurrenceTimeModeRaw = HabitOccurrenceTimeMode.specific.rawValue
         context.insert(task)
 
         let occurrence = PushedRecurringOccurrence(taskID: task.id, originalDate: anchor)
@@ -219,7 +231,13 @@ final class RecurringTaskReviewTests: XCTestCase {
         task.isRecurring = true
         task.recurrenceUnit = .months
         task.recurrenceIntervalCount = 1
-        task.recurrenceTimeMode = .specific
+        // Legacy row shape: the setter refuses `.specific` for tasks now
+        // (see `TaskItem.recurrenceTimeMode`), so this writes the raw
+        // column directly, which is exactly the pre-migration state
+        // `migrateRecurringSpecificTimeTasksIfNeeded` exists to clear. The
+        // machinery under test is retired but not yet deleted — see stage
+        // 4b — so it stays covered until it goes.
+        task.recurrenceTimeModeRaw = HabitOccurrenceTimeMode.specific.rawValue
         context.insert(task)
 
         let occurrence = PushedRecurringOccurrence(taskID: task.id, originalDate: anchor)

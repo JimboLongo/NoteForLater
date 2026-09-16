@@ -47,8 +47,9 @@ final class RecurringTaskCardRenderTests: XCTestCase {
     /// longest label, "Day of Week" vs. "Day of month"), `.fourth`
     /// (longest Position label, tied with "Second"/"Third" but distinct
     /// from the shelf-list's own worked example), Wednesday (longest
-    /// weekday name in English), and `.specific` (`HabitOccurrenceTimeMode`'s
-    /// own longest label, "Specific Time" vs. "AM"/"Midday"/"PM") — every
+    /// weekday name in English), and `.midday` (the widest label a *task*
+    /// can now hold — "Specific Time" was wider but is habits-only, see
+    /// `HabitOccurrenceTimeMode.taskSelectableCases`) — every
     /// `PickedMenuPicker` on this card gets its actual widest option
     /// selected at once, so the render shows every fixed-width column at
     /// once. "Every" is left un-picked so `isRepeatsConfigured` is false
@@ -65,7 +66,11 @@ final class RecurringTaskCardRenderTests: XCTestCase {
         task.recurrenceMode = .relativeDate
         task.relativeRecurrenceScope = .weekdayOfMonth
         task.relativeRecurrenceOrdinal = .fourth
-        task.recurrenceTimeMode = .specific
+        // Was `.specific`, the longest `HabitOccurrenceTimeMode` label, for
+        // the widest "Mode" column. A task can't be Specific Time any more,
+        // so this picks the widest *selectable* one instead — the fixture's
+        // job is still "every picker at its widest option at once".
+        task.recurrenceTimeMode = .midday
         task.relativeRecurrenceWeekday = 4 // Wednesday
         return task
     }
@@ -499,7 +504,7 @@ final class RecurringTaskCardRenderTests: XCTestCase {
         task.dueDatePicked = true
         if recurring {
             task.isRecurring = true
-            task.recurrenceTimeMode = .specific
+            task.recurrenceTimeMode = .midday
             task.recurrenceTimeModePicked = true
             task.recurrenceIntervalPicked = true
             task.setStartDate(Calendar.current.startOfDay(for: .now))

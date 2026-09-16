@@ -333,15 +333,26 @@ final class TaskAttributeToggleTests: XCTestCase {
         XCTAssertFalse(missing.contains("Divisible"))
     }
 
-    /// The flip side — Specific Time keeps asking both questions
-    /// normally, same as any other task.
-    func test_recurringTaskWithSpecificTime_durationCanStillBeMissing() {
+    /// Was `test_recurringTaskWithSpecificTime_durationCanStillBeMissing`,
+    /// asserting Duration **is** missing. **Inverted deliberately.**
+    ///
+    /// It was "the flip side": Specific Time was the one recurring mode
+    /// that still asked for a duration, because it was the one that got a
+    /// calendar block. There is no flip side now — a task can't be
+    /// Specific Time, so no recurring task is asked for a duration, and
+    /// none can report it missing.
+    func test_recurringTask_neverReportsDurationMissing() {
         let shelf = Shelf(name: "Recurring Tasks")
         shelf.isRecurringTasks = true
-        let task = TaskItem.makeForDirectCapture(title: "Take out trash", shelf: shelf)
-        task.recurrenceTimeMode = .specific
+        for mode in HabitOccurrenceTimeMode.taskSelectableCases {
+            let task = TaskItem.makeForDirectCapture(title: "Take out trash", shelf: shelf)
+            task.recurrenceTimeMode = mode
 
-        XCTAssertTrue(task.missingAttributeNames(consideringShelf: shelf).contains("Duration"), "Specific Time still needs a real duration, same as before")
+            XCTAssertFalse(
+                task.missingAttributeNames(consideringShelf: shelf).contains("Duration"),
+                "a recurring task has no block to size, so Duration is never outstanding (\(mode))"
+            )
+        }
     }
 
     // MARK: - Fail-then-pass target: unselected Every/Time/Start Date surface in the attribute review

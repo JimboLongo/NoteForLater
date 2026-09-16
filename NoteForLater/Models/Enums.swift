@@ -134,6 +134,25 @@ enum HabitOccurrenceTimeMode: String, Codable, CaseIterable, Identifiable {
         case .specific: return "Specific Time"
         }
     }
+
+    /// The modes a recurring **task** may be set to. Habits keep
+    /// `allCases`; this is deliberately narrower.
+    ///
+    /// `.specific` is the only mode that puts an occurrence on the calendar
+    /// as a real `ScheduledBlock`. For habits that's the point. For
+    /// recurring tasks it meant a second, parallel completion store (the
+    /// block's own `isCompleted` alongside `RecurringTaskLog`) and a whole
+    /// placeholder-block pipeline for pushing an occurrence forward —
+    /// machinery that, checked against the live store, had never produced a
+    /// single row. A recurring task is now always an untimed list item.
+    ///
+    /// This is the whole of the rule. Because it excludes `.specific`,
+    /// `TaskItem.recurringAndUntimed` is true for every recurring task,
+    /// which is what hides Duration and Divisible on the card — see
+    /// `CardRow.duration`, which anticipated this and needs no new clause.
+    static var taskSelectableCases: [HabitOccurrenceTimeMode] {
+        allCases.filter { $0 != .specific }
+    }
 }
 
 /// Lifecycle of a proposed schedule block shown during the nightly review.
