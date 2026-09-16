@@ -1933,7 +1933,7 @@ struct TaskReviewCard: View {
     @State private var dragOffset: CGSize
     /// Tapped once to preview and tap again to confirm moving the task
     /// there.
-    @State private var selectedShelf: Shelf?
+    @State private var shelfPreview: ShelfPreview = .none
     @State private var showingDeleteConfirm = false
     @State private var toastMessage: String?
     /// Drives the flash-then-settle sequence: false is the initial "flash"
@@ -2409,6 +2409,85 @@ struct TaskReviewCard: View {
         task.relativeRecurrencePicked = true
     }
 
+    /// The card's shelf-preview state. Tapping a shelf, or flipping a
+    /// toggle that implies one, only *previews* it — the move itself
+    /// happens on commit (see `commitAndAdvance`). An enum rather than a
+    /// `Shelf?` because "no preview, fall back to the task's own shelf"
+    /// and "explicitly previewing this shelf" are genuinely different
+    /// states, and a later one — explicitly previewing *no* shelf — can't
+    /// be expressed by `nil` at all without colliding with the first.
+    enum ShelfPreview {
+        /// Nothing previewed; the card reads the task's own shelf.
+        case none
+        /// This shelf is previewed, whether tapped or implied by a toggle.
+        case shelf(Shelf)
+
+        /// What the card should actually read its shelf-gated questions
+        /// from.
+        func resolved(for task: TaskItem) -> Shelf? {
+            switch self {
+            case .none: return task.shelf
+            case .shelf(let shelf): return shelf
+            }
+        }
+
+        /// The explicitly-previewed shelf, if any — `nil` when nothing is
+        /// previewed. This is what the commit path and the "is moving"
+        /// checks read; they care about a deliberate pick, not about
+        /// whatever the task already sits on.
+        var explicitShelf: Shelf? {
+            if case .shelf(let shelf) = self { return shelf }
+            return nil
+        }
+
+        var isRecurringShelf: Bool { explicitShelf?.isRecurringTasks == true }
+    }
+
+    /// What flipping "Recurring?" does beyond setting the flag, as a pure
+    /// function of the current state.
+    ///
+    /// **Extracted out of the `Toggle`'s own `set:` closure so it can be
+    /// tested at all.** Sabotaging this body in place — removing the
+    /// shelf auto-select, the eligibility reset, and the toggle-off
+    /// preview clear — passed all 518 tests, because nothing could reach
+    /// logic living inside a view closure. Gutting
+    /// `makeForDirectCapture`'s recurring default in the same run failed
+    /// ~43. The difference was reachability, not importance.
+    ///
+    /// Behavior here is verbatim what the closure did before the
+    /// extraction, including two asymmetries worth not "tidying":
+    /// turning the toggle *on* seeds eligible schedules but turning it
+    /// *off* does not reset them, and turning it off only clears the
+    /// preview when the *preview* was the Recurring shelf — not when the
+    /// task's own shelf is.
+    static func applyRecurringToggle(
+        _ isOn: Bool, task: TaskItem, shelves: [Shelf], preview: ShelfPreview
+    ) -> ShelfPreview {
+        guard isOn else {
+            task.isRecurring = false
+            // Drop the auto-preview so the card goes back to reading
+            // `task.shelf`'s own settings (or whatever the user had
+            // actually tapped) instead of staying stuck on the Recurring
+            // Tasks shelf's.
+            return preview.isRecurringShelf ? .none : preview
+        }
+        // Start Date is the anchor here — no separate date question
+        // inside `recurringSection`. Left unset (Not Selected) if Start
+        // Date was never touched; `makeRecurring()` no longer auto-fills
+        // it, so it has to be set explicitly before the task actually
+        // places on the calendar. See `TaskItem.makeRecurring`'s own doc
+        // comment for why `isRecurring` and the anchor fields are set
+        // together rather than `isRecurring` alone.
+        task.makeRecurring()
+        // The Recurring Tasks shelf is the only valid move target once
+        // this is on (see `eligibleShelvesForMove`) — preview it right
+        // away so every other shelf-gated question reflects *that*
+        // shelf's settings immediately, same as tapping its icon would.
+        guard let recurringShelf = shelves.first(where: { $0.isRecurringTasks }) else { return preview }
+        task.includedSchedulingRuleIDs = (recurringShelf.schedulingRules ?? []).filter(\.isEnabled).map(\.id)
+        return .shelf(recurringShelf)
+    }
+
     init(
         task: TaskItem,
         shelves: [Shelf],
@@ -2435,7 +2514,7 @@ struct TaskReviewCard: View {
         self.entersFromLeft = entersFromLeft
         _dragOffset = State(initialValue: entersFromLeft ? CGSize(width: -500, height: 0) : .zero)
         // Seeded from `task.shelf` directly, not `previewedShelf` —
-        // `selectedShelf` (what `previewedShelf` would otherwise prefer)
+        // `shelfPreview` (what `previewedShelf` would otherwise prefer)
         // is itself `@State` with no value yet at this point in `init`,
         // and nothing's been previewed before the card has even
         // appeared, so `task.shelf` is exactly what `previewedShelf`
@@ -2645,7 +2724,7 @@ struct TaskReviewCard: View {
 
     /// Whether anything's actually been edited since this card appeared —
     /// backfill doesn't count (see `originalSnapshot`), and neither does
-    /// merely tapping a shelf to preview it (`selectedShelf` alone, tracked
+    /// merely tapping a shelf to preview it (`shelfPreview` alone, tracked
     /// separately by `actionButtonInfo`).
     private var hasChanges: Bool {
         guard let originalSnapshot else { return false }
@@ -2678,7 +2757,7 @@ struct TaskReviewCard: View {
     /// tapped-but-not-yet-confirmed in `shelfRow`, or the task's actual
     /// current shelf otherwise.
     private var previewedShelf: Shelf? {
-        selectedShelf ?? task.shelf
+        shelfPreview.resolved(for: task)
     }
 
     /// Whether Due Date is currently answerable — off the moment a
@@ -3629,40 +3708,9 @@ struct TaskReviewCard: View {
             Toggle("Recurring?", isOn: Binding(
                 get: { task.isRecurring },
                 set: { newValue in
-                    if newValue {
-                        // Start Date is the anchor here — no separate
-                        // date question inside `recurringSection`. Left
-                        // unset (Not Selected) if Start Date was never
-                        // touched — `makeRecurring()` no longer auto-fills
-                        // it, so this has to be set explicitly afterward
-                        // before the task actually places on the calendar.
-                        // See `TaskItem.makeRecurring`'s own doc comment
-                        // for why `isRecurring` and the anchor fields are
-                        // set together, atomically, rather than
-                        // `isRecurring` alone here.
-                        task.makeRecurring()
-                        // The Recurring Tasks shelf is the only valid move
-                        // target once this is on (see
-                        // `eligibleShelvesForMove`) — preview it right
-                        // away so every other shelf-gated question (Due
-                        // Date, Duration, Priority, Future Reminder, ...)
-                        // reflects *that* shelf's own settings immediately,
-                        // same as tapping its icon in `shelfRow` would.
-                        if let recurringShelf = shelves.first(where: { $0.isRecurringTasks }) {
-                            selectedShelf = recurringShelf
-                            task.includedSchedulingRuleIDs = (recurringShelf.schedulingRules ?? []).filter(\.isEnabled).map(\.id)
-                        }
-                    } else {
-                        task.isRecurring = false
-                        if selectedShelf?.isRecurringTasks == true {
-                            // Drop the auto-preview so the card goes back
-                            // to reading `task.shelf`'s own settings (or
-                            // whatever the user had actually tapped)
-                            // instead of staying stuck on the Recurring
-                            // Tasks shelf's.
-                            selectedShelf = nil
-                        }
-                    }
+                    shelfPreview = Self.applyRecurringToggle(
+                        newValue, task: task, shelves: shelves, preview: shelfPreview
+                    )
                 }
             ))
             .animation(.easeInOut(duration: 0.15), value: task.isRecurring)
@@ -3984,7 +4032,7 @@ struct TaskReviewCard: View {
     /// that presents this card (`TaskCardSheet`, `TaskReviewQueueSheet`,
     /// Nightly Review's own Today/Inbox steps) — see §6.1.
     private func advance() {
-        let isMoving = selectedShelf != nil && selectedShelf?.id != task.shelf?.id
+        let isMoving = shelfPreview.explicitShelf != nil && shelfPreview.explicitShelf?.id != task.shelf?.id
         if hasChanges || isMoving {
             // A shelf move always counts, even on its own: `hasChanges`
             // deliberately excludes it (see its own doc comment —
@@ -3995,8 +4043,8 @@ struct TaskReviewCard: View {
             // no-op and correctly leaves the flag alone.
             ScheduleDirtyState.shared.isDirty = true
         }
-        if let selectedShelf, selectedShelf.id != task.shelf?.id {
-            onMove(selectedShelf)
+        if let previewed = shelfPreview.explicitShelf, previewed.id != task.shelf?.id {
+            onMove(previewed)
         } else if task.isMissingAttributes {
             onSkip()
         } else {
@@ -4031,7 +4079,7 @@ struct TaskReviewCard: View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 70), spacing: 16)], alignment: .center, spacing: 12) {
                 ForEach(eligibleShelvesForMove) { shelf in
                     let isCurrent = task.shelf?.id == shelf.id
-                    let isSelected = selectedShelf?.id == shelf.id
+                    let isSelected = shelfPreview.explicitShelf?.id == shelf.id
                     Button {
                         focusedField = nil
                         withAnimation(.easeInOut(duration: 0.15)) {
@@ -4040,9 +4088,9 @@ struct TaskReviewCard: View {
                             // never moves on its own. Next/Skip is what
                             // actually commits it.
                             if isSelected || isCurrent {
-                                selectedShelf = nil
+                                shelfPreview = .none
                             } else {
-                                selectedShelf = shelf
+                                shelfPreview = .shelf(shelf)
                                 // Defaults every one of the newly-previewed
                                 // shelf's enabled rules to on immediately —
                                 // matching what actually landing on this
@@ -4222,11 +4270,11 @@ struct TaskReviewCard: View {
         // section fading/disappearing on the card above.
         let missing = task.missingAttributeNames(consideringShelf: previewedShelf)
         let isComplete = missing.isEmpty
-        let isMoving = selectedShelf != nil && selectedShelf?.id != task.shelf?.id
+        let isMoving = shelfPreview.explicitShelf != nil && shelfPreview.explicitShelf?.id != task.shelf?.id
         let remainingText = "Remaining Attributes: \(missing.joined(separator: ", "))"
         if isComplete {
             return isMoving
-                ? ("Save, Move & Submit", nil, "arrow.right.circle.fill", selectedShelf!.color)
+                ? ("Save, Move & Submit", nil, "arrow.right.circle.fill", shelfPreview.explicitShelf!.color)
                 : ("Save & Submit", nil, "checkmark.circle.fill", .green)
         }
         if isMoving {

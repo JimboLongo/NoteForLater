@@ -983,4 +983,132 @@ final class TaskAttributeToggleTests: XCTestCase {
         XCTAssertEqual(TaskReviewCard.divisibleSummaryText(task: task), "Not selected")
         XCTAssertTrue(task.missingAttributeNames(consideringShelf: shelf).contains("Divisible"))
     }
+
+    // MARK: - Recurring toggle side effects (characterization)
+
+    /// **These pin behavior that had no coverage at all.** Sabotaging the
+    /// Recurring toggle's body in place — removing the shelf auto-select,
+    /// the eligibility seeding, and the toggle-off preview clear — passed
+    /// all 518 tests, because the logic lived inside a `Toggle`'s `set:`
+    /// closure where nothing could reach it. Gutting
+    /// `makeForDirectCapture`'s recurring default in the same run failed
+    /// ~43 tests. The difference was reachability, not importance.
+    ///
+    /// Written against `applyRecurringToggle` immediately after
+    /// extracting it verbatim, and before any behavior change, so they
+    /// describe what the toggle already did rather than what it should
+    /// do. Two asymmetries are pinned deliberately and must not be
+    /// "tidied" without a decision: turning on seeds eligible schedules
+    /// while turning off does not reset them, and turning off clears the
+    /// preview only when the *preview* is the Recurring shelf.
+
+    private func recurringShelfFixture() -> (shelf: Shelf, rule: SchedulingRule) {
+        let shelf = Shelf(name: "Recurring Tasks")
+        shelf.isRecurringTasks = true
+        let rule = SchedulingRule(shelf: shelf, fillStrategy: .fillToFit)
+        rule.isEnabled = true
+        shelf.schedulingRules = [rule]
+        return (shelf, rule)
+    }
+
+    func test_recurringToggleOn_setsRecurring_previewsShelf_andSeedsEligibility() {
+        let (shelf, rule) = recurringShelfFixture()
+        let task = TaskItem(title: "T")
+        XCTAssertTrue(task.includedSchedulingRuleIDs.isEmpty)
+
+        let preview = TaskReviewCard.applyRecurringToggle(true, task: task, shelves: [shelf], preview: .none)
+
+        XCTAssertTrue(task.isRecurring)
+        XCTAssertEqual(preview.explicitShelf?.id, shelf.id, "the Recurring shelf is previewed immediately")
+        XCTAssertEqual(task.includedSchedulingRuleIDs, [rule.id], "its enabled rules are seeded on")
+    }
+
+    /// Only *enabled* rules seed.
+    func test_recurringToggleOn_seedsOnlyEnabledRules() {
+        let (shelf, rule) = recurringShelfFixture()
+        let disabled = SchedulingRule(shelf: shelf, fillStrategy: .fillToFit)
+        disabled.isEnabled = false
+        shelf.schedulingRules = [rule, disabled]
+        let task = TaskItem(title: "T")
+
+        _ = TaskReviewCard.applyRecurringToggle(true, task: task, shelves: [shelf], preview: .none)
+
+        XCTAssertEqual(task.includedSchedulingRuleIDs, [rule.id])
+    }
+
+    /// No Recurring shelf configured: the flag still flips, and the
+    /// existing preview is left exactly as it was.
+    func test_recurringToggleOn_withNoRecurringShelf_stillSetsFlagAndKeepsPreview() {
+        let other = Shelf(name: "Errands")
+        let task = TaskItem(title: "T")
+
+        let preview = TaskReviewCard.applyRecurringToggle(true, task: task, shelves: [other], preview: .shelf(other))
+
+        XCTAssertTrue(task.isRecurring)
+        XCTAssertEqual(preview.explicitShelf?.id, other.id)
+        XCTAssertTrue(task.includedSchedulingRuleIDs.isEmpty, "nothing to seed without a Recurring shelf")
+    }
+
+    func test_recurringToggleOff_clearsFlagAndDropsTheAutoPreview() {
+        let (shelf, _) = recurringShelfFixture()
+        let task = TaskItem(title: "T")
+        task.isRecurring = true
+
+        let preview = TaskReviewCard.applyRecurringToggle(false, task: task, shelves: [shelf], preview: .shelf(shelf))
+
+        XCTAssertFalse(task.isRecurring)
+        XCTAssertNil(preview.explicitShelf, "the auto-preview is dropped so the card reads the task's own shelf again")
+    }
+
+    /// Asymmetry #1, pinned: turning off does **not** reset the eligible
+    /// schedules that turning on seeded.
+    func test_recurringToggleOff_doesNotResetEligibleSchedules() {
+        let (shelf, rule) = recurringShelfFixture()
+        let task = TaskItem(title: "T")
+        _ = TaskReviewCard.applyRecurringToggle(true, task: task, shelves: [shelf], preview: .none)
+        XCTAssertEqual(task.includedSchedulingRuleIDs, [rule.id])
+
+        _ = TaskReviewCard.applyRecurringToggle(false, task: task, shelves: [shelf], preview: .shelf(shelf))
+
+        XCTAssertEqual(task.includedSchedulingRuleIDs, [rule.id], "unchanged on the way back off — deliberate, not an oversight")
+    }
+
+    /// Asymmetry #2, pinned: turning off leaves a preview of some *other*
+    /// shelf alone — it only drops the Recurring one.
+    func test_recurringToggleOff_leavesAnUnrelatedPreviewAlone() {
+        let (recurring, _) = recurringShelfFixture()
+        let other = Shelf(name: "Errands")
+        let task = TaskItem(title: "T")
+        task.isRecurring = true
+
+        let preview = TaskReviewCard.applyRecurringToggle(false, task: task, shelves: [recurring], preview: .shelf(other))
+
+        XCTAssertEqual(preview.explicitShelf?.id, other.id, "an unrelated preview survives toggle-off")
+    }
+
+    /// And the narrower half of the same rule: a task whose *own* shelf
+    /// is the Recurring one, with nothing previewed, is untouched —
+    /// toggle-off inspects the preview, not the task's shelf.
+    func test_recurringToggleOff_withNoPreview_staysNone() {
+        let (shelf, _) = recurringShelfFixture()
+        let task = TaskItem(title: "T", shelf: shelf)
+        task.isRecurring = true
+
+        let preview = TaskReviewCard.applyRecurringToggle(false, task: task, shelves: [shelf], preview: .none)
+
+        XCTAssertNil(preview.explicitShelf)
+        XCTAssertEqual(preview.resolved(for: task)?.id, shelf.id, "still resolves to the task's own shelf")
+    }
+
+    /// `ShelfPreview` resolution itself: the distinction a plain `Shelf?`
+    /// could not express.
+    func test_shelfPreview_resolution() {
+        let own = Shelf(name: "Own")
+        let other = Shelf(name: "Other")
+        let task = TaskItem(title: "T", shelf: own)
+
+        XCTAssertEqual(TaskReviewCard.ShelfPreview.none.resolved(for: task)?.id, own.id)
+        XCTAssertEqual(TaskReviewCard.ShelfPreview.shelf(other).resolved(for: task)?.id, other.id)
+        XCTAssertNil(TaskReviewCard.ShelfPreview.none.explicitShelf, "no preview is not a pick")
+    }
 }
