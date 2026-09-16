@@ -3187,12 +3187,15 @@ struct TaskReviewCard: View {
         task.startDatePicked ? Self.abbreviatedDateFormatter.string(from: task.startDate ?? .now) : "Not Selected"
     }
 
-    /// "9:00 AM · 30 min" for Specific Time with a real duration set,
-    /// "9:00 AM" alone if Duration hasn't been answered yet (still
-    /// prompts via `isTimeConfigured`'s own "Duration" check, just
-    /// doesn't fabricate a size to show), or the bare mode label
-    /// ("AM"/"Midday"/"PM") for an untimed occurrence, which never has a
-    /// duration to combine with.
+    /// "9:00 AM" for Specific Time, or the bare mode label
+    /// ("AM"/"Midday"/"PM") for an untimed occurrence.
+    ///
+    /// This used to append the duration ("9:00 AM · 30 min"), from when
+    /// Duration was folded into this same "Time" row and had nowhere else
+    /// to show. Duration is its own row directly below now, so the suffix
+    /// only restated the next line down. Display-only: nothing reads this
+    /// string, and `isTimeConfigured` still runs its own Duration check —
+    /// dropping the suffix doesn't stop the card prompting for one.
     /// Shows the *live* value even before "Time" has actually been
     /// picked — same reasoning, and same "cosmetic only" guarantee, as
     /// `repeatsSummaryText`'s own doc comment: `recurrenceTimeMode`'s
@@ -3207,9 +3210,7 @@ struct TaskReviewCard: View {
         case .am, .midday, .pm:
             return task.recurrenceTimeMode.label
         case .specific:
-            let timeText = Self.formattedTime(minutesSinceMidnight: recurrenceTimeMinutesBinding.wrappedValue)
-            guard task.durationPicked, task.estimatedMinutes > 0 else { return timeText }
-            return "\(timeText) · \(TaskItem.durationLabel(for: task.estimatedMinutes))"
+            return Self.formattedTime(minutesSinceMidnight: recurrenceTimeMinutesBinding.wrappedValue)
         }
     }
 

@@ -31,11 +31,20 @@ works; sabotage against the *old* suite proves what the old suite was
 missing. They answer different questions.
 
 **Testing practice, general — the render diff is a regression net, not a
-change-verification tool.** `RecurringTaskCardRenderTests` pins
-byte-deterministic PNGs of the card (`UIHostingController` +
-`UIGraphicsImageRenderer`) and its value comes entirely from fixtures that
-*don't* change: an unexpected byte delta on an untouched fixture is a real
-signal that something moved.
+change-verification tool, and it is not run by the suite.**
+`RecurringTaskCardRenderTests` renders byte-deterministic PNGs of the card
+(`UIHostingController` + `UIGraphicsImageRenderer`) — but read what it
+actually asserts: `XCTAssertTrue(FileManager.default.fileExists(...))`. It
+**emits** images and checks the file got written. It never compares against
+a stored baseline. A visual regression cannot turn this suite red; the
+comparison is a manual step someone has to remember to run. Textbook
+*"tests whose failure mode is silence"* — the names read like baselines, so
+a green run is easy to mistake for visual coverage it doesn't provide.
+Until that's fixed, "539/539 passing" says nothing about rendering.
+
+Run manually, its value comes entirely from fixtures that *don't* change:
+an unexpected byte delta on an untouched fixture is a real signal that
+something moved.
 
 Its value drops to near zero when a change touches every fixture. Stage 3
 of the card work (adding the 2-Minute toggle, renaming "Starts" → "Can
@@ -51,6 +60,18 @@ When that happens, don't treat a red diff as verification. Do this instead:
 3. Use the PNGs only to eyeball what an assertion can't see: a label
    rename, a row's visual position.
 4. Re-baseline, and the net is back for the *next* change.
+
+Useful mechanics, since step 1 is the only hard part: keep a copy of the
+previous render, then `PIL.ImageChops.difference(...).getbbox()` gives the
+exact changed rectangle. A bbox confined to the rows you expected to touch
+is a much stronger statement than "the files differ" — it says *nothing
+else moved*. Used that way it survives the every-fixture-changed case: when
+the "Time" row dropped its redundant duration suffix, the bbox was two rows
+tall and proved the rest of the card was untouched.
+
+To diff against an *uncommitted* change, `git stash` → run the render test
+→ copy the PNGs aside → `git stash pop` → run again. Beats trying to
+reconstruct what the previous render looked like.
 
 **SwiftData trap, general — not specific to any one change:** turning an
 existing `@Model` stored property into a computed one (e.g. `isCompleted:
