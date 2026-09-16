@@ -143,4 +143,75 @@ final class RecurringTaskCardRenderTests: XCTestCase {
             to: "/private/tmp/claude-501/-Users-jimmylong-Desktop-NoteForLater/e4869a73-1104-4360-97d1-303c92f0e0ca/scratchpad/non_recurring_rows_render.png"
         )
     }
+
+    /// A task whose shelf turns on *every* tracking flag and carries a
+    /// scheduling rule, so the tail rows — Tags, Shelf, Eligible
+    /// Schedules, Remind In — all render. The existing worst-case
+    /// fixtures leave Eligible Schedules and Remind In hidden, so without
+    /// this the tail is unprotected by any render baseline.
+    private func makeFullTailTask(recurring: Bool) -> TaskItem {
+        let shelf = Shelf(name: "Errands")
+        shelf.tracksFutureReminder = true
+        context.insert(shelf)
+        let rule = SchedulingRule(shelf: shelf, fillStrategy: .fillToFit)
+        context.insert(rule)
+        shelf.schedulingRules = [rule]
+
+        let task = TaskItem(title: "Renew the passport", shelf: shelf, estimatedMinutes: 120)
+        context.insert(task)
+        task.tags = ["errand", "admin"]
+        task.includedSchedulingRuleIDs = [rule.id]
+        task.nextStepDecided = true
+        task.nextStepAnsweredYes = true
+        task.nextStep = "Find the old one"
+        TaskItem.selectDuration(120, on: task)
+        TaskItem.selectDivisibleSegment(30, on: task)
+        task.priority = .high
+        task.dueDateDecided = true
+        task.dueDate = Calendar.current.date(from: DateComponents(year: 2026, month: 9, day: 17))
+        task.dueDatePicked = true
+        if recurring {
+            task.isRecurring = true
+            task.recurrenceTimeMode = .specific
+            task.recurrenceTimeModePicked = true
+            task.recurrenceIntervalPicked = true
+            task.setStartDate(Calendar.current.startOfDay(for: .now))
+        }
+        return task
+    }
+
+    private func renderCard(_ task: TaskItem, to name: String) throws {
+        let card = TaskReviewCard(
+            task: task,
+            shelves: task.shelf.map { [$0] } ?? [],
+            onDiscard: {}, onSkip: {}, onMove: { _ in }, onNext: {}, onSnooze: { _ in }
+        )
+        .environment(\.modelContext, context)
+        try renderAndSave(card, to: "\(Self.renderDirectory)/\(name).png")
+    }
+
+    static let renderDirectory = "/private/tmp/claude-501/-Users-jimmylong-Desktop-NoteForLater/e4869a73-1104-4360-97d1-303c92f0e0ca/scratchpad"
+
+    /// Baselines for the row-list consolidation: the whole point of that
+    /// change is that presentation is untouched, so these renders should
+    /// come out byte-identical before and after. Rendering was confirmed
+    /// deterministic across runs before relying on that.
+    func test_fullTailRows_recurring_render() throws {
+        try renderCard(makeFullTailTask(recurring: true), to: "tail_recurring")
+    }
+
+    func test_fullTailRows_nonRecurring_render() throws {
+        try renderCard(makeFullTailTask(recurring: false), to: "tail_nonrecurring")
+    }
+
+    /// A shelf that tracks nothing, so the greyed/hidden states render.
+    func test_nonTrackingShelf_render() throws {
+        let task = makeFullTailTask(recurring: false)
+        let shelf = task.shelf!
+        shelf.tracksDuration = false
+        shelf.hasDueDates = false
+        shelf.hasPriority = false
+        shelf.hasNextStep = false
+        try renderCard(task, to: "tail_nontracking")
+    }
 }

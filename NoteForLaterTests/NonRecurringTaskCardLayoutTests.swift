@@ -234,9 +234,9 @@ final class NonRecurringTaskCardLayoutTests: XCTestCase {
 
     /// Due answered as a real "No" (decided-as-none, not just absent) —
     /// must be treated as fully answered and skipped past. Lands on
-    /// `.time`, not `.starts`: `startDateMissing` is `isRecurring &&
+    /// `.time`, not `.canStartBy`: `startDateMissing` is `isRecurring &&
     /// !startDatePicked` — Start Date is never actually a gate for a
-    /// non-recurring task at all, so `.starts` is always pre-configured
+    /// non-recurring task at all, so `.canStartBy` is always pre-configured
     /// and never itself the seed here.
     func test_initialExpandedRow_nonRecurring_dueAnsweredNo_seedsDuration() {
         let task = makeTask()
@@ -295,7 +295,7 @@ final class NonRecurringTaskCardLayoutTests: XCTestCase {
 
         let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: nil, segmentOptions: [], isNewlyCreated: true)
 
-        XCTAssertEqual(rows, [.due, .starts, .duration, .priority])
+        XCTAssertEqual(rows, [.due, .canStartBy, .duration, .priority])
     }
 
     /// A reopened, fully-configured non-recurring task opens fully
@@ -331,7 +331,7 @@ final class NonRecurringTaskCardLayoutTests: XCTestCase {
     func test_fillingPriorityOnNewTask_wouldCollapseOnlyPriority() {
         let task = makeTask()
         let seeded = TaskReviewCard.initialExpandedRows(task: task, shelf: nil, segmentOptions: [], isNewlyCreated: true)
-        XCTAssertEqual(seeded, [.due, .starts, .duration, .priority])
+        XCTAssertEqual(seeded, [.due, .canStartBy, .duration, .priority])
 
         task.priority = .high
 

@@ -8,6 +8,28 @@ repeatedly this session — the crash-surface item at the bottom of this file
 exists only because a test actually ran and something broke, not because
 anyone inferred it.
 
+**Testing practice, general — sabotage each rule against the EXISTING
+suite before adding new tests.** Break the rule deliberately, run what's
+already there, and see what fails. A rule that no test catches is
+invisible to a green run, and "the suite passes" says nothing about it.
+
+This was not hypothetical. A regression shipped (Duration/Divisible
+rendering for untimed recurring tasks) because the tests asserted the
+*missing-check* while nothing asserted *row visibility* — two facts that
+had silently diverged. When the row rules were later unified behind
+`CardRow`, sabotaging them against the pre-existing suite found a second
+uncovered rule the same way: removing the shelf guard on Duration was
+caught by **nothing at all**, while removing the recurring guard on
+Priority was caught by exactly one test. Neither gap was visible from
+reading the tests or from a passing run — only from breaking the code and
+watching what stayed green.
+
+Do this before writing new tests, not after: it tells you which rules are
+actually unprotected, rather than letting you write coverage for the ones
+you happened to think of. Fail-then-pass on a *new* test proves that test
+works; sabotage against the *old* suite proves what the old suite was
+missing. They answer different questions.
+
 **SwiftData trap, general — not specific to any one change:** turning an
 existing `@Model` stored property into a computed one (e.g. `isCompleted:
 Bool` → a computed property backed by a new `statusRaw` stored field)

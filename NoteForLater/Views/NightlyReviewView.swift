@@ -1949,18 +1949,6 @@ struct TaskReviewCard: View {
     /// native `DatePicker`.
     @State private var isShowingRecurrenceTimeOfDayPopover = false
     @State private var snoozeDays = 1
-    /// One of the six collapsible rows across both card modes — `.starts`
-    /// and `.time` are shared between them (the same row/summary either
-    /// way, see `startsRow`'s and `timeExpandedContent`'s own doc
-    /// comments), `.repeats`/`.ends` are recurring-only, `.due`/`.priority`
-    /// are non-recurring-only. Never both at once for one task, so one
-    /// shared enum rather than two mode-specific ones. `internal`, not
-    /// `private` — `initialExpandedRow` returns this and is itself
-    /// `internal` for direct testability (same reasoning as
-    /// `isRepeatsConfigured`), so this can't be more restrictive.
-    enum ExpandableRow {
-        case repeats, starts, time, duration, divisible, ends, due, priority
-    }
     /// Which rows are currently expanded — a brand-new, never-saved task
     /// (`isNewlyCreated`) seeds *every* row at once, the card working like
     /// a form you collapse behind you as you go; a reopened, already-saved
@@ -1984,7 +1972,7 @@ struct TaskReviewCard: View {
     /// collapsing, or switching rows can write or clear a model field;
     /// every actual field write happens in the `selectXxx`/`onSelect`
     /// functions that separately, additionally, mutate this.
-    @State private var expandedRows: Set<ExpandableRow> = []
+    @State private var expandedRows: Set<CardRow> = []
     /// Captured once this card's edits settle in after appearing (past any
     /// one-time backfill), so the action button can tell "nothing's been
     /// touched" (Skip) apart from "something's actually been edited" (Save
@@ -2001,7 +1989,7 @@ struct TaskReviewCard: View {
     /// itself. Opening (`true`) resets to just this row, matching that
     /// accordion rule; closing (`false`) only ever removes this one row,
     /// same as self-collapse does.
-    private func expandedBinding(for row: ExpandableRow) -> Binding<Bool> {
+    private func expandedBinding(for row: CardRow) -> Binding<Bool> {
         Binding(
             get: { expandedRows.contains(row) },
             set: { isExpanding in
@@ -2014,8 +2002,8 @@ struct TaskReviewCard: View {
         )
     }
     private var isRepeatsExpanded: Binding<Bool> { expandedBinding(for: .repeats) }
-    private var isStartsExpanded: Binding<Bool> { expandedBinding(for: .starts) }
-    private var isTimeExpanded: Binding<Bool> { expandedBinding(for: .time) }
+    private var isStartsExpanded: Binding<Bool> { expandedBinding(for: .canStartBy) }
+    private var isTimeExpanded: Binding<Bool> { expandedBinding(for: .timeMode) }
     private var isEndsExpanded: Binding<Bool> { expandedBinding(for: .ends) }
     private var isDueExpanded: Binding<Bool> { expandedBinding(for: .due) }
     private var isPriorityExpanded: Binding<Bool> { expandedBinding(for: .priority) }
@@ -2215,21 +2203,41 @@ struct TaskReviewCard: View {
     /// "unconfigured" state to seed from in the first place. `internal`,
     /// not `private`, for the same direct-testability reasoning as
     /// `isRepeatsConfigured`.
-    static func initialExpandedRow(task: TaskItem, shelf: Shelf?, segmentOptions: [Int]) -> ExpandableRow? {
-        if task.isRecurring {
-            if !isRepeatsConfigured(task: task, shelf: shelf) { return .repeats }
-            if !isStartsConfigured(task: task, shelf: shelf) { return .starts }
-            if !isTimeConfigured(task: task, shelf: shelf, segmentOptions: segmentOptions) { return .time }
-            if showsDurationRow(task: task), !isDurationConfigured(task: task, shelf: shelf) { return .duration }
-            if showsDivisibleRow(task: task), !isDivisibleConfigured(task: task, shelf: shelf) { return .divisible }
-        } else {
-            if !isDueConfigured(task: task, shelf: shelf) { return .due }
-            if !isStartsConfigured(task: task, shelf: shelf) { return .starts }
-            if !isDurationConfigured(task: task, shelf: shelf) { return .duration }
-            if showsDivisibleRow(task: task), !isDivisibleConfigured(task: task, shelf: shelf) { return .divisible }
-            if !isPriorityConfigured(task: task, shelf: shelf) { return .priority }
+    static func initialExpandedRow(task: TaskItem, shelf: Shelf?, segmentOptions: [Int]) -> CardRow? {
+        // Walks the *same* array the card renders from, rather than a
+        // parallel hand-written order. "Seeding order matches render
+        // order" is therefore not a property that can drift — it's one
+        // list read twice. Rows `scrollBodyOrder` already dropped as
+        // `.hidden` can't be seeded, which is also what stops an
+        // expanded-but-unrenderable row.
+        for row in CardRow.scrollBodyOrder(task: task, shelf: shelf) {
+            guard row.isExpandable else { continue }
+            if !isConfigured(row, task: task, shelf: shelf, segmentOptions: segmentOptions) {
+                return row
+            }
         }
         return nil
+    }
+
+    /// The per-row "has this been answered" check, keyed by row so
+    /// `initialExpandedRow` can ask it generically instead of spelling
+    /// out a branch per mode.
+    static func isConfigured(_ row: CardRow, task: TaskItem, shelf: Shelf?, segmentOptions: [Int]) -> Bool {
+        switch row {
+        case .repeats: return isRepeatsConfigured(task: task, shelf: shelf)
+        case .canStartBy: return isStartsConfigured(task: task, shelf: shelf)
+        case .timeMode: return isTimeConfigured(task: task, shelf: shelf, segmentOptions: segmentOptions)
+        case .duration: return isDurationConfigured(task: task, shelf: shelf)
+        case .divisible: return isDivisibleConfigured(task: task, shelf: shelf)
+        case .due: return isDueConfigured(task: task, shelf: shelf)
+        case .priority: return isPriorityConfigured(task: task, shelf: shelf)
+        // "Never" is itself a complete answer, so Ends never seeds open —
+        // unchanged from before this walked `scrollBodyOrder`.
+        case .ends: return true
+        // Non-expandable rows are filtered out before this is reached
+        // (`isExpandable`), so nothing here ever seeds them open.
+        default: return true
+        }
     }
 
     /// What actually seeds `expandedRows` in `init` — the "never saved
@@ -2248,24 +2256,12 @@ struct TaskReviewCard: View {
     /// falls back to `initialExpandedRow` unchanged — at most one row,
     /// whatever's still unanswered, matching the behavior that already
     /// shipped before this split existed.
-    static func initialExpandedRows(task: TaskItem, shelf: Shelf?, segmentOptions: [Int], isNewlyCreated: Bool) -> Set<ExpandableRow> {
+    static func initialExpandedRows(task: TaskItem, shelf: Shelf?, segmentOptions: [Int], isNewlyCreated: Bool) -> Set<CardRow> {
         if isNewlyCreated {
-            if task.isRecurring {
-                var rows: Set<ExpandableRow> = [.repeats, .starts, .time, .ends]
-                if showsDurationRow(task: task) { rows.insert(.duration) }
-                if showsDivisibleRow(task: task) { rows.insert(.divisible) }
-                return rows
-            }
-            // "Time" (Duration) is never hidden for any shelf — always
-            // seeded. Priority is hidden outright for a shelf that
-            // doesn't track it (2-Minute Tasks) — seeding it anyway would
-            // be harmless (an expanded-but-never-rendered row is simply
-            // never read by anything), but there's no reason to seed a
-            // row that can't appear.
-            var rows: Set<ExpandableRow> = [.due, .starts, .duration]
-            if showsDivisibleRow(task: task) { rows.insert(.divisible) }
-            if shelf?.effectiveTracksPriority ?? true { rows.insert(.priority) }
-            return rows
+            // Every expandable row the card will actually draw — taken
+            // from the render list rather than restated, so a row that
+            // can't appear can't be seeded open.
+            return Set(CardRow.scrollBodyOrder(task: task, shelf: shelf).filter(\.isExpandable))
         }
         guard let row = initialExpandedRow(task: task, shelf: shelf, segmentOptions: segmentOptions) else { return [] }
         return [row]
@@ -3318,7 +3314,7 @@ struct TaskReviewCard: View {
     /// `StartDateCalendarPicker` embedded directly rather than behind its
     /// own further popover tap — expanding "Starts" should reveal the
     /// real control immediately, not gate it behind one more reveal.
-    /// Picking a date auto-collapses the row (`expandedRows.remove(.starts)`)
+    /// Picking a date auto-collapses the row (`expandedRows.remove(.canStartBy)`)
     /// — a calendar tap is a discrete, one-shot "I'm done" action, unlike
     /// the Stepper/wheel controls in the other rows, which stay open
     /// through an exploratory adjustment instead of snapping shut after
@@ -3330,7 +3326,7 @@ struct TaskReviewCard: View {
             minimumDate: nil
         ) { selectedDate in
             task.setStartDate(selectedDate)
-            expandedRows.remove(.starts)
+            expandedRows.remove(.canStartBy)
         }
 
         if task.startDatePicked {
@@ -3438,7 +3434,7 @@ struct TaskReviewCard: View {
                 selection: task.recurrenceTimeMode
             ) { newMode in
                 Self.selectRecurrenceTimeMode(newMode, on: task)
-                if isTimeConfigured { expandedRows.remove(.time) }
+                if isTimeConfigured { expandedRows.remove(.timeMode) }
             }
         }
 
@@ -3487,7 +3483,7 @@ struct TaskReviewCard: View {
                 // moment, the same role a calendar tap plays for
                 // Starts/Due.
                 .onChange(of: isShowingRecurrenceTimeOfDayPopover) { wasShowing, isShowing in
-                    if wasShowing, !isShowing, isTimeConfigured { expandedRows.remove(.time) }
+                    if wasShowing, !isShowing, isTimeConfigured { expandedRows.remove(.timeMode) }
                 }
             }
         }

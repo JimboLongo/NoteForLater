@@ -127,4 +127,67 @@ enum CardRow: CaseIterable {
     func isShown(task: TaskItem, shelf: Shelf?) -> Bool {
         visibility(task: task, shelf: shelf) == .shown
     }
+
+    /// Which stack a row is drawn in. The card's scroll body is not one
+    /// flat list: the task-attribute rows sit in their own
+    /// `VStack(spacing: 14)` while the tail sits in the outer
+    /// `VStack(spacing: 10)`. That difference is visible, so the grouping
+    /// is part of the definition rather than something the view
+    /// reinvents — a single flat `ForEach` would silently re-space the
+    /// card.
+    enum Section {
+        /// The per-task attribute rows, inner stack.
+        case attributes
+        /// Remind In, Tags, Shelf, Eligible Schedules — outer stack.
+        case tail
+    }
+
+    var section: Section {
+        switch self {
+        case .remindIn, .tags, .shelf, .eligibleSchedules: return .tail
+        default: return .attributes
+        }
+    }
+
+    /// Every row the scroll body draws, in draw order, already filtered
+    /// to what applies. **This is the one list.** The card renders from
+    /// it and `TaskReviewCard.initialExpandedRow` walks it, so "the
+    /// expand-seeding order matches the render order" isn't a property
+    /// that has to be tested — they are the same array.
+    ///
+    /// Excludes `.nextStep`, which is drawn in `cardHeader` above the
+    /// scroll body rather than among these rows. Its *visibility* still
+    /// comes from `CardRow` like everything else; only its position
+    /// lives elsewhere.
+    ///
+    /// `.greyed` rows are included — greyed means drawn-but-disabled, not
+    /// absent. Only `.hidden` drops out.
+    static func scrollBodyOrder(task: TaskItem, shelf: Shelf?) -> [CardRow] {
+        var rows: [CardRow] = [.recurringToggle]
+        if task.isRecurring {
+            rows += [.repeats, .canStartBy, .timeMode, .duration, .divisible, .ends, .pushIfMissed]
+        } else {
+            rows += [.due, .canStartBy, .duration, .divisible, .priority]
+        }
+        rows += [.remindIn, .tags, .shelf, .eligibleSchedules]
+        return rows.filter { $0.visibility(task: task, shelf: shelf) != .hidden }
+    }
+
+    /// Whether this row collapses to a value and expands to its
+    /// controls (`CollapsibleAnswerRow`), as opposed to being drawn as
+    /// plain content — the toggle, Tags, Shelf, Eligible Schedules,
+    /// Remind In, Push if missed.
+    ///
+    /// This enum is the expand/collapse identity itself; there is no
+    /// second row enum. Two near-identical enums would be new drift on
+    /// day one, and a view-owned one would have inverted the dependency
+    /// this type exists on the model side to avoid.
+    var isExpandable: Bool {
+        switch self {
+        case .repeats, .canStartBy, .timeMode, .duration, .divisible, .ends, .due, .priority:
+            return true
+        case .nextStep, .recurringToggle, .tags, .shelf, .eligibleSchedules, .remindIn, .pushIfMissed:
+            return false
+        }
+    }
 }

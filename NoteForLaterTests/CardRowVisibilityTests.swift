@@ -260,4 +260,89 @@ final class CardRowVisibilityTests: XCTestCase {
             XCTAssertEqual(row.visibility(task: untimed, shelf: shelf), untimedExpected, "\(row) / untimed recurring")
         }
     }
+
+    // MARK: - Render order
+
+    /// The scroll body's row order, asserted as an exact array. Order is
+    /// user-visible, so this is a characterization test: if it changes,
+    /// the card changed and the diff should say so explicitly.
+    func test_scrollBodyOrder_nonRecurring() {
+        let task = plainTask(minutes: 120)
+        XCTAssertEqual(
+            CardRow.scrollBodyOrder(task: task, shelf: trackingShelf()),
+            [.recurringToggle, .due, .canStartBy, .duration, .divisible, .priority,
+             .remindIn, .tags, .shelf, .eligibleSchedules]
+        )
+    }
+
+    func test_scrollBodyOrder_recurring() {
+        let task = recurringTask(mode: .specific, minutes: 120)
+        XCTAssertEqual(
+            CardRow.scrollBodyOrder(task: task, shelf: trackingShelf()),
+            [.recurringToggle, .repeats, .canStartBy, .timeMode, .duration, .divisible,
+             .ends, .pushIfMissed, .remindIn, .tags, .shelf, .eligibleSchedules]
+        )
+    }
+
+    /// Hidden rows drop out of the order entirely; greyed rows stay,
+    /// because greyed means drawn-but-disabled rather than absent.
+    func test_scrollBodyOrder_dropsHiddenKeepsGreyed() {
+        let task = plainTask(minutes: 120)
+        let shelf = shelfTracking(duration: false, dueDates: false, priority: false, futureReminder: false)
+        let order = CardRow.scrollBodyOrder(task: task, shelf: shelf)
+
+        XCTAssertTrue(order.contains(.duration), "greyed stays in the order")
+        XCTAssertTrue(order.contains(.due), "greyed stays in the order")
+        XCTAssertFalse(order.contains(.divisible), "hidden drops out")
+        XCTAssertFalse(order.contains(.priority), "hidden drops out")
+        XCTAssertFalse(order.contains(.remindIn), "hidden drops out")
+    }
+
+    /// Never includes `.nextStep` — that row is drawn in `cardHeader`,
+    /// above the scroll body.
+    func test_scrollBodyOrder_excludesTheHeaderRow() {
+        for task in [plainTask(), recurringTask()] {
+            XCTAssertFalse(CardRow.scrollBodyOrder(task: task, shelf: trackingShelf()).contains(.nextStep))
+        }
+    }
+
+    /// Section grouping is part of the definition, since the attribute
+    /// rows and the tail are drawn in stacks with different spacing.
+    func test_sectionGrouping_tailIsTheLastFourRows() {
+        let order = CardRow.scrollBodyOrder(task: plainTask(minutes: 120), shelf: trackingShelf())
+        let tail = order.filter { $0.section == .tail }
+
+        XCTAssertEqual(tail, [.remindIn, .tags, .shelf, .eligibleSchedules])
+        XCTAssertEqual(Array(order.suffix(4)), tail, "the tail must actually be at the end")
+    }
+
+    // MARK: - Seeding is the same array, not a parallel one
+
+    /// `initialExpandedRow` walks `scrollBodyOrder`, so it can only ever
+    /// return a row the card actually draws — the property that used to
+    /// need its own test now holds by construction, and this pins it.
+    func test_initialExpandedRow_onlyReturnsRowsThatAreDrawnAndExpandable() {
+        let shelf = trackingShelf()
+        let fixtures = [
+            plainTask(), plainTask(minutes: 120),
+            recurringTask(mode: .specific, minutes: 120), recurringTask(mode: .am, minutes: 120),
+        ]
+        for task in fixtures {
+            guard let seeded = TaskReviewCard.initialExpandedRow(task: task, shelf: shelf, segmentOptions: []) else { continue }
+            let order = CardRow.scrollBodyOrder(task: task, shelf: shelf)
+            XCTAssertTrue(order.contains(seeded), "seeded \(seeded) must be a drawn row")
+            XCTAssertTrue(seeded.isExpandable, "seeded \(seeded) must be expandable")
+        }
+    }
+
+    /// A new task seeds exactly the drawn-and-expandable rows — no row
+    /// that can't appear, and nothing drawn-and-expandable left out.
+    func test_initialExpandedRows_newTask_isExactlyTheDrawnExpandableRows() {
+        let shelf = trackingShelf()
+        for task in [plainTask(minutes: 120), recurringTask(mode: .specific, minutes: 120), recurringTask(mode: .am, minutes: 120)] {
+            let seeded = TaskReviewCard.initialExpandedRows(task: task, shelf: shelf, segmentOptions: [], isNewlyCreated: true)
+            let expected = Set(CardRow.scrollBodyOrder(task: task, shelf: shelf).filter(\.isExpandable))
+            XCTAssertEqual(seeded, expected)
+        }
+    }
 }

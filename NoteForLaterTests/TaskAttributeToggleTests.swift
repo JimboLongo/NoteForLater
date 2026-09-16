@@ -310,7 +310,7 @@ final class TaskAttributeToggleTests: XCTestCase {
 
         let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: shelf, segmentOptions: [], isNewlyCreated: true)
 
-        XCTAssertEqual(rows, [.due, .starts, .duration], "no .divisible — 2 minutes is below the threshold — and no .priority — hidden by shelf")
+        XCTAssertEqual(rows, [.due, .canStartBy, .duration], "no .divisible — 2 minutes is below the threshold — and no .priority — hidden by shelf")
     }
 
     /// AM/Midday/PM never places a calendar block, so Duration and

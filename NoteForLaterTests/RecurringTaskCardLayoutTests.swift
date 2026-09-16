@@ -443,7 +443,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
         let task = makeRecurringTask()
         task.recurrenceIntervalPicked = true
 
-        XCTAssertEqual(TaskReviewCard.initialExpandedRow(task: task, shelf: task.shelf, segmentOptions: []), .starts)
+        XCTAssertEqual(TaskReviewCard.initialExpandedRow(task: task, shelf: task.shelf, segmentOptions: []), .canStartBy)
     }
 
     /// Repeats and Starts both answered, Time isn't.
@@ -452,7 +452,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
         task.recurrenceIntervalPicked = true
         task.startDatePicked = true
 
-        XCTAssertEqual(TaskReviewCard.initialExpandedRow(task: task, shelf: task.shelf, segmentOptions: []), .time)
+        XCTAssertEqual(TaskReviewCard.initialExpandedRow(task: task, shelf: task.shelf, segmentOptions: []), .timeMode)
     }
 
     /// Everything answered — the card must open fully collapsed, and
@@ -549,7 +549,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
 
         let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: true)
 
-        XCTAssertEqual(rows, [.repeats, .starts, .time, .ends], "no .duration/.divisible — a fresh recurring task defaults to Midday, which is untimed")
+        XCTAssertEqual(rows, [.repeats, .canStartBy, .timeMode, .ends], "no .duration/.divisible — a fresh recurring task defaults to Midday, which is untimed")
     }
 
     /// A reopened, already-saved, fully-configured task opens fully
@@ -576,7 +576,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
 
         let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: false)
 
-        XCTAssertEqual(rows, [.starts])
+        XCTAssertEqual(rows, [.canStartBy])
     }
 
     /// Filling in a field on a new task collapses only that field — the
@@ -589,7 +589,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     func test_fillingRepeatsOnNewTask_wouldCollapseOnlyRepeats() {
         let task = makeRecurringTask()
         let seeded = TaskReviewCard.initialExpandedRows(task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: true)
-        XCTAssertEqual(seeded, [.repeats, .starts, .time, .ends], "starting point: everything that applies is open — Duration/Divisible don't, since a fresh recurring task is Midday/untimed")
+        XCTAssertEqual(seeded, [.repeats, .canStartBy, .timeMode, .ends], "starting point: everything that applies is open — Duration/Divisible don't, since a fresh recurring task is Midday/untimed")
 
         TaskReviewCard.selectRecurrenceUnit(task.recurrenceUnit, on: task) // answers Repeats (Specific Date needs nothing else)
 
@@ -671,6 +671,6 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
             task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: true
         )
 
-        XCTAssertEqual(rows, [.repeats, .starts, .time, .ends])
+        XCTAssertEqual(rows, [.repeats, .canStartBy, .timeMode, .ends])
     }
 }
