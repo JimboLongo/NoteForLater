@@ -250,15 +250,6 @@ struct DayTimelineGridView: View {
         cachedHabitStreaks = ScheduleReviewViewModel.habitStreaks(for: allHabits, asOf: targetDate)
     }
 
-    // PERFINVESTIGATION — kept deliberately, not leftover: the ~3s
-    // recurring-task tap lag (see docs/session-handoff.md) never
-    // reproduced under this instrumentation, so removing it now would
-    // mean re-adding the same logging blind the next time it's reported.
-    // Struct instances are transient so this must be static to survive
-    // across body evaluations. Safe to strip once the lag either
-    // reproduces with a real capture or is confirmed gone for good.
-    private static var perfBodyEvalCount = 0
-
     private func minutesSinceMidnight(_ date: Date) -> Int {
         let startOfDay = Calendar.current.startOfDay(for: date)
         return Int(date.timeIntervalSince(startOfDay) / 60)
@@ -367,7 +358,6 @@ struct DayTimelineGridView: View {
     /// its two sibling calls, for the other two modes) across *every*
     /// habit, not just the one tapped.
     private func openHabitOccurrences(mode: HabitOccurrenceTimeMode) -> [OpenHabitOccurrence] {
-        let perfStart = Date()
         let calendar = Calendar.current
         // Context-taking read, deliberately, inside the shared function
         // below: this list drives each row's `status`, which
@@ -376,10 +366,8 @@ struct DayTimelineGridView: View {
         // so it reports `.none` and every tap re-writes `.complete`,
         // making an occurrence impossible to un-toggle on a day with no
         // saved log. See `Habit.log(on:context:)`.
-        let perfFetchCount = allHabits.filter { $0.isApplicable(on: targetDate, calendar: calendar) }.count
         let result = ScheduleReviewViewModel.openHabitOccurrences(habits: allHabits, mode: mode, targetDate: targetDate, context: modelContext, calendar: calendar)
             .map { OpenHabitOccurrence(id: "\($0.habit.id).\($0.index)", habit: $0.habit, index: $0.index, status: $0.status) }
-        DiagFileLog.write("PERF openHabitOccurrences mode=\(mode) allHabits=\(allHabits.count) fetches=\(perfFetchCount) dt=\(Date().timeIntervalSince(perfStart))")
         return result
     }
 
@@ -421,8 +409,6 @@ struct DayTimelineGridView: View {
     }
 
     private func openRecurringTaskOccurrences(mode: HabitOccurrenceTimeMode, carriedForwardTaskIDs: Set<UUID>) -> [OpenRecurringTaskOccurrence] {
-        let perfStart = Date()
-        var perfFetchCount = 0
         let calendar = Calendar.current
         let pushedTaskIDs = pushedTaskIDsForTargetDate
         // Same divergence `projectedRecurringTaskOccurrences` already
@@ -436,12 +422,10 @@ struct DayTimelineGridView: View {
         for task in allTasks where task.isRecurring && task.recurrenceTimeMode == mode {
             let isPushed = pushedTaskIDs.contains(task.id) || carriedForwardTaskIDs.contains(task.id)
             guard task.hasRecurringOccurrence(on: targetDate, calendar: calendar) || isPushed else { continue }
-            perfFetchCount += 1
             let status = RecurringTaskLog.log(taskID: task.id, on: targetDate, context: modelContext, calendar: calendar)?.status ?? .none
             guard !(isFutureDay && status == .complete) else { continue }
             result.append(OpenRecurringTaskOccurrence(id: "recurringTask.\(task.id)", task: task, status: status, isPushed: isPushed))
         }
-        DiagFileLog.write("PERF openRecurringTaskOccurrences mode=\(mode) allTasks=\(allTasks.count) fetches=\(perfFetchCount) dt=\(Date().timeIntervalSince(perfStart))")
         return result
     }
 
@@ -610,19 +594,12 @@ struct DayTimelineGridView: View {
 
     @ViewBuilder
     var body: some View {
-        let perfBodyEvalN: Int = {
-            Self.perfBodyEvalCount += 1
-            return Self.perfBodyEvalCount
-        }()
-        let perfBodyStart = Date()
-        let _ = DiagFileLog.write("PERF body#\(perfBodyEvalN) ENTER tick=\(habitOccurrenceRefreshTick)")
         // Computed once here — feeds both `occurrenceLists` (all three
         // modes) and `displayRows` below, rather than each of the four
         // re-running `ScheduleReviewViewModel.carriedForwardRecurringTaskIDs`'s
         // bounded backward/forward walk independently.
         let carriedForwardTaskIDs = computeCarriedForwardTaskIDs()
         let occurrenceLists = computeOpenHabitOccurrenceLists(carriedForwardTaskIDs: carriedForwardTaskIDs)
-        let _ = DiagFileLog.write("PERF body#\(perfBodyEvalN) occurrenceLists dt=\(Date().timeIntervalSince(perfBodyStart))")
         // Computed once here, same reasoning as `occurrenceLists` above —
         // every other use of the day's rows below (the hour bounds, the
         // AM/PM split, and each `DayTimelineSegment` itself) reads this
@@ -918,15 +895,11 @@ struct DayTimelineGridView: View {
     /// reads the occurrence's current status, so the caller doesn't need
     /// to know or pass it.
     private func toggleHabitOccurrence(habit: Habit, index: Int) {
-        let perfStart = Date()
-        DiagFileLog.write("PERF toggleHabit ENTER habit=\(habit.name) index=\(index)")
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: targetDate)
         habit.cycleOccurrence(index, on: today, context: modelContext, calendar: calendar)
-        DiagFileLog.write("PERF toggleHabit afterWrite dt=\(Date().timeIntervalSince(perfStart))")
         habitOccurrenceRefreshTick += 1
         HabitStatsRefreshCoordinator.shared.habitLogsChanged()
-        DiagFileLog.write("PERF toggleHabit EXIT dt=\(Date().timeIntervalSince(perfStart))")
     }
 
     /// Same shape as `toggleHabitOccurrence`, for a recurring task's own
@@ -958,8 +931,6 @@ struct DayTimelineGridView: View {
     /// walk (`NoteForLaterApp.processPushedRecurringOccurrencesIfNeeded`)
     /// eventually reached it.
     private func cycleRecurringTaskOccurrence(task: TaskItem) {
-        let perfStart = Date()
-        DiagFileLog.write("PERF cycleRecurringTask ENTER task=\(task.title)")
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: targetDate)
         let next = task.cycleRecurringOccurrence(on: today, context: modelContext, calendar: calendar)
@@ -968,9 +939,7 @@ struct DayTimelineGridView: View {
                 PushedRecurringOccurrence.advanceOneHop(pushed, task: task, from: today, to: tomorrow, calendar: calendar, context: modelContext)
             }
         }
-        DiagFileLog.write("PERF cycleRecurringTask afterWrite dt=\(Date().timeIntervalSince(perfStart))")
         habitOccurrenceRefreshTick += 1
-        DiagFileLog.write("PERF cycleRecurringTask EXIT dt=\(Date().timeIntervalSince(perfStart))")
     }
 }
 
