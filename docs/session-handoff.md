@@ -67,11 +67,28 @@ The brittleness is environment bumps, not ordinary work.
 **Reading a failure.** Artifacts land in `RenderBaselines/__Failures__/`
 (gitignored): `.diff.png` paints changed pixels red over a dimmed render,
 alongside `.actual.png` and `.expected.png`. The message carries the
-changed-pixel count and a bounding box. One caveat learned from sabotaging
-it: the card's rows share an alignment guide, so changing one label's
-*width* re-flows every row by a subpixel and re-rasterizes all text — a
-one-character edit legitimately lights up 7% of the card. A tight bbox
-proves a change is localized; a wide one does not prove the opposite.
+changed-pixel count and a bounding box.
+
+**Do not read bbox size as change size.** The two are not related, and the
+mistake is the obvious one to make: a wide bbox and a big percentage look
+like something major broke. They routinely don't mean that. The card's rows
+share an alignment guide, so changing one label's *width* re-flows every
+row by a subpixel and re-rasterizes all the text on the card — sabotaging
+this suite by editing `"Remind In"` to `"Remind in"`, a single character,
+lit up 7% of the pixels and a bbox spanning almost the whole card.
+
+What you may conclude:
+- **A tight bbox is strong evidence** the change is confined to those rows.
+  Nothing outside it moved, full stop.
+- **A wide bbox tells you almost nothing.** It is equally consistent with a
+  one-character label edit and with a genuine layout regression. Do not
+  escalate on it, and do not treat it as confirmation that a large intended
+  change landed correctly.
+- **To tell those apart, open `.diff.png`.** A width re-flow shows as thin
+  red antialiasing fringes outlining glyphs that are otherwise in the same
+  place; a real regression shows as solid red blocks where content moved,
+  appeared, or vanished. That distinction is obvious by eye and invisible
+  in the numbers.
 
 **Re-recording.** `TEST_RUNNER_RECORD_RENDER_BASELINES=1` — note the
 prefix, `xcodebuild` forwards only `TEST_RUNNER_`-prefixed variables into
