@@ -607,6 +607,49 @@ merits, and if a future reproduction of the lag does implicate this same
 over-invalidation problem, doing Half A first still means opening this
 file only once either way.
 
+**Half A — DONE** (commit `7d19478`). `DayTimelineGridView.swift` 3,114 →
+2,880; the Morning/Midday/Evening bands are now `OccurrenceSectionView` in
+`Views/DayTimelineOccurrenceSections.swift`. Three corrections to what the
+scoping above assumed, all found while doing it:
+
+- **The sections are not habit-only.** `occurrenceGroups` emits a habit
+  group *plus one group per shelf* of recurring-task occurrences, so the
+  extracted view depends on task/shelf data too. "Extract the habit
+  sections" is a less clean habits/tasks boundary than both this entry and
+  the spec imply — worth knowing before scoping Half B off the same
+  assumption.
+- **Both writers had to stay in the parent.**
+  `cycleRecurringTaskOccurrence` is wired into all three
+  `DayTimelineSegment` call sites as well as the section, so it can't live
+  solely in the child. They're passed down as closures; the refresh tick
+  stays parent state.
+- **The geometry seam is now tested** — `DayTimelineGeometry` +
+  `DayTimelineGeometryTests`, extracted and pinned *before* the move so it
+  had something to fail against. `.onGeometryChange` stays at the parent's
+  call sites, since the heights are summed with the morning grid's own
+  height into a value only the parent can assemble.
+
+**Half B is harder than this entry makes it sound.** "Stop the parent
+observing habits at all" reads like deleting one `@Query`, and it isn't:
+`ScheduleReviewView`'s `@Query(sort: \Habit.sortOrder) allHabits` also
+feeds `vm.regenerateFromNow(shelves:habits:eligibleHoursWindows:)` and
+`vm.autoPlaceEligibleTasks(...)` (`ScheduleReviewView.swift:330`, `:340`).
+The parent needs habits for scheduling regardless of what the grid does
+with them, so Half B has to either turn those into a non-observing read
+(fetch at call time) or move the calls — a decision about scheduling
+inputs, not a view refactor. Budget accordingly.
+
+**What 479/479 green does *not* cover, for whoever reads that number
+next.** `DayTimelineGeometryTests` pins the scroll-space *arithmetic* —
+`precedingContentHeight`, the afternoon sum, the `scrollToRoughlyNow`
+offset — and that arithmetic is what decides where a dragged block lands.
+It cannot cover *when* SwiftUI reports a section's height. A layout-timing
+regression — a height reported stale, or at a different point in the pass —
+would leave every assertion passing and still land drops on the wrong
+time. The only real check for that half is an on-device drag on a split
+day (with Midday habits, the case with the most terms in the sum) and on
+an unsplit one. Don't read a green suite as covering the drag path.
+
 ### `startDate` cannot be cleared once set — fixed
 
 Was: a nil `startDate` rendered as today (`task.startDate ?? .now`) and
