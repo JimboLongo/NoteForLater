@@ -303,14 +303,17 @@ final class TaskAttributeToggleTests: XCTestCase {
     /// `initialExpandedRows`' new-task branch must still seed `.time`
     /// (Duration stays visible) but omit `.priority` for a shelf that
     /// can't render that row at all.
-    func test_initialExpandedRows_newTwoMinuteTask_keepsDurationOmitsDivisibleAndPriority() {
+    /// Updated in stage 3: the 2-Minute shelf now hides Duration too
+    /// (along with Due, Divisible, Priority and Tags), so only Can Start
+    /// By remains expandable.
+    func test_initialExpandedRows_newTwoMinuteTask_omitsEverythingTheShelfHides() {
         let shelf = Shelf(name: "2-Minute Tasks")
         shelf.isTwoMinuteTasks = true
         let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
 
         let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: shelf, segmentOptions: [], isNewlyCreated: true)
 
-        XCTAssertEqual(rows, [.due, .canStartBy, .duration], "no .divisible — 2 minutes is below the threshold — and no .priority — hidden by shelf")
+        XCTAssertEqual(rows, [.canStartBy], "the 2-Minute shelf hides Due, Duration, Divisible, Priority and Tags")
     }
 
     /// AM/Midday/PM never places a calendar block, so Duration and
@@ -979,9 +982,16 @@ final class TaskAttributeToggleTests: XCTestCase {
 
         TaskItem.selectDuration(60, on: task)
 
-        XCTAssertTrue(TaskReviewCard.showsDivisibleRow(task: task))
+        // Stage 3 change: while the task is still *on* the 2-Minute
+        // shelf, Divisible stays hidden regardless of duration — the
+        // shelf hides it, not just the hour threshold. Raising the
+        // duration alone no longer reveals it; leaving the shelf does.
+        XCTAssertEqual(CardRow.divisible.visibility(task: task, shelf: shelf), .hidden)
+        XCTAssertFalse(task.missingAttributeNames(consideringShelf: shelf).contains("Divisible"))
+
+        let ordinary = Shelf(name: "Errands")
+        XCTAssertEqual(CardRow.divisible.visibility(task: task, shelf: ordinary), .shown, "off the shelf, the hour threshold governs again")
         XCTAssertEqual(TaskReviewCard.divisibleSummaryText(task: task), "Not selected")
-        XCTAssertTrue(task.missingAttributeNames(consideringShelf: shelf).contains("Divisible"))
     }
 
     // MARK: - Recurring toggle side effects (characterization)
@@ -1060,17 +1070,34 @@ final class TaskAttributeToggleTests: XCTestCase {
         XCTAssertNil(preview.explicitShelf, "the auto-preview is dropped so the card reads the task's own shelf again")
     }
 
-    /// Asymmetry #1, pinned: turning off does **not** reset the eligible
-    /// schedules that turning on seeded.
-    func test_recurringToggleOff_doesNotResetEligibleSchedules() {
-        let (shelf, rule) = recurringShelfFixture()
-        let task = TaskItem(title: "T")
-        _ = TaskReviewCard.applyRecurringToggle(true, task: task, shelves: [shelf], preview: .none)
-        XCTAssertEqual(task.includedSchedulingRuleIDs, [rule.id])
+    /// **Changed deliberately in stage 3; this test was updated, not
+    /// deleted.** It previously pinned the opposite: that toggling off
+    /// left the Recurring shelf's rule IDs in place.
+    ///
+    /// That turned out to be a latent bug rather than a design choice.
+    /// Those IDs matched no rule on the shelf the card reverted to, so
+    /// `eligibleSchedulesMissing` read "answered" (the array is non-empty)
+    /// while `TaskItem.isEligible(for:)` returned false for every rule
+    /// actually present — a task that looks complete and is eligible for
+    /// nothing, which stays invisible until scheduling quietly stops
+    /// placing it. The card spec's "shelf auto-switch resets eligible
+    /// schedules" therefore wins, and seeding now runs in both
+    /// directions.
+    func test_recurringToggleOff_resetsEligibilityToTheRevertedShelf() {
+        let (recurringShelf, recurringRule) = recurringShelfFixture()
+        let ownShelf = Shelf(name: "Errands")
+        let ownRule = SchedulingRule(shelf: ownShelf, fillStrategy: .fillToFit)
+        ownRule.isEnabled = true
+        ownShelf.schedulingRules = [ownRule]
 
-        _ = TaskReviewCard.applyRecurringToggle(false, task: task, shelves: [shelf], preview: .shelf(shelf))
+        let task = TaskItem(title: "T", shelf: ownShelf)
+        _ = TaskReviewCard.applyRecurringToggle(true, task: task, shelves: [recurringShelf], preview: .none)
+        XCTAssertEqual(task.includedSchedulingRuleIDs, [recurringRule.id], "on: seeded from the Recurring shelf")
 
-        XCTAssertEqual(task.includedSchedulingRuleIDs, [rule.id], "unchanged on the way back off — deliberate, not an oversight")
+        _ = TaskReviewCard.applyRecurringToggle(false, task: task, shelves: [recurringShelf], preview: .shelf(recurringShelf))
+
+        XCTAssertEqual(task.includedSchedulingRuleIDs, [ownRule.id], "off: re-seeded from the shelf the card reverted to")
+        XCTAssertFalse(task.includedSchedulingRuleIDs.contains(recurringRule.id), "no stale IDs from a shelf the task isn't on")
     }
 
     /// Asymmetry #2, pinned: turning off leaves a preview of some *other*
@@ -1110,5 +1137,229 @@ final class TaskAttributeToggleTests: XCTestCase {
         XCTAssertEqual(TaskReviewCard.ShelfPreview.none.resolved(for: task)?.id, own.id)
         XCTAssertEqual(TaskReviewCard.ShelfPreview.shelf(other).resolved(for: task)?.id, other.id)
         XCTAssertNil(TaskReviewCard.ShelfPreview.none.explicitShelf, "no preview is not a pick")
+    }
+
+    // MARK: - Stage 3: mutual exclusion, enforced in the model
+
+    private func twoMinuteShelfFixture() -> Shelf {
+        let shelf = Shelf(name: "2-Minute Tasks")
+        shelf.isTwoMinuteTasks = true
+        return shelf
+    }
+
+    /// Turning Recurring on moves the task off the 2-Minute shelf — the
+    /// action just taken wins.
+    func test_setRecurringOn_movesOffTheTwoMinuteShelf() {
+        let task = TaskItem(title: "T", shelf: twoMinuteShelfFixture())
+
+        task.setRecurring(true)
+
+        XCTAssertTrue(task.isRecurring)
+        XCTAssertNil(task.shelf, "a recurring task must not sit on the 2-Minute shelf")
+    }
+
+    /// And from the other side: filing onto the 2-Minute shelf clears
+    /// recurrence.
+    func test_assignTwoMinuteShelf_clearsRecurring() {
+        let task = TaskItem(title: "T")
+        task.setRecurring(true)
+        XCTAssertTrue(task.isRecurring)
+
+        task.assignShelf(twoMinuteShelfFixture())
+
+        XCTAssertFalse(task.isRecurring)
+        XCTAssertTrue(task.shelf?.isTwoMinuteTasks == true)
+    }
+
+    /// Assigning any ordinary shelf leaves recurrence alone.
+    func test_assignOrdinaryShelf_leavesRecurringAlone() {
+        let task = TaskItem(title: "T")
+        task.setRecurring(true)
+
+        task.assignShelf(Shelf(name: "Errands"))
+
+        XCTAssertTrue(task.isRecurring)
+    }
+
+    /// The repair path, where the two arrive together rather than in
+    /// sequence: Recurring wins.
+    func test_repairSpecialShelfExclusivity_recurringWins() {
+        let task = TaskItem(title: "T")
+        // Construct the forbidden combination directly, bypassing the
+        // guarded setters — this is the state a stale store or a future
+        // code path could produce.
+        task.isRecurring = true
+        task.shelf = twoMinuteShelfFixture()
+
+        TaskItem.repairSpecialShelfExclusivity(task)
+
+        XCTAssertTrue(task.isRecurring, "recurring survives")
+        XCTAssertNil(task.shelf, "the 2-minute side gives way")
+    }
+
+    func test_repairSpecialShelfExclusivity_leavesValidStatesAlone() {
+        let recurringElsewhere = TaskItem(title: "A", shelf: Shelf(name: "Errands"))
+        recurringElsewhere.isRecurring = true
+        TaskItem.repairSpecialShelfExclusivity(recurringElsewhere)
+        XCTAssertNotNil(recurringElsewhere.shelf)
+
+        let twoMinuteNotRecurring = TaskItem(title: "B", shelf: twoMinuteShelfFixture())
+        TaskItem.repairSpecialShelfExclusivity(twoMinuteNotRecurring)
+        XCTAssertTrue(twoMinuteNotRecurring.shelf?.isTwoMinuteTasks == true, "a plain 2-minute task is untouched")
+    }
+
+    /// Neither toggle is even offered while the other applies, so the
+    /// forbidden combination isn't reachable from the card at all.
+    func test_togglesAreMutuallyHidden() {
+        let recurring = TaskItem(title: "R")
+        recurring.isRecurring = true
+        XCTAssertEqual(CardRow.twoMinuteToggle.visibility(task: recurring, shelf: Shelf(name: "Errands")), .hidden)
+
+        let twoMinute = TaskItem(title: "M")
+        XCTAssertEqual(CardRow.recurringToggle.visibility(task: twoMinute, shelf: twoMinuteShelfFixture()), .hidden)
+    }
+
+    // MARK: - Stage 3: reset-on-toggle clears exactly what it hid
+
+    /// A task with *every* field populated, so over-reach is visible:
+    /// turning 2-Minute on must clear the rows that shelf hides and
+    /// nothing else.
+    func test_twoMinuteToggleOn_clearsExactlyTheRowsItHides() {
+        let shelf = twoMinuteShelfFixture()
+        let task = TaskItem(title: "T", shelf: Shelf(name: "Errands"))
+        task.dueDateDecided = true
+        task.dueDate = .now
+        task.dueDatePicked = true
+        TaskItem.selectDuration(120, on: task)
+        TaskItem.selectDivisibleSegment(30, on: task)
+        task.priority = .high
+        task.tags = ["errand"]
+        task.nextStepDecided = true
+        task.nextStepAnsweredYes = true
+        task.nextStep = "Find it"
+        task.setStartDate(Calendar.current.startOfDay(for: .now))
+
+        _ = TaskReviewCard.applyTwoMinuteToggle(true, task: task, shelves: [shelf], preview: .none)
+
+        // Hidden by the 2-Minute shelf → cleared.
+        XCTAssertFalse(task.dueDateDecided)
+        XCTAssertNil(task.dueDate)
+        XCTAssertFalse(task.durationPicked)
+        XCTAssertEqual(task.estimatedMinutes, 0)
+        XCTAssertFalse(task.divisiblePicked)
+        XCTAssertEqual(task.priority, .unset)
+        XCTAssertEqual(task.tags, [])
+        // Still shown → untouched. This is the over-reach check.
+        XCTAssertEqual(task.nextStep, "Find it", "Next Step is still shown, so it must survive")
+        XCTAssertTrue(task.nextStepDecided)
+        XCTAssertNotNil(task.startDate, "Can Start By is still shown, so it must survive")
+    }
+
+    /// Turning it back off doesn't re-clear anything — the values are
+    /// already gone, and nothing still-visible may be touched.
+    func test_twoMinuteToggleOff_doesNotClearStillVisibleRows() {
+        let shelf = twoMinuteShelfFixture()
+        let task = TaskItem(title: "T", shelf: Shelf(name: "Errands"))
+        task.nextStepDecided = true
+        task.nextStepAnsweredYes = true
+        task.nextStep = "Find it"
+
+        var preview = TaskReviewCard.applyTwoMinuteToggle(true, task: task, shelves: [shelf], preview: .none)
+        preview = TaskReviewCard.applyTwoMinuteToggle(false, task: task, shelves: [shelf], preview: preview)
+
+        XCTAssertEqual(task.nextStep, "Find it")
+        XCTAssertNil(preview.explicitShelf, "reverts to the task's own shelf")
+    }
+
+    /// Recurring's own reset, same derivation: turning it on hides Due,
+    /// Priority and Tags, so those clear and nothing else does.
+    func test_recurringToggleOn_clearsExactlyTheRowsItHides() {
+        let (shelf, _) = recurringShelfFixture()
+        let task = TaskItem(title: "T")
+        task.dueDateDecided = true
+        task.dueDate = .now
+        task.priority = .high
+        task.tags = ["errand"]
+        task.nextStepDecided = true
+        task.nextStep = "Find it"
+
+        _ = TaskReviewCard.applyRecurringToggle(true, task: task, shelves: [shelf], preview: .none)
+
+        XCTAssertFalse(task.dueDateDecided)
+        XCTAssertEqual(task.priority, .unset)
+        XCTAssertEqual(task.tags, [])
+        XCTAssertEqual(task.nextStep, "Find it", "Next Step survives — recurring doesn't hide it")
+    }
+
+    // MARK: - Stage 3: the cleared-preview tri-state
+
+    /// A task that actually lives on the 2-Minute shelf can't just revert
+    /// — falling back would resolve to that shelf again and flip the
+    /// toggle straight back on. It asks for a destination instead.
+    func test_twoMinuteToggleOff_onAShelfResident_clearsAndDemandsAChoice() {
+        let shelf = twoMinuteShelfFixture()
+        let task = TaskItem(title: "T", shelf: shelf)
+
+        let preview = TaskReviewCard.applyTwoMinuteToggle(false, task: task, shelves: [shelf], preview: .none)
+
+        XCTAssertTrue(preview.needsShelfChoice)
+        XCTAssertNil(preview.resolved(for: task), "resolves to no shelf, not back to the 2-Minute one")
+        XCTAssertFalse(preview.resolved(for: task)?.isTwoMinuteTasks == true, "so the toggle reads off and stays off")
+    }
+
+    /// A task merely *previewing* the shelf just reverts to its own —
+    /// no forced choice, because falling back can't snap it on.
+    func test_twoMinuteToggleOff_onANonResident_revertsWithoutDemandingAChoice() {
+        let shelf = twoMinuteShelfFixture()
+        let own = Shelf(name: "Errands")
+        let task = TaskItem(title: "T", shelf: own)
+
+        var preview = TaskReviewCard.applyTwoMinuteToggle(true, task: task, shelves: [shelf], preview: .none)
+        XCTAssertTrue(preview.resolved(for: task)?.isTwoMinuteTasks == true)
+
+        preview = TaskReviewCard.applyTwoMinuteToggle(false, task: task, shelves: [shelf], preview: preview)
+
+        XCTAssertFalse(preview.needsShelfChoice)
+        XCTAssertEqual(preview.resolved(for: task)?.id, own.id)
+    }
+
+    // MARK: - Stage 3: Cancel still rolls a toggle back
+
+    /// The reset destroys data by design, so Cancel has to undo it.
+    /// `TaskEditSnapshot` is captured on appear, before any toggle.
+    func test_cancelRestoresEverythingATwoMinuteToggleCleared() {
+        let shelf = twoMinuteShelfFixture()
+        let task = TaskItem(title: "T", shelf: Shelf(name: "Errands"))
+        task.dueDateDecided = true
+        task.dueDate = Calendar.current.date(from: DateComponents(year: 2026, month: 9, day: 17))
+        task.dueDatePicked = true
+        TaskItem.selectDuration(120, on: task)
+        TaskItem.selectDivisibleSegment(30, on: task)
+        task.priority = .high
+        task.tags = ["errand"]
+
+        let snapshot = TaskEditSnapshot(task)   // as .onAppear does, pre-toggle
+        _ = TaskReviewCard.applyTwoMinuteToggle(true, task: task, shelves: [shelf], preview: .none)
+        XCTAssertEqual(task.priority, .unset, "sanity: the reset happened")
+
+        snapshot.restore(into: task)
+
+        XCTAssertTrue(task.dueDateDecided)
+        XCTAssertEqual(task.dueDate, Calendar.current.date(from: DateComponents(year: 2026, month: 9, day: 17)))
+        XCTAssertTrue(task.durationPicked)
+        XCTAssertEqual(task.estimatedMinutes, 120)
+        XCTAssertTrue(task.divisiblePicked)
+        XCTAssertEqual(task.minimumSegmentMinutes, 30)
+        XCTAssertEqual(task.priority, .high)
+        XCTAssertEqual(task.tags, ["errand"])
+    }
+
+    // MARK: - Stage 3: the duration wheel no longer offers ≤2 min
+
+    func test_durationWheel_dropsTheTwoMinuteOption_butStillRendersATaskHoldingIt() {
+        XCTAssertFalse(TaskReviewCard.durationOptions.contains(2), "≤2 min is expressed by the toggle now, not the wheel")
+        // A task already holding 2 minutes stays renderable via the
+        // slot-in-the-current-value fallback.
+        XCTAssertEqual(TaskReviewCard.durationOptionLabel(for: 2), "≤2 min")
     }
 }

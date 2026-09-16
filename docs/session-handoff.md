@@ -30,6 +30,28 @@ you happened to think of. Fail-then-pass on a *new* test proves that test
 works; sabotage against the *old* suite proves what the old suite was
 missing. They answer different questions.
 
+**Testing practice, general — the render diff is a regression net, not a
+change-verification tool.** `RecurringTaskCardRenderTests` pins
+byte-deterministic PNGs of the card (`UIHostingController` +
+`UIGraphicsImageRenderer`) and its value comes entirely from fixtures that
+*don't* change: an unexpected byte delta on an untouched fixture is a real
+signal that something moved.
+
+Its value drops to near zero when a change touches every fixture. Stage 3
+of the card work (adding the 2-Minute toggle, renaming "Starts" → "Can
+Start By", hiding Tags for recurring) changed all four baselines, so "it
+differs" carried no information — every fixture was *supposed* to differ,
+and a diff that says so can't distinguish the intended delta from an
+unintended one riding along with it.
+
+When that happens, don't treat a red diff as verification. Do this instead:
+1. State up front which fixtures should change and how, before running it.
+2. Pin the deltas as real assertions — `CardRow.scrollBodyOrder` is the
+   control for row presence/absence and ordering, and it fails specifically.
+3. Use the PNGs only to eyeball what an assertion can't see: a label
+   rename, a row's visual position.
+4. Re-baseline, and the net is back for the *next* change.
+
 **SwiftData trap, general — not specific to any one change:** turning an
 existing `@Model` stored property into a computed one (e.g. `isCompleted:
 Bool` → a computed property backed by a new `statusRaw` stored field)

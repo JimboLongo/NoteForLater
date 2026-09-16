@@ -24,6 +24,7 @@ enum CardRow: CaseIterable {
     // Shown for every task.
     case nextStep
     case recurringToggle
+    case twoMinuteToggle
     case canStartBy
     case duration
     case divisible
@@ -70,21 +71,52 @@ enum CardRow: CaseIterable {
         case .nextStep:
             return (shelf?.effectiveTracksNextStep ?? true) ? .shown : .hidden
 
-        case .recurringToggle, .tags, .shelf, .canStartBy:
+        case .recurringToggle:
+            // Hidden once the task is 2-minute: the two are mutually
+            // exclusive, so offering the other toggle would invite a
+            // combination the model refuses (see
+            // `TaskItem.repairSpecialShelfExclusivity`).
+            return isTwoMinute(shelf: shelf) ? .hidden : .shown
+
+        case .twoMinuteToggle:
+            // Same exclusion from the other side. Recurring wins, so a
+            // recurring task doesn't get offered this at all.
+            return task.isRecurring ? .hidden : .shown
+
+        case .shelf, .canStartBy:
             // Always offered. Can Start By is shown for a non-recurring
             // task too, as optional metadata — it simply never reports
             // missing there (see `TaskItem.startDateMissing`).
+            return .shown
+
+        case .tags:
+            // Hidden for both special kinds. A recurring task is one
+            // definition read many times rather than a thing you file,
+            // and a 2-minute task is gone before a tag would earn its
+            // keep.
+            if task.isRecurring || isTwoMinute(shelf: shelf) { return .hidden }
             return .shown
 
         case .duration:
             // An untimed recurring occurrence never gets a calendar
             // block, so it has no duration to state — meaningless, not
             // merely unanswerable.
+            //
+            // NOTE: once Specific Time is removed as an option for
+            // recurring tasks, `recurringAndUntimed` becomes true for
+            // *every* recurring task and this single line will hide
+            // Duration for all of them — no extra rule needed. That's why
+            // there's no `task.isRecurring` clause here despite the card
+            // spec saying recurring hides Duration: adding one now would
+            // hide it while Specific-Time recurring tasks still need a
+            // block length they'd have no way to set.
             if task.recurringAndUntimed { return .hidden }
+            if isTwoMinute(shelf: shelf) { return .hidden }
             return (shelf?.effectiveTracksDuration ?? true) ? .shown : .greyed
 
         case .divisible:
             if task.recurringAndUntimed { return .hidden }
+            if isTwoMinute(shelf: shelf) { return .hidden }
             // Deliberately `.hidden` rather than `.greyed` where Duration
             // is `.greyed`, reproducing today's behavior exactly. The
             // asymmetry is real and pre-existing: Duration stays visible
@@ -103,10 +135,12 @@ enum CardRow: CaseIterable {
 
         case .due:
             if task.isRecurring { return .hidden }
+            if isTwoMinute(shelf: shelf) { return .hidden }
             return (shelf?.effectiveTracksDueDates ?? true) ? .shown : .greyed
 
         case .priority:
             if task.isRecurring { return .hidden }
+            if isTwoMinute(shelf: shelf) { return .hidden }
             return (shelf?.effectiveTracksPriority ?? true) ? .shown : .hidden
 
         case .eligibleSchedules:
@@ -163,7 +197,7 @@ enum CardRow: CaseIterable {
     /// `.greyed` rows are included — greyed means drawn-but-disabled, not
     /// absent. Only `.hidden` drops out.
     static func scrollBodyOrder(task: TaskItem, shelf: Shelf?) -> [CardRow] {
-        var rows: [CardRow] = [.recurringToggle]
+        var rows: [CardRow] = [.recurringToggle, .twoMinuteToggle]
         if task.isRecurring {
             rows += [.repeats, .canStartBy, .timeMode, .duration, .divisible, .ends, .pushIfMissed]
         } else {
@@ -186,8 +220,61 @@ enum CardRow: CaseIterable {
         switch self {
         case .repeats, .canStartBy, .timeMode, .duration, .divisible, .ends, .due, .priority:
             return true
-        case .nextStep, .recurringToggle, .tags, .shelf, .eligibleSchedules, .remindIn, .pushIfMissed:
+        case .nextStep, .recurringToggle, .twoMinuteToggle, .tags, .shelf, .eligibleSchedules, .remindIn, .pushIfMissed:
             return false
+        }
+    }
+
+    /// 2-minute-ness is shelf membership, not a stored task field — see
+    /// the stage-3 decision. Everything asking "is this a 2-minute task?"
+    /// goes through here so there's one answer.
+    private func isTwoMinute(shelf: Shelf?) -> Bool {
+        shelf?.isTwoMinuteTasks == true
+    }
+
+    /// Clears whatever this row was holding. Called only for rows that a
+    /// toggle just *hid*, never on a hand-written list — see
+    /// `TaskReviewCard.resetFieldsHidden(by:)`, which computes the set as
+    /// (rows shown before − rows shown after). That derivation is the
+    /// guard against a toggle clearing something it doesn't own: it can
+    /// only reach rows that actually disappeared, and adding a future
+    /// `CardRow` can't leave a stale reset list behind.
+    ///
+    /// Rows with nothing of their own to clear — the toggles themselves,
+    /// Shelf, Eligible Schedules — are deliberately no-ops rather than
+    /// omitted, so a new case has to make an explicit choice here.
+    func resetFields(on task: TaskItem) {
+        switch self {
+        case .due:
+            task.dueDate = nil
+            task.dueDateDecided = false
+            task.dueDatePicked = false
+        case .duration:
+            task.estimatedMinutes = 0
+            task.remainingMinutes = 0
+            task.durationPicked = false
+        case .divisible:
+            task.isDivisible = false
+            task.minimumSegmentMinutes = 0
+            task.divisiblePicked = false
+        case .priority:
+            task.priority = .unset
+        case .tags:
+            task.tags = []
+        case .nextStep:
+            task.nextStep = ""
+            task.nextStepDecided = false
+            task.nextStepAnsweredYes = false
+        case .canStartBy:
+            task.clearStartDate()
+        case .remindIn:
+            task.remindInCount = 0
+        case .repeats, .timeMode, .ends, .pushIfMissed:
+            // Recurrence settings are cleared by `setRecurring(false)`
+            // itself, atomically with the flag — not row by row.
+            break
+        case .recurringToggle, .twoMinuteToggle, .shelf, .eligibleSchedules:
+            break
         }
     }
 }

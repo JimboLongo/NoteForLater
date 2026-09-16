@@ -152,7 +152,7 @@ final class CardRowVisibilityTests: XCTestCase {
 
     func test_shown_alwaysOfferedRows() {
         for task in [plainTask(), recurringTask()] {
-            for row in [CardRow.recurringToggle, .tags, .shelf, .canStartBy] {
+            for row in [CardRow.shelf, .canStartBy] {
                 XCTAssertEqual(row.visibility(task: task, shelf: trackingShelf()), .shown, "\(row) is always offered")
             }
         }
@@ -235,13 +235,16 @@ final class CardRowVisibilityTests: XCTestCase {
         let untimed = recurringTask(mode: .am, minutes: 120)
 
         // (row, plain, specific-time recurring, untimed recurring)
+        // All three fixtures sit on an ordinary shelf, so the 2-Minute
+        // column is covered separately by the tests below.
         let expected: [(CardRow, CardRow.Visibility, CardRow.Visibility, CardRow.Visibility)] = [
             (.nextStep,          .shown,  .shown,  .shown),
             (.recurringToggle,   .shown,  .shown,  .shown),
+            (.twoMinuteToggle,   .shown,  .hidden, .hidden),
             (.canStartBy,        .shown,  .shown,  .shown),
             (.duration,          .shown,  .shown,  .hidden),
             (.divisible,         .shown,  .shown,  .hidden),
-            (.tags,              .shown,  .shown,  .shown),
+            (.tags,              .shown,  .hidden, .hidden),
             (.shelf,             .shown,  .shown,  .shown),
             (.eligibleSchedules, .shown,  .shown,  .shown),
             (.remindIn,          .shown,  .shown,  .shown),
@@ -270,7 +273,7 @@ final class CardRowVisibilityTests: XCTestCase {
         let task = plainTask(minutes: 120)
         XCTAssertEqual(
             CardRow.scrollBodyOrder(task: task, shelf: trackingShelf()),
-            [.recurringToggle, .due, .canStartBy, .duration, .divisible, .priority,
+            [.recurringToggle, .twoMinuteToggle, .due, .canStartBy, .duration, .divisible, .priority,
              .remindIn, .tags, .shelf, .eligibleSchedules]
         )
     }
@@ -279,8 +282,10 @@ final class CardRowVisibilityTests: XCTestCase {
         let task = recurringTask(mode: .specific, minutes: 120)
         XCTAssertEqual(
             CardRow.scrollBodyOrder(task: task, shelf: trackingShelf()),
+            // No .twoMinuteToggle and no .tags — both hidden for a
+            // recurring task (mutual exclusion, and the spec's Tags rule).
             [.recurringToggle, .repeats, .canStartBy, .timeMode, .duration, .divisible,
-             .ends, .pushIfMissed, .remindIn, .tags, .shelf, .eligibleSchedules]
+             .ends, .pushIfMissed, .remindIn, .shelf, .eligibleSchedules]
         )
     }
 

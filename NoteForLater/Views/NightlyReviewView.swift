@@ -2020,7 +2020,7 @@ struct TaskReviewCard: View {
     /// The short, curated list — not every 15-minute increment, just the
     /// sizes actually worth picking from directly. See `durationWheelOptions`
     /// below for why this alone isn't always enough.
-    private static let durationOptions = [15, 30, 45, 60, 90, 120, 240, 480]
+    static let durationOptions = [15, 30, 45, 60, 90, 120, 240, 480]
     /// Segment sizes valid for *this* task's current duration — only
     /// values that evenly divide it, so the packer can never be left with
     /// a remainder too small to place (see `TaskItem.validSegmentOptions`).
@@ -2038,10 +2038,11 @@ struct TaskReviewCard: View {
     /// Keeping the option list short everywhere else while still
     /// guaranteeing the current value is always selectable.
     private var durationWheelOptions: [Int] {
-        var options = Self.durationOptions
-        if !options.contains(2) {
-            options.insert(2, at: 0)
-        }
+        // `≤2 min` is no longer offered: a 2-minute task is expressed by
+        // the 2-Minute toggle, which hides Duration entirely. The
+        // slot-in below still renders a task that already holds an
+        // off-wheel value (2 among them), so nothing becomes unshowable.
+        let options = Self.durationOptions
         guard task.estimatedMinutes > 0, !options.contains(task.estimatedMinutes) else {
             return options
         }
@@ -2421,6 +2422,13 @@ struct TaskReviewCard: View {
         case none
         /// This shelf is previewed, whether tapped or implied by a toggle.
         case shelf(Shelf)
+        /// Explicitly previewing *no* shelf — distinct from `.none`,
+        /// which falls back to the task's own. Reached by turning the
+        /// 2-Minute toggle off on a task that actually lives on that
+        /// shelf: falling back would resolve to the 2-Minute shelf again
+        /// and flip the toggle straight back on. The card asks for a
+        /// destination instead (see `actionButtonInfo`).
+        case cleared
 
         /// What the card should actually read its shelf-gated questions
         /// from.
@@ -2428,6 +2436,7 @@ struct TaskReviewCard: View {
             switch self {
             case .none: return task.shelf
             case .shelf(let shelf): return shelf
+            case .cleared: return nil
             }
         }
 
@@ -2441,51 +2450,111 @@ struct TaskReviewCard: View {
         }
 
         var isRecurringShelf: Bool { explicitShelf?.isRecurringTasks == true }
+
+        /// True while the user has turned 2-Minute off but not yet said
+        /// where the task should go. Blocks commit — see
+        /// `actionButtonInfo`.
+        var needsShelfChoice: Bool { if case .cleared = self { return true }; return false }
+    }
+
+    /// Seeds eligible schedules from whichever shelf is now in effect.
+    ///
+    /// **Behavior change from the extraction commit, deliberate.** That
+    /// commit pinned an asymmetry: toggling on seeded eligibility, and
+    /// toggling off left the old shelf's rule IDs in place. Those IDs
+    /// then matched no rule on the shelf the card had reverted to, so
+    /// `eligibleSchedulesMissing` read "answered" while
+    /// `TaskItem.isEligible(for:)` returned false for every rule actually
+    /// present — a task that looks complete and is eligible for nothing,
+    /// which stays invisible until scheduling quietly stops placing it.
+    /// A latent bug rather than a design choice, so the card spec's
+    /// "shelf auto-switch resets eligible schedules" wins and this now
+    /// runs in both directions.
+    static func seedEligibleSchedules(task: TaskItem, from shelf: Shelf?) {
+        task.includedSchedulingRuleIDs = (shelf?.schedulingRules ?? []).filter(\.isEnabled).map(\.id)
+    }
+
+    /// Rows a task currently shows at all (greyed counts — it's visible).
+    private static func visibleRows(task: TaskItem, shelf: Shelf?) -> Set<CardRow> {
+        Set(CardRow.allCases.filter { $0.visibility(task: task, shelf: shelf) != .hidden })
+    }
+
+    /// Runs `mutate`, then clears exactly the rows that disappeared as a
+    /// result — computed as (visible before − visible after) rather than
+    /// hand-listed.
+    ///
+    /// That derivation is the point. A hand-written reset list has no
+    /// structural tie to what the toggle actually hides, so it can clear
+    /// a field the toggle doesn't own, or silently go stale when a row is
+    /// added to `CardRow`. Here a toggle can only reach rows that
+    /// genuinely vanished.
+    private static func applyTogglePreservingOnlyVisibleRows(
+        task: TaskItem, preview: ShelfPreview, _ mutate: () -> ShelfPreview
+    ) -> ShelfPreview {
+        let before = visibleRows(task: task, shelf: preview.resolved(for: task))
+        let next = mutate()
+        let after = visibleRows(task: task, shelf: next.resolved(for: task))
+        for row in before.subtracting(after) { row.resetFields(on: task) }
+        return next
     }
 
     /// What flipping "Recurring?" does beyond setting the flag, as a pure
     /// function of the current state.
     ///
     /// **Extracted out of the `Toggle`'s own `set:` closure so it can be
-    /// tested at all.** Sabotaging this body in place — removing the
-    /// shelf auto-select, the eligibility reset, and the toggle-off
-    /// preview clear — passed all 518 tests, because nothing could reach
-    /// logic living inside a view closure. Gutting
-    /// `makeForDirectCapture`'s recurring default in the same run failed
-    /// ~43. The difference was reachability, not importance.
+    /// tested at all.** Sabotaging this body in place passed all 518
+    /// tests before the extraction; the same sabotage now fails.
     ///
-    /// Behavior here is verbatim what the closure did before the
-    /// extraction, including two asymmetries worth not "tidying":
-    /// turning the toggle *on* seeds eligible schedules but turning it
-    /// *off* does not reset them, and turning it off only clears the
-    /// preview when the *preview* was the Recurring shelf — not when the
-    /// task's own shelf is.
+    /// Asymmetry deliberately retained: toggling off clears the preview
+    /// only when the *preview* is the Recurring shelf, not when the
+    /// task's own shelf is. `isRecurring` is stored, so unlike derived
+    /// 2-minute-ness it can't snap back on, and forcing a shelf choice
+    /// here would be a change nothing asked for.
     static func applyRecurringToggle(
         _ isOn: Bool, task: TaskItem, shelves: [Shelf], preview: ShelfPreview
     ) -> ShelfPreview {
-        guard isOn else {
-            task.isRecurring = false
-            // Drop the auto-preview so the card goes back to reading
-            // `task.shelf`'s own settings (or whatever the user had
-            // actually tapped) instead of staying stuck on the Recurring
-            // Tasks shelf's.
-            return preview.isRecurringShelf ? .none : preview
+        applyTogglePreservingOnlyVisibleRows(task: task, preview: preview) {
+            guard isOn else {
+                task.setRecurring(false)
+                guard preview.isRecurringShelf else { return preview }
+                let next = ShelfPreview.none
+                seedEligibleSchedules(task: task, from: next.resolved(for: task))
+                return next
+            }
+            // Start Date is the anchor here — see `TaskItem.makeRecurring`
+            // for why the flag and anchor are set together. `setRecurring`
+            // additionally keeps the 2-Minute exclusion.
+            task.setRecurring(true)
+            guard let recurringShelf = shelves.first(where: { $0.isRecurringTasks }) else { return preview }
+            seedEligibleSchedules(task: task, from: recurringShelf)
+            return .shelf(recurringShelf)
         }
-        // Start Date is the anchor here — no separate date question
-        // inside `recurringSection`. Left unset (Not Selected) if Start
-        // Date was never touched; `makeRecurring()` no longer auto-fills
-        // it, so it has to be set explicitly before the task actually
-        // places on the calendar. See `TaskItem.makeRecurring`'s own doc
-        // comment for why `isRecurring` and the anchor fields are set
-        // together rather than `isRecurring` alone.
-        task.makeRecurring()
-        // The Recurring Tasks shelf is the only valid move target once
-        // this is on (see `eligibleShelvesForMove`) — preview it right
-        // away so every other shelf-gated question reflects *that*
-        // shelf's settings immediately, same as tapping its icon would.
-        guard let recurringShelf = shelves.first(where: { $0.isRecurringTasks }) else { return preview }
-        task.includedSchedulingRuleIDs = (recurringShelf.schedulingRules ?? []).filter(\.isEnabled).map(\.id)
-        return .shelf(recurringShelf)
+    }
+
+    /// The 2-Minute counterpart. 2-minute-ness is shelf membership, so
+    /// this toggle *is* a shelf move — which is why turning it off needs
+    /// somewhere to go, and says so rather than guessing.
+    static func applyTwoMinuteToggle(
+        _ isOn: Bool, task: TaskItem, shelves: [Shelf], preview: ShelfPreview
+    ) -> ShelfPreview {
+        applyTogglePreservingOnlyVisibleRows(task: task, preview: preview) {
+            guard isOn else {
+                // Falling back to the task's own shelf would resolve to
+                // the 2-Minute shelf again and flip this straight back
+                // on, so that case has to ask for a destination. A task
+                // merely *previewing* the shelf just reverts.
+                let next: ShelfPreview = task.shelf?.isTwoMinuteTasks == true ? .cleared : .none
+                seedEligibleSchedules(task: task, from: next.resolved(for: task))
+                return next
+            }
+            guard let twoMinuteShelf = shelves.first(where: { $0.isTwoMinuteTasks }) else { return preview }
+            // Recurring loses here: the action just taken wins (see
+            // `TaskItem.repairSpecialShelfExclusivity` on why that's the
+            // sequential reading).
+            task.isRecurring = false
+            seedEligibleSchedules(task: task, from: twoMinuteShelf)
+            return .shelf(twoMinuteShelf)
+        }
     }
 
     init(
@@ -3429,7 +3498,7 @@ struct TaskReviewCard: View {
     @ViewBuilder
     private var startsRow: some View {
         CollapsibleAnswerRow(
-            label: "Starts",
+            label: "Can Start By",
             summary: startsSummaryText,
             isNotSelected: !task.startDatePicked,
             isExpanded: isStartsExpanded,
@@ -3705,15 +3774,29 @@ struct TaskReviewCard: View {
             VStack(alignment: .leading, spacing: 10) {
             Divider()
 
-            Toggle("Recurring?", isOn: Binding(
-                get: { task.isRecurring },
-                set: { newValue in
-                    shelfPreview = Self.applyRecurringToggle(
-                        newValue, task: task, shelves: shelves, preview: shelfPreview
-                    )
-                }
-            ))
-            .animation(.easeInOut(duration: 0.15), value: task.isRecurring)
+            if CardRow.recurringToggle.visibility(task: task, shelf: previewedShelf) != .hidden {
+                Toggle("Recurring?", isOn: Binding(
+                    get: { task.isRecurring },
+                    set: { newValue in
+                        shelfPreview = Self.applyRecurringToggle(
+                            newValue, task: task, shelves: shelves, preview: shelfPreview
+                        )
+                    }
+                ))
+                .animation(.easeInOut(duration: 0.15), value: task.isRecurring)
+            }
+
+            if CardRow.twoMinuteToggle.visibility(task: task, shelf: previewedShelf) != .hidden {
+                Toggle("2 Minutes or Less?", isOn: Binding(
+                    get: { previewedShelf?.isTwoMinuteTasks == true },
+                    set: { newValue in
+                        shelfPreview = Self.applyTwoMinuteToggle(
+                            newValue, task: task, shelves: shelves, preview: shelfPreview
+                        )
+                    }
+                ))
+                .animation(.easeInOut(duration: 0.15), value: previewedShelf?.isTwoMinuteTasks)
+            }
 
             if task.isRecurring {
                 recurringSection
@@ -3854,7 +3937,12 @@ struct TaskReviewCard: View {
             // see the `.onChange`s below, which keep this scrolled into
             // view as you type so the pre-populating suggestion chips
             // don't end up hidden below the fold or the keyboard.
-            VStack(alignment: .leading, spacing: 10) {
+            // Hidden outright for a recurring or 2-Minute task — see
+            // `CardRow.tags`. A real conditional rather than zero-height
+            // styling, so the row leaves the hierarchy and takes its
+            // stack spacing with it.
+            if CardRow.tags.visibility(task: task, shelf: previewedShelf) != .hidden {
+                        VStack(alignment: .leading, spacing: 10) {
                 if !task.tags.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack {
@@ -3908,6 +3996,7 @@ struct TaskReviewCard: View {
                 }
             }
             .id("tagSection")
+            }
 
             Divider()
             shelfRow
@@ -4268,7 +4357,18 @@ struct TaskReviewCard: View {
         // one — so previewing a shelf that (say) doesn't track Next Step
         // drops it from "Remaining Attributes" immediately, matching the
         // section fading/disappearing on the card above.
-        let missing = task.missingAttributeNames(consideringShelf: previewedShelf)
+        var missing = task.missingAttributeNames(consideringShelf: previewedShelf)
+        // Turning 2-Minute off on a task that lives on that shelf leaves
+        // it with nowhere to go — committing as-is would silently keep it
+        // there and flip the toggle back on next open. Surfaced as a
+        // remaining attribute so the card asks rather than guesses.
+        //
+        // View-level only, deliberately not in
+        // `TaskItem.missingAttributeNames`: it's a transient state of
+        // *this editing session*, not a property of the task, and putting
+        // it in the model would leak into the Nightly Review gate and the
+        // Inbox filter for a task that is perfectly well-formed on disk.
+        if shelfPreview.needsShelfChoice { missing.append("Shelf") }
         let isComplete = missing.isEmpty
         let isMoving = shelfPreview.explicitShelf != nil && shelfPreview.explicitShelf?.id != task.shelf?.id
         let remainingText = "Remaining Attributes: \(missing.joined(separator: ", "))"

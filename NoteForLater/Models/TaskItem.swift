@@ -907,6 +907,58 @@ final class TaskItem {
         dueDatePicked = true
     }
 
+    /// The invariant: **a recurring task must not sit on the 2-Minute
+    /// Tasks shelf.** Since 2-minute-ness *is* shelf membership (there's
+    /// no stored flag for it — see the stage-3 decision), that one
+    /// sentence is the whole of "the two toggles are mutually exclusive."
+    /// A task has exactly one shelf, so nothing else can produce both.
+    ///
+    /// Enforced here rather than in the toggles' closures so a route, a
+    /// move, or a direct capture can't sidestep it.
+    ///
+    /// **"Recurring wins" applies to the genuinely simultaneous case**,
+    /// not the sequential one. When the two arrive together — this repair
+    /// pass, or a capture onto a shelf that somehow implies both —
+    /// recurring survives and the 2-minute side gives way. When the user
+    /// does one *then* the other, the later action wins: explicitly
+    /// choosing the 2-Minute shelf shouldn't be silently undone by a flag
+    /// set earlier, and explicitly turning on Recurring shouldn't be
+    /// undone by the shelf you were already on. Both of those go through
+    /// `setRecurring`/`assignShelf` below, which is where that reading
+    /// lives.
+    static func repairSpecialShelfExclusivity(_ task: TaskItem) {
+        guard task.isRecurring, task.shelf?.isTwoMinuteTasks == true else { return }
+        // Recurring wins: the task leaves the 2-Minute shelf rather than
+        // losing its recurrence. Deliberately not auto-filed onto the
+        // Recurring Tasks shelf — that's a placement decision, and an
+        // unsorted task is a real, visible state the user can resolve,
+        // whereas a silent re-file is not.
+        task.shelf = nil
+    }
+
+    /// Sets `isRecurring`, keeping the exclusivity invariant. Turning it
+    /// on moves the task off the 2-Minute shelf (the action just taken
+    /// wins); turning it off leaves the shelf alone.
+    ///
+    /// Routes through `makeRecurring()` so the flag and the recurrence
+    /// anchor are still set together — see that method's own doc comment.
+    func setRecurring(_ isOn: Bool, calendar: Calendar = .current) {
+        guard isOn else {
+            isRecurring = false
+            return
+        }
+        makeRecurring(calendar: calendar)
+        if shelf?.isTwoMinuteTasks == true { shelf = nil }
+    }
+
+    /// Assigns a shelf, keeping the exclusivity invariant. Moving onto
+    /// the 2-Minute shelf clears `isRecurring` — again, the action just
+    /// taken wins.
+    func assignShelf(_ newShelf: Shelf?) {
+        shelf = newShelf
+        if newShelf?.isTwoMinuteTasks == true { isRecurring = false }
+    }
+
     /// Builds a new task for direct capture straight onto `shelf` — what
     /// `ShelfListView`'s own capture bar (`addTask()`) uses. Defaults
     /// `isRecurring` on via `makeRecurring()` when `shelf` is the
@@ -948,7 +1000,7 @@ final class TaskItem {
     static func makeForDirectCapture(title: String, shelf: Shelf) -> TaskItem {
         let task = TaskItem(title: title, shelf: shelf)
         if shelf.isRecurringTasks {
-            task.makeRecurring()
+            task.setRecurring(true)
         }
         if shelf.isTwoMinuteTasks, shelf.effectiveTracksDuration {
             task.estimatedMinutes = 2
