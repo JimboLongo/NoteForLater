@@ -116,6 +116,15 @@ final class Shelf {
     /// forced off unconditionally, regardless of `tracksDuration`'s stored
     /// value, so nothing added to it can end up with a duration even from
     /// stale state (e.g. a Kitchen shelf created before this field existed).
+    ///
+    /// Deliberately **not** forced off for `isTwoMinuteTasks`: a 2-Minute
+    /// task keeps Duration, defaulted to "≤2 min" at creation
+    /// (`TaskItem.makeForDirectCapture`) but still visible and editable —
+    /// unlike Priority (see `effectiveTracksPriority`), there's a real
+    /// case for jotting an actual duration here even though the scheduler
+    /// never acts on it. Divisible is hidden for a 2-Minute task too, but
+    /// by duration rather than by shelf — see
+    /// `TaskItem.divisibleMinimumDurationMinutes`.
     var effectiveTracksDuration: Bool { !isKitchen && tracksDuration }
 
     /// Whether due dates are actually tracked here — same Kitchen override
@@ -125,8 +134,18 @@ final class Shelf {
     /// Whether Next Step is actually tracked here — same Kitchen override.
     var effectiveTracksNextStep: Bool { !isKitchen && hasNextStep }
 
-    /// Whether Priority is actually tracked here — same Kitchen override.
-    var effectiveTracksPriority: Bool { !isKitchen && hasPriority }
+    /// Whether Priority is actually tracked here — same Kitchen override,
+    /// plus 2-Minute Tasks: `AISchedulingService` never ranks or places
+    /// one of this shelf's tasks, so High Priority has nothing to
+    /// influence there, same reasoning already applied to a recurring
+    /// task (see `TaskItem.priorityMissing`'s own `!isRecurring`
+    /// short-circuit) — just expressed at the shelf level here since
+    /// 2-Minute-ness is a shelf property, not a task one. Unlike
+    /// Duration (see `effectiveTracksDuration`'s own doc comment), there
+    /// isn't a comparable case for ranking a 2-Minute task against others
+    /// that never compete for calendar time in the first place, so this
+    /// one stays excluded rather than kept-and-defaulted.
+    var effectiveTracksPriority: Bool { !isKitchen && !isTwoMinuteTasks && hasPriority }
 
     /// Whether "Remind Me In" is actually tracked here — same Kitchen
     /// override.

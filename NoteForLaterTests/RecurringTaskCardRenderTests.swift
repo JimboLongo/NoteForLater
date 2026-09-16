@@ -68,10 +68,9 @@ final class RecurringTaskCardRenderTests: XCTestCase {
         task.dueDateDecided = true
         task.dueDate = Calendar.current.date(from: DateComponents(year: 2026, month: 9, day: 17))
         task.dueDatePicked = true
-        task.durationDecided = true
-        task.durationAnsweredYes = true
+        task.durationPicked = true
         task.estimatedMinutes = 135
-        task.isDivisibleDecided = true
+        task.divisiblePicked = true
         task.isDivisible = true
         task.minimumSegmentMinutes = TaskItem.validSegmentOptions(for: 135).first ?? 0
         task.priority = .high

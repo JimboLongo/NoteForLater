@@ -57,6 +57,7 @@ struct NoteForLaterApp: App {
         Self.repairDrainedRemainingMinutesIfNeeded(container: sharedModelContainer)
         Self.processPushedRecurringOccurrencesIfNeeded(container: sharedModelContainer)
         Self.migrateIncompleteBlocksAndMealsToThreeStateIfNeeded(container: sharedModelContainer)
+        Self.migrateDurationDivisibleToSingleWheelIfNeeded(container: sharedModelContainer)
     }
 
     /// Runs once per calendar day, not once ever — unlike the one-time
@@ -260,6 +261,69 @@ struct NoteForLaterApp: App {
             // silently leaving every existing record's status at the
             // schema default. Safe to retry — see this function's own
             // doc comment on idempotence.
+        }
+    }
+
+    /// One-time reconciliation for Duration/Divisible collapsing from a
+    /// Yes/No-pills-plus-wheel pair into a single wheel. Each question's
+    /// two old flags became one `...Picked` flag (see
+    /// `TaskItem.durationPicked`), and the *rename* already did most of
+    /// the work: `durationDecided`'s column is now `durationPicked`, and
+    /// `isDivisibleDecided`'s is now `divisiblePicked`, so three of each
+    /// question's four old states carry over correct with no write at
+    /// all. This fixes only the fourth.
+    ///
+    /// The four old Duration states and where each must land — the
+    /// requirement being that **none silently reclassify**:
+    /// - `decided=false` → never answered → `picked=false`, still
+    ///   missing. Correct already via the rename.
+    /// - `decided=true, yes=true, mins>0` → a real duration → stays
+    ///   `picked=true` with its value. Correct already.
+    /// - `decided=true, yes=false` → *deliberately* no duration, with
+    ///   `estimatedMinutes` already forced to `0` by the old "No" branch
+    ///   → `picked=true` + `0` now reads as the wheel's "None" option,
+    ///   which is exactly the same meaning. Correct already.
+    /// - `decided=true, yes=true, mins==0` → said Yes, never picked a
+    ///   value; **reported missing under the old model** → must become
+    ///   `picked=false` so it stays missing. **This is the only case
+    ///   needing a write**, and the only one `estimatedMinutes` alone
+    ///   can't identify (it shares `0` with the deliberately-None case
+    ///   above) — which is precisely why `legacyDurationAnsweredYes`
+    ///   survives the rename rather than being deleted outright.
+    ///
+    /// Divisible is the same four cases with `isDivisible` standing in
+    /// for `answeredYes`. Since `isDivisible` is a *kept* field rather
+    /// than a retired one, no `legacy...` companion is needed for it.
+    ///
+    /// Gate and idempotence work exactly as
+    /// `migrateIncompleteBlocksAndMealsToThreeStateIfNeeded`'s do — a
+    /// `UserDefaults` flag set only *after* `context.save()` succeeds (so
+    /// an interrupted run retries rather than leaving a half-migrated
+    /// store), plus a per-row `TaskItem.hasMigratedSingleWheel` committed
+    /// in that same save, which is what actually makes a second pass a
+    /// no-op regardless of whether the outer flag's write ever landed.
+    static func migrateDurationDivisibleToSingleWheelIfNeeded(container: ModelContainer) {
+        let flagKey = "didMigrateDurationDivisibleToSingleWheel.v1"
+        guard !UserDefaults.standard.bool(forKey: flagKey) else { return }
+
+        let context = ModelContext(container)
+        if let tasks = try? context.fetch(FetchDescriptor<TaskItem>()) {
+            for task in tasks where !task.hasMigratedSingleWheel {
+                if task.durationPicked, task.legacyDurationAnsweredYes, task.estimatedMinutes == 0 {
+                    task.durationPicked = false
+                }
+                if task.divisiblePicked, task.isDivisible, task.minimumSegmentMinutes == 0 {
+                    task.divisiblePicked = false
+                }
+                task.hasMigratedSingleWheel = true
+            }
+        }
+        do {
+            try context.save()
+            UserDefaults.standard.set(true, forKey: flagKey)
+        } catch {
+            // Leave the flag unset so this retries next launch. Safe to
+            // retry — see this function's own doc comment on idempotence.
         }
     }
 
@@ -573,7 +637,10 @@ struct NoteForLaterApp: App {
             )
             task.includedSchedulingRuleIDs = item.includedSchedulingRuleIDs
             task.dueDateDecided = item.dueDateDecided
-            task.durationDecided = item.durationDecided
+            // `InboxItem` is legacy-only (kept solely so a pre-existing
+            // store still opens) and keeps its own original field name —
+            // only the destination renamed. See `TaskItem.durationPicked`.
+            task.durationPicked = item.durationDecided
             context.insert(task)
             context.delete(item)
         }

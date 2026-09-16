@@ -1,4 +1,5 @@
 import XCTest
+import SwiftData
 @testable import NoteForLater
 
 /// Coverage for making Next Step toggleable off (`TaskItem.nextStepDecided`/
@@ -29,8 +30,8 @@ final class TaskAttributeToggleTests: XCTestCase {
         // so this isolates Next Step as the only thing that could still
         // be holding the queue-membership check open.
         task.dueDateDecided = true
-        task.durationDecided = true
-        task.isDivisibleDecided = true
+        task.durationPicked = true
+        task.divisiblePicked = true
         task.priority = .low
         XCTAssertTrue(task.isMissingAttributes, "still missing Next Step at this point")
 
@@ -162,6 +163,154 @@ final class TaskAttributeToggleTests: XCTestCase {
         task.makeRecurring()
 
         XCTAssertNotNil(task.dueDate, "an already-set Start Date must still sync onto dueDate, the actual recurrence anchor")
+    }
+
+    // MARK: - 2-Minute Tasks shelf: Duration kept + defaulted; Divisible/Priority hidden
+
+    /// The parallel default to `isRecurringTasks` — same call site
+    /// (`makeForDirectCapture`), same "picked flag alongside the value"
+    /// shape. Duration stays tracked and visible for this shelf (unlike
+    /// Divisible/Priority, hidden outright below) — there's a real case
+    /// for jotting an actual duration even though nothing schedules
+    /// against it, so it's defaulted rather than removed.
+    func test_taskCreatedOnTwoMinuteShelf_defaultsToTwoMinuteDuration() {
+        let shelf = Shelf(name: "2-Minute Tasks")
+        shelf.isTwoMinuteTasks = true
+
+        let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
+
+        XCTAssertTrue(task.durationPicked)
+        XCTAssertTrue(task.durationPicked)
+        XCTAssertEqual(task.estimatedMinutes, 2)
+        XCTAssertEqual(task.remainingMinutes, 2, "remainingMinutes must be kept in sync too — TaskItem.init already fixed it at 0 before this default runs")
+        XCTAssertFalse(task.missingAttributeNames(consideringShelf: shelf).contains("Duration"))
+    }
+
+    func test_taskCreatedOnOrdinaryShelf_doesNotDefaultToTwoMinuteDuration() {
+        let shelf = Shelf(name: "Errands")
+
+        let task = TaskItem.makeForDirectCapture(title: "Call the office", shelf: shelf)
+
+        XCTAssertFalse(task.durationPicked)
+        XCTAssertEqual(task.estimatedMinutes, 0)
+    }
+
+    /// A default, not a lock — must still be freely changeable from the
+    /// task's own card afterward, same as the recurring default.
+    func test_defaultTwoMinuteDuration_canBeChanged_andSticks() {
+        let shelf = Shelf(name: "2-Minute Tasks")
+        shelf.isTwoMinuteTasks = true
+        let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
+        XCTAssertEqual(task.estimatedMinutes, 2)
+
+        task.estimatedMinutes = 45
+
+        XCTAssertEqual(task.estimatedMinutes, 45)
+    }
+
+    /// Only ever applied at creation — a plain `TaskItem` construction
+    /// followed by a shelf assignment, the shape `InboxViewModel.route`/
+    /// either card's `onMove` handler actually uses, must never pick up
+    /// this default after the fact.
+    func test_movingExistingTaskOntoTwoMinuteShelf_doesNotBackfillDuration() {
+        let shelf = Shelf(name: "2-Minute Tasks")
+        shelf.isTwoMinuteTasks = true
+        let task = TaskItem(title: "Water the plant") // not routed through makeForDirectCapture
+
+        task.shelf = shelf
+
+        XCTAssertFalse(task.durationPicked)
+        XCTAssertEqual(task.estimatedMinutes, 0)
+    }
+
+    /// If the shelf doesn't actually track duration at all, the field is
+    /// disabled/greyed on the card (`TaskReviewCard.durationAllowed`) —
+    /// defaulting a value into it anyway would be dead data behind a
+    /// control the user can't even reach normally.
+    func test_twoMinuteShelfNotTrackingDuration_doesNotDefaultIt() {
+        let shelf = Shelf(name: "2-Minute Tasks")
+        shelf.isTwoMinuteTasks = true
+        shelf.tracksDuration = false
+
+        let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
+
+        XCTAssertFalse(task.durationPicked)
+        XCTAssertEqual(task.estimatedMinutes, 0)
+    }
+
+    /// Fail-then-pass target: a 2-Minute task must report Divisible and
+    /// Priority as not-missing even fully untouched, while Duration still
+    /// gets its real default (asserted separately above) rather than
+    /// being excluded the same way. `Shelf.effectiveTracksDivisible`/
+    /// `.effectiveTracksPriority` exclude `isTwoMinuteTasks`;
+    /// `effectiveTracksDuration` deliberately does not.
+    func test_twoMinuteTask_reportsNeitherDivisibleNorPriority_asMissing() {
+        let shelf = Shelf(name: "2-Minute Tasks")
+        shelf.isTwoMinuteTasks = true
+        let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
+
+        let missing = task.missingAttributeNames(consideringShelf: shelf)
+
+        XCTAssertFalse(missing.contains("Divisible"))
+        XCTAssertFalse(missing.contains("Priority"))
+    }
+
+    /// The other half of the fail-then-pass pair: the exact same
+    /// untouched task, on an ordinary shelf, must still report Divisible
+    /// and Priority as missing — proving the 2-Minute exclusion is scoped
+    /// to that shelf specifically.
+    func test_sameUntouchedTask_onOrdinaryShelf_stillReportsDivisibleAndPriorityAsMissing() {
+        let shelf = Shelf(name: "Errands")
+        // 30, not 10 — Divisible is only a real question when the
+        // duration admits at least one valid segment size (see
+        // `TaskItem.divisibleMissing`'s own short-circuit). 10 minutes
+        // has none, which would make this assert nothing.
+        let task = TaskItem(title: "Water the plant", shelf: shelf, estimatedMinutes: 60)
+        XCTAssertTrue(TaskReviewCard.showsDivisibleRow(task: task), "sanity: 60 minutes shows the Divisible row")
+
+        let missing = task.missingAttributeNames(consideringShelf: shelf)
+
+        XCTAssertTrue(missing.contains("Divisible"))
+        XCTAssertTrue(missing.contains("Priority"))
+    }
+
+    /// A task already carrying real Divisible/Priority answers, moved
+    /// onto the 2-Minute shelf, stops reporting them missing — confirms
+    /// the exclusion reads live off the *current* shelf, not just a
+    /// freshly-created task's starting state. Duration is asserted to
+    /// keep being tracked here too, for contrast.
+    func test_taskWithRealAnswers_movedOntoTwoMinuteShelf_stopsReportingDivisibleAndPriority() {
+        let ordinaryShelf = Shelf(name: "Errands")
+        let task = TaskItem(title: "Water the plant", shelf: ordinaryShelf, estimatedMinutes: 10)
+        task.durationPicked = true
+        task.divisiblePicked = true
+        task.isDivisible = false
+        task.priority = .high
+        let missingBefore = task.missingAttributeNames(consideringShelf: ordinaryShelf)
+        XCTAssertFalse(missingBefore.contains("Divisible"), "sanity check: Divisible answered on the ordinary shelf first")
+        XCTAssertFalse(missingBefore.contains("Priority"), "sanity check: Priority answered on the ordinary shelf first")
+
+        let twoMinuteShelf = Shelf(name: "2-Minute Tasks")
+        twoMinuteShelf.isTwoMinuteTasks = true
+        task.shelf = twoMinuteShelf
+
+        let missing = task.missingAttributeNames(consideringShelf: twoMinuteShelf)
+        XCTAssertFalse(missing.contains("Divisible"))
+        XCTAssertFalse(missing.contains("Priority"))
+        XCTAssertFalse(missing.contains("Duration"), "Duration must still be tracked (and already answered) after the move, unlike Divisible/Priority")
+    }
+
+    /// `initialExpandedRows`' new-task branch must still seed `.time`
+    /// (Duration stays visible) but omit `.priority` for a shelf that
+    /// can't render that row at all.
+    func test_initialExpandedRows_newTwoMinuteTask_keepsDurationOmitsDivisibleAndPriority() {
+        let shelf = Shelf(name: "2-Minute Tasks")
+        shelf.isTwoMinuteTasks = true
+        let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
+
+        let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: shelf, segmentOptions: [], isNewlyCreated: true)
+
+        XCTAssertEqual(rows, [.due, .starts, .duration], "no .divisible — 2 minutes is below the threshold — and no .priority — hidden by shelf")
     }
 
     /// AM/Midday/PM never places a calendar block, so Duration and
@@ -500,5 +649,338 @@ final class TaskAttributeToggleTests: XCTestCase {
         XCTAssertEqual(task.recurrenceMode, .specificDate)
 
         XCTAssertFalse(task.missingAttributeNames(consideringShelf: shelf).contains("Pattern"))
+    }
+
+    // MARK: - Single-wheel Duration/Divisible: picked-flag semantics
+
+    /// Fail-then-pass target: an untouched Duration is missing. `0`
+    /// minutes is no longer what "unanswered" looks like — `durationPicked`
+    /// is — so this is the assertion that would break if the flag were
+    /// dropped in favor of reading the value alone.
+    func test_untouchedDuration_reportsMissing() {
+        let task = TaskItem(title: "Task", estimatedMinutes: 0)
+
+        XCTAssertFalse(task.durationPicked)
+        XCTAssertTrue(task.missingAttributeNames(consideringShelf: nil).contains("Duration"))
+    }
+
+    /// Fail-then-pass target: an untouched Divisible is missing, given a
+    /// duration that actually admits segment sizes.
+    func test_untouchedDivisible_reportsMissing() {
+        let task = TaskItem(title: "Task", estimatedMinutes: 60)
+        TaskItem.selectDuration(60, on: task)
+
+        XCTAssertFalse(task.divisiblePicked)
+        XCTAssertTrue(task.missingAttributeNames(consideringShelf: nil).contains("Divisible"))
+    }
+
+    /// Fail-then-pass target, and the bug class that has recurred
+    /// repeatedly: selecting the value the wheel is *already* showing
+    /// must still count as answering. `selectDuration` writes the flag
+    /// unconditionally rather than diffing the value, which is what makes
+    /// this hold.
+    func test_selectingTheAlreadyShownDuration_stillMarksAnswered() {
+        let task = TaskItem(title: "Task", estimatedMinutes: 30)
+        XCTAssertFalse(task.durationPicked)
+
+        TaskItem.selectDuration(30, on: task) // same value already in estimatedMinutes
+
+        XCTAssertTrue(task.durationPicked)
+        XCTAssertEqual(task.estimatedMinutes, 30, "value unchanged — only the flag flipped")
+        XCTAssertFalse(task.missingAttributeNames(consideringShelf: nil).contains("Duration"))
+    }
+
+    /// Same for Divisible: re-confirming "Not Divisible" (`0`) on a task
+    /// that already reads as not-divisible must still answer it.
+    func test_selectingTheAlreadyShownDivisible_stillMarksAnswered() {
+        let task = TaskItem(title: "Task", estimatedMinutes: 30)
+        TaskItem.selectDuration(30, on: task)
+        XCTAssertFalse(task.divisiblePicked)
+        XCTAssertFalse(task.isDivisible, "already reads as not-divisible before any answer")
+
+        TaskItem.selectDivisibleSegment(0, on: task)
+
+        XCTAssertTrue(task.divisiblePicked)
+        XCTAssertFalse(task.isDivisible)
+        XCTAssertFalse(task.missingAttributeNames(consideringShelf: nil).contains("Divisible"))
+    }
+
+    /// "None" is a real answer, not an absence of one — picked, not
+    /// missing, and still genuinely unschedulable (`fitStatus`
+    /// `.needsDuration`), which is the behavior that makes the option
+    /// worth keeping at all.
+    func test_durationNone_isARealAnswer_butStillUnschedulable() {
+        let task = TaskItem(title: "Task", estimatedMinutes: 30)
+
+        TaskItem.selectDuration(0, on: task)
+
+        XCTAssertTrue(task.durationPicked)
+        XCTAssertEqual(task.estimatedMinutes, 0)
+        XCTAssertFalse(task.missingAttributeNames(consideringShelf: nil).contains("Duration"), "None is answered")
+        XCTAssertEqual(TaskReviewCard.durationOptionLabel(for: 0), "None")
+    }
+
+    func test_durationOptionLabels() {
+        XCTAssertEqual(TaskReviewCard.durationOptionLabel(for: 0), "None")
+        XCTAssertEqual(TaskReviewCard.durationOptionLabel(for: 2), "\u{2264}2 min")
+        XCTAssertEqual(TaskReviewCard.durationOptionLabel(for: 30), TaskItem.durationLabel(for: 30))
+    }
+
+    /// A 2-Minute task's duration admits no segment size, so the wheel
+    /// has only "Not Divisible" to offer.
+    func test_twoMinuteTask_divisibleWheelHasOnlyNotDivisible() {
+        let shelf = Shelf(name: "2-Minute Tasks")
+        shelf.isTwoMinuteTasks = true
+        let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
+
+        XCTAssertEqual(task.estimatedMinutes, 2)
+        XCTAssertFalse(TaskReviewCard.showsDivisibleRow(task: task), "2 minutes is below the threshold — no row at all")
+        XCTAssertFalse(task.divisiblePicked, "and deliberately not pre-answered, so raising the duration reveals \"Not selected\"")
+        XCTAssertFalse(task.missingAttributeNames(consideringShelf: shelf).contains("Divisible"))
+    }
+
+    // MARK: - Migration: old two-flag states must not reclassify
+
+    /// Runs the real migration against a real container. The four old
+    /// Duration states are set up via the *renamed* columns — which is
+    /// exactly what an existing store presents them as after the rename
+    /// — and each must land on the same missing/not-missing verdict it
+    /// had before. **Fail-then-pass target** is the third case: "said Yes
+    /// but never picked a value," which was missing before and must stay
+    /// missing, and is the only one the migration actually writes.
+    func test_migration_allFourDurationStates_doNotReclassify() throws {
+        let container = try ModelContainer(
+            for: TaskItem.self, Shelf.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+
+        // 1: never answered
+        let neverAnswered = TaskItem(title: "never", estimatedMinutes: 0)
+        // 2: a real duration
+        let realDuration = TaskItem(title: "real", estimatedMinutes: 30)
+        realDuration.durationPicked = true
+        // 3: said Yes, never picked a value — missing today, must stay missing
+        let yesNoValue = TaskItem(title: "yes-no-value", estimatedMinutes: 0)
+        yesNoValue.durationPicked = true
+        yesNoValue.legacyDurationAnsweredYes = true
+        // 4: deliberately no duration — NOT missing today, must stay not-missing
+        let deliberatelyNone = TaskItem(title: "none", estimatedMinutes: 0)
+        deliberatelyNone.durationPicked = true
+        deliberatelyNone.legacyDurationAnsweredYes = false
+        for task in [neverAnswered, realDuration, yesNoValue, deliberatelyNone] { context.insert(task) }
+        try context.save()
+
+        let flagKey = "didMigrateDurationDivisibleToSingleWheel.v1"
+        let hadFlag = UserDefaults.standard.object(forKey: flagKey)
+        UserDefaults.standard.removeObject(forKey: flagKey)
+        defer {
+            if let hadFlag { UserDefaults.standard.set(hadFlag, forKey: flagKey) }
+            else { UserDefaults.standard.removeObject(forKey: flagKey) }
+        }
+        NoteForLaterApp.migrateDurationDivisibleToSingleWheelIfNeeded(container: container)
+
+        func reread(_ id: UUID) throws -> TaskItem {
+            try XCTUnwrap(context.fetch(FetchDescriptor<TaskItem>(predicate: #Predicate { $0.id == id })).first)
+        }
+        XCTAssertFalse(try reread(neverAnswered.id).durationPicked, "never answered stays unanswered")
+        XCTAssertTrue(try reread(realDuration.id).durationPicked, "a real duration stays answered")
+        XCTAssertEqual(try reread(realDuration.id).estimatedMinutes, 30, "and keeps its value")
+        XCTAssertFalse(try reread(yesNoValue.id).durationPicked, "said Yes with no value was missing before and must stay missing")
+        XCTAssertTrue(try reread(deliberatelyNone.id).durationPicked, "deliberately-None was answered before and must stay answered")
+        XCTAssertEqual(try reread(deliberatelyNone.id).estimatedMinutes, 0, "reading as the wheel's None option")
+    }
+
+    /// The Divisible half, same four cases with `isDivisible` standing in
+    /// for the retired `answeredYes`.
+    func test_migration_allFourDivisibleStates_doNotReclassify() throws {
+        let container = try ModelContainer(
+            for: TaskItem.self, Shelf.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+
+        let neverAnswered = TaskItem(title: "never", estimatedMinutes: 30)
+        let realSegment = TaskItem(title: "real", estimatedMinutes: 30)
+        realSegment.divisiblePicked = true
+        realSegment.isDivisible = true
+        realSegment.minimumSegmentMinutes = 15
+        let yesNoSegment = TaskItem(title: "yes-no-seg", estimatedMinutes: 30)
+        yesNoSegment.divisiblePicked = true
+        yesNoSegment.isDivisible = true
+        yesNoSegment.minimumSegmentMinutes = 0
+        let deliberatelyNot = TaskItem(title: "not-divisible", estimatedMinutes: 30)
+        deliberatelyNot.divisiblePicked = true
+        deliberatelyNot.isDivisible = false
+        for task in [neverAnswered, realSegment, yesNoSegment, deliberatelyNot] { context.insert(task) }
+        try context.save()
+
+        let flagKey = "didMigrateDurationDivisibleToSingleWheel.v1"
+        let hadFlag = UserDefaults.standard.object(forKey: flagKey)
+        UserDefaults.standard.removeObject(forKey: flagKey)
+        defer {
+            if let hadFlag { UserDefaults.standard.set(hadFlag, forKey: flagKey) }
+            else { UserDefaults.standard.removeObject(forKey: flagKey) }
+        }
+        NoteForLaterApp.migrateDurationDivisibleToSingleWheelIfNeeded(container: container)
+
+        func reread(_ id: UUID) throws -> TaskItem {
+            try XCTUnwrap(context.fetch(FetchDescriptor<TaskItem>(predicate: #Predicate { $0.id == id })).first)
+        }
+        XCTAssertFalse(try reread(neverAnswered.id).divisiblePicked)
+        XCTAssertTrue(try reread(realSegment.id).divisiblePicked)
+        XCTAssertEqual(try reread(realSegment.id).minimumSegmentMinutes, 15)
+        XCTAssertFalse(try reread(yesNoSegment.id).divisiblePicked, "divisible-with-no-segment was missing before and must stay missing")
+        XCTAssertTrue(try reread(deliberatelyNot.id).divisiblePicked, "deliberately Not Divisible was answered before and must stay answered")
+    }
+
+    /// A second pass must be a true no-op even with the outer
+    /// `UserDefaults` flag cleared — the per-row `hasMigratedSingleWheel`
+    /// guard is what carries that, so a real answer made *between* the
+    /// two passes can't be stomped back.
+    func test_migration_runTwice_secondPassIsANoOp() throws {
+        let container = try ModelContainer(
+            for: TaskItem.self, Shelf.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let task = TaskItem(title: "yes-no-value", estimatedMinutes: 0)
+        task.durationPicked = true
+        task.legacyDurationAnsweredYes = true
+        let taskID = task.id
+        context.insert(task)
+        try context.save()
+
+        let flagKey = "didMigrateDurationDivisibleToSingleWheel.v1"
+        let hadFlag = UserDefaults.standard.object(forKey: flagKey)
+        UserDefaults.standard.removeObject(forKey: flagKey)
+        defer {
+            if let hadFlag { UserDefaults.standard.set(hadFlag, forKey: flagKey) }
+            else { UserDefaults.standard.removeObject(forKey: flagKey) }
+        }
+        NoteForLaterApp.migrateDurationDivisibleToSingleWheelIfNeeded(container: container)
+
+        func reread() throws -> TaskItem {
+            try XCTUnwrap(context.fetch(FetchDescriptor<TaskItem>(predicate: #Predicate { $0.id == taskID })).first)
+        }
+        XCTAssertFalse(try reread().durationPicked, "first pass corrects it to unanswered")
+
+        // The user then actually answers it, between the two passes.
+        let answered = try reread()
+        TaskItem.selectDuration(45, on: answered)
+        try context.save()
+
+        UserDefaults.standard.removeObject(forKey: flagKey) // simulate the lost flag write
+        NoteForLaterApp.migrateDurationDivisibleToSingleWheelIfNeeded(container: container)
+
+        XCTAssertTrue(try reread().durationPicked, "a second pass must not stomp an answer made since the first")
+        XCTAssertEqual(try reread().estimatedMinutes, 45)
+    }
+
+    // MARK: - The 60-minute Divisible threshold
+
+    /// Fail-then-pass target on the boundary itself. `>=`, not `>`: 59
+    /// hides the row, 60 shows it. Both sides asserted so flipping the
+    /// comparison in either direction fails.
+    func test_divisibleRow_boundaryAtSixtyMinutes() {
+        let task = TaskItem(title: "T", estimatedMinutes: 0)
+
+        task.estimatedMinutes = 59
+        XCTAssertFalse(TaskReviewCard.showsDivisibleRow(task: task), "59 minutes is below the threshold")
+
+        task.estimatedMinutes = 60
+        XCTAssertTrue(TaskReviewCard.showsDivisibleRow(task: task), "exactly 60 is at the threshold and shows")
+
+        task.estimatedMinutes = 120
+        XCTAssertTrue(TaskReviewCard.showsDivisibleRow(task: task))
+    }
+
+    /// Hidden means not reported missing — at several sub-hour durations,
+    /// including ones that *do* have a valid segment size (30 → [15]), so
+    /// this can't pass just because of the separate empty-options guard.
+    func test_divisibleNotMissing_belowThreshold() {
+        for minutes in [2, 15, 30, 45, 59] {
+            let task = TaskItem(title: "T", estimatedMinutes: minutes)
+            TaskItem.selectDuration(minutes, on: task)
+            XCTAssertFalse(
+                task.missingAttributeNames(consideringShelf: nil).contains("Divisible"),
+                "\(minutes) minutes is below the threshold — Divisible must not be reported missing"
+            )
+        }
+    }
+
+    /// The two guards are independent, not redundant: 70 clears the hour
+    /// bar and still has no evenly-dividing segment size, so it must stay
+    /// hidden and unreported for the *other* reason.
+    func test_divisibleHidden_atOrAboveThresholdButNoValidSegments() {
+        let task = TaskItem(title: "T", estimatedMinutes: 70)
+        TaskItem.selectDuration(70, on: task)
+
+        XCTAssertTrue(task.estimatedMinutes >= TaskItem.divisibleMinimumDurationMinutes, "clears the hour bar")
+        XCTAssertTrue(TaskItem.validSegmentOptions(for: 70).isEmpty, "but nothing divides it")
+        XCTAssertFalse(TaskReviewCard.showsDivisibleRow(task: task))
+        XCTAssertFalse(task.missingAttributeNames(consideringShelf: nil).contains("Divisible"))
+    }
+
+    /// The scheduling half of the threshold: below an hour the packer
+    /// must not split, regardless of stored intent.
+    func test_isEffectivelyDivisible_followsTheThreshold() {
+        let task = TaskItem(title: "T", estimatedMinutes: 120)
+        TaskItem.selectDivisibleSegment(30, on: task)
+        XCTAssertTrue(task.isEffectivelyDivisible)
+
+        TaskItem.selectDuration(30, on: task)
+        XCTAssertTrue(task.isDivisible, "stored intent is retained")
+        XCTAssertFalse(task.isEffectivelyDivisible, "but the packer must not split a sub-hour task")
+    }
+
+    /// End-to-end retention through the real selector, which is what the
+    /// card actually calls: set divisible at 2h, drop to 30 min (row
+    /// gone, not missing, not splittable), raise back — the segment size
+    /// is still there, unchanged.
+    func test_divisibleValue_survivesADipBelowTheThreshold() {
+        let task = TaskItem(title: "T", estimatedMinutes: 120)
+        TaskItem.selectDuration(120, on: task)
+        TaskItem.selectDivisibleSegment(30, on: task)
+
+        TaskItem.selectDuration(30, on: task)
+        XCTAssertFalse(TaskReviewCard.showsDivisibleRow(task: task))
+        XCTAssertFalse(task.missingAttributeNames(consideringShelf: nil).contains("Divisible"))
+        XCTAssertEqual(task.minimumSegmentMinutes, 30, "retained while dormant")
+
+        TaskItem.selectDuration(120, on: task)
+        XCTAssertTrue(TaskReviewCard.showsDivisibleRow(task: task))
+        XCTAssertEqual(task.minimumSegmentMinutes, 30, "restored unchanged on raising the duration")
+        XCTAssertEqual(TaskReviewCard.divisibleSummaryText(task: task), "30 min")
+    }
+
+    /// Visibility is dynamic, not decided at creation — the row appears
+    /// and disappears as the Duration wheel moves.
+    func test_divisibleVisibility_updatesImmediatelyWithDuration() {
+        let task = TaskItem(title: "T", estimatedMinutes: 0)
+        TaskItem.selectDuration(30, on: task)
+        XCTAssertFalse(TaskReviewCard.showsDivisibleRow(task: task))
+
+        TaskItem.selectDuration(60, on: task)
+        XCTAssertTrue(TaskReviewCard.showsDivisibleRow(task: task))
+
+        TaskItem.selectDuration(15, on: task)
+        XCTAssertFalse(TaskReviewCard.showsDivisibleRow(task: task))
+    }
+
+    /// The 2-Minute shelf case end to end: no Divisible at creation, and
+    /// raising the duration to an hour reveals it genuinely unanswered
+    /// rather than pre-filled.
+    func test_twoMinuteTask_raisedToAnHour_revealsDivisibleAsNotSelected() {
+        let shelf = Shelf(name: "2-Minute Tasks")
+        shelf.isTwoMinuteTasks = true
+        let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
+        XCTAssertFalse(TaskReviewCard.showsDivisibleRow(task: task))
+
+        TaskItem.selectDuration(60, on: task)
+
+        XCTAssertTrue(TaskReviewCard.showsDivisibleRow(task: task))
+        XCTAssertEqual(TaskReviewCard.divisibleSummaryText(task: task), "Not selected")
+        XCTAssertTrue(task.missingAttributeNames(consideringShelf: shelf).contains("Divisible"))
     }
 }

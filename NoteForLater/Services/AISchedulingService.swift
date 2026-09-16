@@ -470,7 +470,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
                 let budget = rule.maxTotalMinutes - totalMinutesUsed
                 if baseMinutes <= budget {
                     minutesNeeded = baseMinutes
-                } else if task.isDivisible {
+                } else if task.isEffectivelyDivisible {
                     minutesNeeded = budget
                 } else {
                     continue // doesn't fit the remaining budget and can't be split
@@ -478,7 +478,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             case .maxTaskCount:
                 if baseMinutes <= rule.maxMinutesPerTask {
                     minutesNeeded = baseMinutes
-                } else if task.isDivisible {
+                } else if task.isEffectivelyDivisible {
                     minutesNeeded = rule.maxMinutesPerTask
                 } else {
                     continue // too long for a single capped session and can't be split
@@ -486,7 +486,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             }
             // A divisible task with no minimum segment chosen yet ("Not
             // Selected") can't be split safely — treat it as not ready.
-            guard !task.isDivisible || task.minimumSegmentMinutes > 0 else { continue }
+            guard !task.isEffectivelyDivisible || task.minimumSegmentMinutes > 0 else { continue }
             // The two branches above can set `minutesNeeded` to a rule's
             // leftover budget or per-task cap — arbitrary numbers with no
             // relationship to this task's segment size. Asking for such an
@@ -501,7 +501,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             // for exactly that reason: the fast path bypasses the loop, so
             // a fix confined to the loop would not have addressed the
             // reported case.
-            if task.isDivisible {
+            if task.isEffectivelyDivisible {
                 minutesNeeded = (minutesNeeded / task.minimumSegmentMinutes) * task.minimumSegmentMinutes
             }
             guard minutesNeeded > 0 else { continue }
@@ -515,12 +515,12 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
             // actually set — a 2-hour-minimum task getting split into
             // 15-minute slivers because that's all a "≤15 min each" rule
             // ever offers.
-            guard !task.isDivisible || minutesNeeded >= task.minimumSegmentMinutes else { continue }
+            guard !task.isEffectivelyDivisible || minutesNeeded >= task.minimumSegmentMinutes else { continue }
 
             guard let placement = place(
                 minutesNeeded: minutesNeeded,
                 minimumSegment: task.minimumSegmentMinutes,
-                isDivisible: task.isDivisible,
+                isDivisible: task.isEffectivelyDivisible,
                 in: slots
             ) else { continue }
 
@@ -681,7 +681,7 @@ final class MockAISchedulingService: AISchedulingServiceProtocol {
         if lhs.remainingMinutes != rhs.remainingMinutes {
             return lhs.remainingMinutes > rhs.remainingMinutes
         }
-        return !lhs.isDivisible && rhs.isDivisible
+        return !lhs.isEffectivelyDivisible && rhs.isEffectivelyDivisible
     }
 
     static func priorityRank(_ priority: Priority) -> Int {

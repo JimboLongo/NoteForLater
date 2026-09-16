@@ -1989,23 +1989,51 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertEqual(TaskItem.validSegmentOptions(for: 0), [])
     }
 
+    /// Durations here are all at or above
+    /// `TaskItem.divisibleMinimumDurationMinutes` — below it
+    /// `validateDivisibility` returns early by design, leaving the value
+    /// dormant rather than correcting it (see
+    /// `test_validateDivisibility_belowThreshold_leavesValueIntact`), so
+    /// a sub-hour fixture would be testing the early return rather than
+    /// the snapping this covers.
     func test_validateDivisibility_snapsDownToLargestValidDivisor() {
         let shelf = Shelf(name: "Test Shelf")
-        let task = TaskItem(title: "T", shelf: shelf, estimatedMinutes: 60, isDivisible: true, minimumSegmentMinutes: 30)
-        // 45 has only 15 as a divisor, so a 30-minute segment is invalid.
-        task.estimatedMinutes = 45
+        let task = TaskItem(title: "T", shelf: shelf, estimatedMinutes: 120, isDivisible: true, minimumSegmentMinutes: 60)
+        // 90 divides into 15/30/45, so a 60-minute segment is invalid.
+        task.estimatedMinutes = 90
         XCTAssertTrue(task.validateDivisibility())
-        XCTAssertEqual(task.minimumSegmentMinutes, 15, "must snap DOWN, never up to a coarser chunk than chosen")
+        XCTAssertEqual(task.minimumSegmentMinutes, 45, "must snap DOWN, never up to a coarser chunk than chosen")
         XCTAssertTrue(task.isDivisible)
     }
 
     func test_validateDivisibility_clearsDivisibilityWhenNoDivisorExists() {
         let shelf = Shelf(name: "Test Shelf")
-        let task = TaskItem(title: "T", shelf: shelf, estimatedMinutes: 60, isDivisible: true, minimumSegmentMinutes: 30)
-        task.estimatedMinutes = 25
+        let task = TaskItem(title: "T", shelf: shelf, estimatedMinutes: 120, isDivisible: true, minimumSegmentMinutes: 30)
+        // 70 clears the one-hour bar but no offered segment divides it.
+        task.estimatedMinutes = 70
         XCTAssertTrue(task.validateDivisibility())
-        XCTAssertFalse(task.isDivisible, "25 minutes can't be split evenly by any offered segment")
+        XCTAssertFalse(task.isDivisible, "70 minutes can't be split evenly by any offered segment")
         XCTAssertEqual(task.minimumSegmentMinutes, 0)
+    }
+
+    /// The retention half of the threshold: dipping below an hour must
+    /// leave the stored divisible value untouched, so raising the
+    /// duration again restores exactly what was there. Without the early
+    /// return this would hit the `options.isEmpty` branch above and clear
+    /// it permanently.
+    func test_validateDivisibility_belowThreshold_leavesValueIntact() {
+        let shelf = Shelf(name: "Test Shelf")
+        let task = TaskItem(title: "T", shelf: shelf, estimatedMinutes: 60, isDivisible: true, minimumSegmentMinutes: 15)
+
+        task.estimatedMinutes = 2
+        XCTAssertFalse(task.validateDivisibility(), "nothing to correct while dormant")
+        XCTAssertTrue(task.isDivisible, "stored intent survives the dip")
+        XCTAssertEqual(task.minimumSegmentMinutes, 15)
+        XCTAssertFalse(task.isEffectivelyDivisible, "but nothing acts on it down here")
+
+        task.estimatedMinutes = 60
+        XCTAssertTrue(task.isEffectivelyDivisible, "and it comes back on raising the duration")
+        XCTAssertEqual(task.minimumSegmentMinutes, 15)
     }
 
     func test_validateDivisibility_nonDivisibleAlwaysClearsSegment() {

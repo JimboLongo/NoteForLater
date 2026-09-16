@@ -70,45 +70,63 @@ final class NonRecurringTaskCardLayoutTests: XCTestCase {
         let task = makeTask()
 
         XCTAssertFalse(TaskReviewCard.isDurationConfigured(task: task, shelf: nil))
-        XCTAssertEqual(TaskReviewCard.nonRecurringTimeSummaryText(task: task), "Not selected")
+        XCTAssertEqual(TaskReviewCard.durationSummaryText(task: task), "Not selected")
     }
 
     func test_nonRecurringTimeDecidedNo_readsNone_andDoesNotReportMissing() {
         let task = makeTask()
-        task.durationDecided = true
-        task.durationAnsweredYes = false
+        task.durationPicked = true
         task.estimatedMinutes = 0
 
         XCTAssertTrue(TaskReviewCard.isDurationConfigured(task: task, shelf: nil))
-        XCTAssertEqual(TaskReviewCard.nonRecurringTimeSummaryText(task: task), "None")
+        XCTAssertEqual(TaskReviewCard.durationSummaryText(task: task), "None")
         XCTAssertFalse(task.missingAttributeNames(consideringShelf: nil).contains("Duration"))
     }
 
     func test_nonRecurringTimeDecidedYes_readsDurationLabel() {
         let task = makeTask()
-        task.durationDecided = true
-        task.durationAnsweredYes = true
+        task.durationPicked = true
         task.estimatedMinutes = 30
         // 30 minutes is splittable (into 15s) — Divisible genuinely needs
         // its own answer here, same as the recurring row's own "Time" row.
-        task.isDivisibleDecided = true
+        task.divisiblePicked = true
         task.isDivisible = false
 
         XCTAssertTrue(TaskReviewCard.isDurationConfigured(task: task, shelf: nil))
-        XCTAssertEqual(TaskReviewCard.nonRecurringTimeSummaryText(task: task), "30 min")
+        XCTAssertEqual(TaskReviewCard.durationSummaryText(task: task), "30 min")
     }
 
-    func test_nonRecurringTimeUnconfigured_whenDivisibleAnsweredYesButSegmentNotPicked() {
+    /// Replaces a test for the old "Divisible answered Yes but no segment
+    /// size picked yet" state, which the single-wheel redesign made
+    /// unreachable: `TaskItem.selectDivisibleSegment` is now the only way
+    /// to answer, and it derives `isDivisible` from the segment value
+    /// (`minutes > 0`), so "divisible with no segment" can't be produced.
+    /// What remains worth asserting is the live half of that case — a
+    /// splittable duration whose Divisible question hasn't been touched
+    /// at all is still unconfigured and still reported missing.
+    func test_divisibleUnconfigured_whenAtOrAboveThresholdButUntouched() {
         let task = makeTask()
-        task.durationDecided = true
-        task.durationAnsweredYes = true
-        task.estimatedMinutes = 30
-        task.isDivisibleDecided = true
-        task.isDivisible = true
-        task.minimumSegmentMinutes = 0
+        task.durationPicked = true
+        task.estimatedMinutes = 60
+        XCTAssertTrue(TaskReviewCard.showsDivisibleRow(task: task), "sanity: 60 minutes shows the Divisible row")
 
-        XCTAssertFalse(TaskReviewCard.isDurationConfigured(task: task, shelf: nil))
+        XCTAssertTrue(TaskReviewCard.isDurationConfigured(task: task, shelf: nil), "Duration is its own row now and is answered")
+        XCTAssertFalse(TaskReviewCard.isDivisibleConfigured(task: task, shelf: nil))
         XCTAssertTrue(task.missingAttributeNames(consideringShelf: nil).contains("Divisible"))
+    }
+
+    /// The counterpart short-circuit: a duration with no valid segment
+    /// size at all leaves the wheel with "Not Divisible" as its only
+    /// option, so Divisible isn't a real question and must not be flagged
+    /// — even completely untouched.
+    func test_divisibleNotMissing_whenDurationHasNoValidSegments() {
+        let task = makeTask()
+        task.durationPicked = true
+        task.estimatedMinutes = 70
+        XCTAssertTrue(TaskItem.validSegmentOptions(for: 70).isEmpty, "sanity: 70 clears the hour bar but has no valid segment size")
+
+        XCTAssertFalse(task.missingAttributeNames(consideringShelf: nil).contains("Divisible"))
+        XCTAssertTrue(TaskReviewCard.isDurationConfigured(task: task, shelf: nil))
     }
 
     // MARK: - "Priority" row: a value row, not a Yes/No pair
@@ -165,10 +183,9 @@ final class NonRecurringTaskCardLayoutTests: XCTestCase {
         task.dueDate = Calendar.current.date(from: DateComponents(year: 2026, month: 9, day: 17))
         task.dueDatePicked = true
         task.priority = .high
-        task.durationDecided = true
-        task.durationAnsweredYes = true
+        task.durationPicked = true
         task.estimatedMinutes = 30
-        task.isDivisibleDecided = true
+        task.divisiblePicked = true
         task.isDivisible = true
         task.minimumSegmentMinutes = 15
         task.startDate = Calendar.current.startOfDay(for: .now)
@@ -182,10 +199,10 @@ final class NonRecurringTaskCardLayoutTests: XCTestCase {
         task.dueDate = nil
         task.dueDatePicked = false
         task.priority = .unset
-        task.durationDecided = false
-        task.durationAnsweredYes = false
+        task.durationPicked = false
+        task.durationPicked = true
         task.estimatedMinutes = 0
-        task.isDivisibleDecided = false
+        task.divisiblePicked = false
         task.isDivisible = false
         task.minimumSegmentMinutes = 0
         task.startDate = nil
@@ -197,13 +214,127 @@ final class NonRecurringTaskCardLayoutTests: XCTestCase {
         XCTAssertEqual(task.dueDate, Calendar.current.date(from: DateComponents(year: 2026, month: 9, day: 17)))
         XCTAssertTrue(task.dueDatePicked)
         XCTAssertEqual(task.priority, .high)
-        XCTAssertTrue(task.durationDecided)
-        XCTAssertTrue(task.durationAnsweredYes)
+        XCTAssertTrue(task.durationPicked)
+        XCTAssertTrue(task.durationPicked)
         XCTAssertEqual(task.estimatedMinutes, 30)
-        XCTAssertTrue(task.isDivisibleDecided)
+        XCTAssertTrue(task.divisiblePicked)
         XCTAssertTrue(task.isDivisible)
         XCTAssertEqual(task.minimumSegmentMinutes, 15)
         XCTAssertEqual(task.startDate, Calendar.current.startOfDay(for: .now))
         XCTAssertTrue(task.startDatePicked)
+    }
+
+    // MARK: - Auto-collapse: initialExpandedRow (non-recurring)
+
+    func test_initialExpandedRow_nonRecurring_freshTask_seedsDue() {
+        let task = makeTask()
+
+        XCTAssertEqual(TaskReviewCard.initialExpandedRow(task: task, shelf: nil, segmentOptions: []), .due)
+    }
+
+    /// Due answered as a real "No" (decided-as-none, not just absent) —
+    /// must be treated as fully answered and skipped past. Lands on
+    /// `.time`, not `.starts`: `startDateMissing` is `isRecurring &&
+    /// !startDatePicked` — Start Date is never actually a gate for a
+    /// non-recurring task at all, so `.starts` is always pre-configured
+    /// and never itself the seed here.
+    func test_initialExpandedRow_nonRecurring_dueAnsweredNo_seedsDuration() {
+        let task = makeTask()
+        task.dueDateDecided = true
+        task.dueDate = nil
+
+        XCTAssertEqual(TaskReviewCard.initialExpandedRow(task: task, shelf: nil, segmentOptions: []), .duration)
+    }
+
+    func test_initialExpandedRow_nonRecurring_everythingAnswered_seedsNil() {
+        let task = makeTask()
+        task.dueDateDecided = true
+        task.dueDate = nil
+        task.startDatePicked = true
+        task.durationPicked = true
+        task.priority = .low
+
+        XCTAssertNil(TaskReviewCard.initialExpandedRow(task: task, shelf: nil, segmentOptions: []))
+    }
+
+    // MARK: - Auto-collapse: Priority is a single-control row, collapses on either answer
+
+    func test_priorityUnconfigured_thenConfiguredEitherWay() {
+        let task = makeTask()
+        XCTAssertFalse(TaskReviewCard.isPriorityConfigured(task: task, shelf: nil))
+
+        task.priority = .low
+        XCTAssertTrue(TaskReviewCard.isPriorityConfigured(task: task, shelf: nil), "'No' (low) is just as complete an answer as 'Yes' (high) — nothing further to pick either way")
+
+        task.priority = .unset
+        task.priority = .high
+        XCTAssertTrue(TaskReviewCard.isPriorityConfigured(task: task, shelf: nil))
+    }
+
+    // MARK: - Auto-collapse: Due "No" is a complete, terminal answer
+
+    /// "No" needs no calendar tap to follow it (unlike "Yes") — proving
+    /// it alone satisfies `isDueConfigured`, which is what lets it
+    /// self-collapse the row without waiting on any further control.
+    func test_dueAnsweredNo_isFullyConfigured_noFurtherPickNeeded() {
+        let task = makeTask()
+        task.dueDateDecided = true
+        task.dueDate = nil
+        task.dueDatePicked = false
+
+        XCTAssertTrue(TaskReviewCard.isDueConfigured(task: task, shelf: nil))
+    }
+
+    // MARK: - Auto-collapse: initialExpandedRows — new vs. existing task
+
+    /// A brand-new non-recurring task opens with every row expanded at
+    /// once, regardless of anything already answered.
+    func test_initialExpandedRows_nonRecurring_newTask_seedsEveryRow_evenIfSomeAlreadyAnswered() {
+        let task = makeTask()
+        task.priority = .high // already answered — must not shrink the seeded set
+
+        let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: nil, segmentOptions: [], isNewlyCreated: true)
+
+        XCTAssertEqual(rows, [.due, .starts, .duration, .priority])
+    }
+
+    /// A reopened, fully-configured non-recurring task opens fully
+    /// collapsed.
+    func test_initialExpandedRows_nonRecurring_existingTask_fullyConfigured_seedsNothing() {
+        let task = makeTask()
+        task.dueDateDecided = true
+        task.dueDate = nil
+        task.durationPicked = true
+        task.priority = .low
+
+        let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: nil, segmentOptions: [], isNewlyCreated: false)
+
+        XCTAssertTrue(rows.isEmpty)
+    }
+
+    /// A reopened task with exactly one field left unanswered opens with
+    /// only that field expanded.
+    func test_initialExpandedRows_nonRecurring_existingTask_oneUnanswered_seedsOnlyThatRow() {
+        let task = makeTask()
+        task.dueDateDecided = true
+        task.dueDate = nil
+        task.durationPicked = true
+        // Priority left unanswered.
+
+        let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: nil, segmentOptions: [], isNewlyCreated: false)
+
+        XCTAssertEqual(rows, [.priority])
+    }
+
+    /// Filling in Priority on a new task would collapse only that row —
+    /// same mechanism as the recurring-card equivalent test.
+    func test_fillingPriorityOnNewTask_wouldCollapseOnlyPriority() {
+        let task = makeTask()
+        let seeded = TaskReviewCard.initialExpandedRows(task: task, shelf: nil, segmentOptions: [], isNewlyCreated: true)
+        XCTAssertEqual(seeded, [.due, .starts, .duration, .priority])
+
+        task.priority = .high
+
+        XCTAssertTrue(TaskReviewCard.isPriorityConfigured(task: task, shelf: nil), "this is the condition the Priority toggle's self-collapse checks before removing just .priority from expandedRows")
     }
 }

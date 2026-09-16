@@ -1949,30 +1949,78 @@ struct TaskReviewCard: View {
     /// native `DatePicker`.
     @State private var isShowingRecurrenceTimeOfDayPopover = false
     @State private var snoozeDays = 1
-    /// Whether each collapsed recurring-task row (`recurringSection`) is
-    /// showing its real controls — everything starts collapsed each time
-    /// the card opens (session-local, never persisted; recurring tasks
-    /// are configured once and read many times, so the default view
-    /// should be the compact summary, not the editing controls), except
-    /// a row is seeded open if it's unconfigured — see `init`'s own
-    /// comment for why that check has to happen there, not here.
-    @State private var isRepeatsExpanded: Bool
-    @State private var isStartsExpanded: Bool
-    @State private var isTimeExpanded: Bool
-    /// `recurrenceEndDate == nil` ("Never") is a real, fully-decided
-    /// state, not an unconfigured one — unlike the other three rows,
-    /// "Ends" never auto-expands, so this always starts `false`.
-    @State private var isEndsExpanded = false
-    /// Same collapsed-answer-row treatment, for the non-recurring card's
-    /// own "Due" and "Priority" rows — see `init`'s seeding and
-    /// `isDueConfigured`/`isPriorityConfigured`.
-    @State private var isDueExpanded: Bool
-    @State private var isPriorityExpanded: Bool
+    /// One of the six collapsible rows across both card modes — `.starts`
+    /// and `.time` are shared between them (the same row/summary either
+    /// way, see `startsRow`'s and `timeExpandedContent`'s own doc
+    /// comments), `.repeats`/`.ends` are recurring-only, `.due`/`.priority`
+    /// are non-recurring-only. Never both at once for one task, so one
+    /// shared enum rather than two mode-specific ones. `internal`, not
+    /// `private` — `initialExpandedRow` returns this and is itself
+    /// `internal` for direct testability (same reasoning as
+    /// `isRepeatsConfigured`), so this can't be more restrictive.
+    enum ExpandableRow {
+        case repeats, starts, time, duration, divisible, ends, due, priority
+    }
+    /// Which rows are currently expanded — a brand-new, never-saved task
+    /// (`isNewlyCreated`) seeds *every* row at once, the card working like
+    /// a form you collapse behind you as you go; a reopened, already-saved
+    /// task seeds at most one (`initialExpandedRow` — whatever's still
+    /// unanswered, `nil`/empty once everything is). See
+    /// `initialExpandedRows`. Session-local, never persisted.
+    ///
+    /// Two different operations touch this set, deliberately kept
+    /// distinct: answering a row removes just that row
+    /// (`expandedRows.remove(.x)`, at each self-collapse call site below)
+    /// — the other still-open rows on a fresh task are untouched, which
+    /// is what makes filling one field in collapse only that field.
+    /// Explicitly tapping a row's own header to *open* it (the six
+    /// `Binding`s just below) instead resets the whole set to that one
+    /// row — "opening a row collapses whichever was open before" — so
+    /// deliberately jumping ahead still behaves like the single-row
+    /// accordion a reopened task already has, even mid-fill-in on a new
+    /// one.
+    ///
+    /// Holds no reference to `task` at all — nothing about expanding,
+    /// collapsing, or switching rows can write or clear a model field;
+    /// every actual field write happens in the `selectXxx`/`onSelect`
+    /// functions that separately, additionally, mutate this.
+    @State private var expandedRows: Set<ExpandableRow> = []
     /// Captured once this card's edits settle in after appearing (past any
     /// one-time backfill), so the action button can tell "nothing's been
     /// touched" (Skip) apart from "something's actually been edited" (Save
     /// Changes) — see `hasChanges` and `actionButtonInfo`.
     @State private var originalSnapshot: TaskEditSnapshot?
+
+    /// One `Binding` per row, each a plain view onto `expandedRows` —
+    /// `CollapsibleAnswerRow` still takes a `Binding<Bool>`, unchanged.
+    /// The `set` here is only ever reached via that row's own header tap
+    /// (`CollapsibleAnswerRow`'s `Button` does `isExpanded.toggle()`) —
+    /// self-collapse-on-answer bypasses this entirely and edits
+    /// `expandedRows` directly, which is what keeps "opening a row
+    /// collapses the others" from also firing every time a row answers
+    /// itself. Opening (`true`) resets to just this row, matching that
+    /// accordion rule; closing (`false`) only ever removes this one row,
+    /// same as self-collapse does.
+    private func expandedBinding(for row: ExpandableRow) -> Binding<Bool> {
+        Binding(
+            get: { expandedRows.contains(row) },
+            set: { isExpanding in
+                if isExpanding {
+                    expandedRows = [row]
+                } else {
+                    expandedRows.remove(row)
+                }
+            }
+        )
+    }
+    private var isRepeatsExpanded: Binding<Bool> { expandedBinding(for: .repeats) }
+    private var isStartsExpanded: Binding<Bool> { expandedBinding(for: .starts) }
+    private var isTimeExpanded: Binding<Bool> { expandedBinding(for: .time) }
+    private var isEndsExpanded: Binding<Bool> { expandedBinding(for: .ends) }
+    private var isDueExpanded: Binding<Bool> { expandedBinding(for: .due) }
+    private var isPriorityExpanded: Binding<Bool> { expandedBinding(for: .priority) }
+    private var isDurationExpanded: Binding<Bool> { expandedBinding(for: .duration) }
+    private var isDivisibleExpanded: Binding<Bool> { expandedBinding(for: .divisible) }
 
     private enum Field: Hashable {
         case title, nextStep, tag
@@ -2055,13 +2103,12 @@ struct TaskReviewCard: View {
     /// the Divisible row even appears at all, see `recurringSection`),
     /// since both moved inside this row's expanded content instead of
     /// standing as their own peers.
+    /// Mode (and, for Specific Time, the clock) only. Duration and
+    /// Divisible used to fold into this row and no longer do — they're
+    /// their own top-level rows, each with its own configured-check, so
+    /// asking about them here would double-report them.
     static func isTimeConfigured(task: TaskItem, shelf: Shelf?, segmentOptions: [Int]) -> Bool {
-        let missing = task.missingAttributeNames(consideringShelf: shelf)
-        if missing.contains("Time") { return false }
-        guard task.recurrenceTimeMode == .specific else { return true }
-        if missing.contains("Duration") { return false }
-        if !segmentOptions.isEmpty, missing.contains("Divisible") { return false }
-        return true
+        !task.missingAttributeNames(consideringShelf: shelf).contains("Time")
     }
 
     /// Same reasoning as `isRepeatsConfigured`. `TaskItem.dueDateMissing`
@@ -2099,11 +2146,30 @@ struct TaskReviewCard: View {
     /// duration — Divisible genuinely needs an answer then, same as the
     /// recurring row.
     static func isDurationConfigured(task: TaskItem, shelf: Shelf?) -> Bool {
-        let missing = task.missingAttributeNames(consideringShelf: shelf)
-        if missing.contains("Duration") { return false }
-        let segmentOptions = TaskItem.validSegmentOptions(for: task.estimatedMinutes)
-        if !segmentOptions.isEmpty, missing.contains("Divisible") { return false }
-        return true
+        !task.missingAttributeNames(consideringShelf: shelf).contains("Duration")
+    }
+
+    /// Divisible's own configured-check, now that it's a row rather than
+    /// part of the Duration/"Time" row. Delegates entirely to
+    /// `missingAttributeNames`, which already carries both reasons the
+    /// question can be moot — a duration under
+    /// `TaskItem.divisibleMinimumDurationMinutes`, and a duration with no
+    /// evenly-dividing segment size — so this can't drift from what the
+    /// missing badge says.
+    static func isDivisibleConfigured(task: TaskItem, shelf: Shelf?) -> Bool {
+        !task.missingAttributeNames(consideringShelf: shelf).contains("Divisible")
+    }
+
+    /// Whether the Divisible row is shown at all. Hidden below
+    /// `TaskItem.divisibleMinimumDurationMinutes` — splitting something
+    /// shorter than an hour isn't worth the fragmentation — and hidden
+    /// again when nothing evenly divides the duration (70 minutes clears
+    /// the hour bar and still has no valid segment size). The same two
+    /// conditions `TaskItem.divisibleMissing` short-circuits on, so the
+    /// row and the missing badge agree by construction.
+    static func showsDivisibleRow(task: TaskItem) -> Bool {
+        task.estimatedMinutes >= TaskItem.divisibleMinimumDurationMinutes
+            && !TaskItem.validSegmentOptions(for: task.estimatedMinutes).isEmpty
     }
 
     /// Same reasoning as `isRepeatsConfigured`. `TaskItem.priorityMissing`
@@ -2112,6 +2178,77 @@ struct TaskReviewCard: View {
     /// for a non-recurring task on a shelf that tracks Priority.
     static func isPriorityConfigured(task: TaskItem, shelf: Shelf?) -> Bool {
         !task.missingAttributeNames(consideringShelf: shelf).contains("Priority")
+    }
+
+    /// Which row to seed as the *sole* expanded one for a reopened,
+    /// already-saved task — the first unconfigured row, in the same
+    /// top-to-bottom order each mode actually renders them, so the row
+    /// that opens is always the first thing the eye would hit scrolling
+    /// down anyway. `nil` once every row is already configured (the card
+    /// opens fully collapsed) — that's not a special case, just what
+    /// falling off the end of the list without a match means. Only ever
+    /// used for the "existing task" branch of `initialExpandedRows` — a
+    /// newly-created task doesn't call this at all, it seeds every row at
+    /// once instead.
+    ///
+    /// `.ends` is deliberately never a candidate here — "Never" is
+    /// already a complete answer with nothing to hunt for, so it has no
+    /// "unconfigured" state to seed from in the first place. `internal`,
+    /// not `private`, for the same direct-testability reasoning as
+    /// `isRepeatsConfigured`.
+    static func initialExpandedRow(task: TaskItem, shelf: Shelf?, segmentOptions: [Int]) -> ExpandableRow? {
+        if task.isRecurring {
+            if !isRepeatsConfigured(task: task, shelf: shelf) { return .repeats }
+            if !isStartsConfigured(task: task, shelf: shelf) { return .starts }
+            if !isTimeConfigured(task: task, shelf: shelf, segmentOptions: segmentOptions) { return .time }
+            if !isDurationConfigured(task: task, shelf: shelf) { return .duration }
+            if showsDivisibleRow(task: task), !isDivisibleConfigured(task: task, shelf: shelf) { return .divisible }
+        } else {
+            if !isDueConfigured(task: task, shelf: shelf) { return .due }
+            if !isStartsConfigured(task: task, shelf: shelf) { return .starts }
+            if !isDurationConfigured(task: task, shelf: shelf) { return .duration }
+            if showsDivisibleRow(task: task), !isDivisibleConfigured(task: task, shelf: shelf) { return .divisible }
+            if !isPriorityConfigured(task: task, shelf: shelf) { return .priority }
+        }
+        return nil
+    }
+
+    /// What actually seeds `expandedRows` in `init` — the "never saved
+    /// before" split. `isNewlyCreated` is the same flag `TaskCardSheet
+    /// .cancel` already uses to decide delete-outright vs. roll-back (see
+    /// its own doc comment for why a caller-supplied flag, not a model
+    /// field, is the right shape for "never saved" at all) — reused here
+    /// rather than inventing a second way to ask the same question.
+    ///
+    /// A brand-new task seeds *every* row for its mode at once — "the
+    /// card is a form to work down," not just whatever happens to be
+    /// unanswered — `.ends` included, even though `initialExpandedRow`
+    /// never returns it on its own (a fresh task's "Never" default is
+    /// still a question worth seeing, not a row to mysteriously
+    /// pre-collapse while its three siblings are open). A reopened task
+    /// falls back to `initialExpandedRow` unchanged — at most one row,
+    /// whatever's still unanswered, matching the behavior that already
+    /// shipped before this split existed.
+    static func initialExpandedRows(task: TaskItem, shelf: Shelf?, segmentOptions: [Int], isNewlyCreated: Bool) -> Set<ExpandableRow> {
+        if isNewlyCreated {
+            if task.isRecurring {
+                var rows: Set<ExpandableRow> = [.repeats, .starts, .time, .duration, .ends]
+                if showsDivisibleRow(task: task) { rows.insert(.divisible) }
+                return rows
+            }
+            // "Time" (Duration) is never hidden for any shelf — always
+            // seeded. Priority is hidden outright for a shelf that
+            // doesn't track it (2-Minute Tasks) — seeding it anyway would
+            // be harmless (an expanded-but-never-rendered row is simply
+            // never read by anything), but there's no reason to seed a
+            // row that can't appear.
+            var rows: Set<ExpandableRow> = [.due, .starts, .duration]
+            if showsDivisibleRow(task: task) { rows.insert(.divisible) }
+            if shelf?.effectiveTracksPriority ?? true { rows.insert(.priority) }
+            return rows
+        }
+        guard let row = initialExpandedRow(task: task, shelf: shelf, segmentOptions: segmentOptions) else { return [] }
+        return [row]
     }
 
     // MARK: - Repeats section: select-and-mark-picked, one function per field
@@ -2264,7 +2401,13 @@ struct TaskReviewCard: View {
         onMove: @escaping (Shelf) -> Void,
         onNext: @escaping () -> Void,
         onSnooze: ((Int?) -> Void)? = nil,
-        entersFromLeft: Bool = false
+        entersFromLeft: Bool = false,
+        // Same flag `TaskCardSheet.cancel` already reads — see
+        // `initialExpandedRows`'s own doc comment. Defaulted so
+        // `TaskReviewQueueSheet`'s call site (no newly-created-task
+        // concept at all — every queued task already exists) needs no
+        // change.
+        isNewlyCreated: Bool = false
     ) {
         self.task = task
         self.shelves = shelves
@@ -2281,20 +2424,11 @@ struct TaskReviewCard: View {
         // and nothing's been previewed before the card has even
         // appeared, so `task.shelf` is exactly what `previewedShelf`
         // would evaluate to here anyway.
-        _isRepeatsExpanded = State(initialValue: !Self.isRepeatsConfigured(task: task, shelf: task.shelf))
-        _isStartsExpanded = State(initialValue: !Self.isStartsConfigured(task: task, shelf: task.shelf))
-        // "Time" means two different questions depending on `isRecurring`
-        // (see `isTimeConfigured` vs. `isDurationConfigured`'s own doc
-        // comments) — same shared row, same shared `@State`, since the
-        // two flavors are mutually exclusive for any one task.
-        _isTimeExpanded = State(initialValue: task.isRecurring
-            ? !Self.isTimeConfigured(
-                task: task, shelf: task.shelf, segmentOptions: TaskItem.validSegmentOptions(for: task.estimatedMinutes)
-            )
-            : !Self.isDurationConfigured(task: task, shelf: task.shelf)
-        )
-        _isDueExpanded = State(initialValue: !Self.isDueConfigured(task: task, shelf: task.shelf))
-        _isPriorityExpanded = State(initialValue: !Self.isPriorityConfigured(task: task, shelf: task.shelf))
+        _expandedRows = State(initialValue: Self.initialExpandedRows(
+            task: task, shelf: task.shelf,
+            segmentOptions: TaskItem.validSegmentOptions(for: task.estimatedMinutes),
+            isNewlyCreated: isNewlyCreated
+        ))
     }
 
     /// nil until "Has due date" is actually answered either way — see
@@ -2312,6 +2446,11 @@ struct TaskReviewCard: View {
                     task.dueDateDecided = true
                     task.dueDate = nil
                     task.dueDatePicked = false
+                    // "No" is a complete, terminal answer — nothing
+                    // further to pick (unlike "Yes," which only reveals
+                    // the calendar; that branch's own real terminal
+                    // moment is the calendar tap in `dueExpandedContent`).
+                    if isDueConfigured { expandedRows.remove(.due) }
                 case .none:
                     task.dueDateDecided = false
                     task.dueDate = nil
@@ -2413,17 +2552,14 @@ struct TaskReviewCard: View {
             if task.dueDateDecided, task.dueDate != nil, !task.dueDatePicked {
                 task.dueDatePicked = true
             }
-            // Same idea for tasks with a real duration already set before
-            // `durationAnsweredYes` existed — otherwise it'd read as "No"
-            // (dropdown hidden) despite having an actual duration.
-            if task.durationDecided, task.estimatedMinutes > 0, !task.durationAnsweredYes {
-                task.durationAnsweredYes = true
-            }
-            // Same idea for tasks already marked divisible with a real
-            // minimum segment before `isDivisibleDecided` existed.
-            if task.isDivisible, task.minimumSegmentMinutes > 0, !task.isDivisibleDecided {
-                task.isDivisibleDecided = true
-            }
+            // The Duration and Divisible backfills that used to sit here
+            // are gone: both patched up pre-`...AnsweredYes`/`...Decided`
+            // rows, and both questions have since collapsed to a single
+            // wheel whose one flag is reconciled at launch instead — see
+            // `NoteForLaterApp.migrateDurationDivisibleToSingleWheelIfNeeded`.
+            // Leaving them here would have meant two mechanisms writing
+            // the same flags on different schedules.
+            //
             // Same idea for tasks that already had real next-step text
             // typed before `nextStepDecided` existed — otherwise every
             // one of them would suddenly read as unanswered (and
@@ -2574,103 +2710,64 @@ struct TaskReviewCard: View {
         Self.isPriorityConfigured(task: task, shelf: previewedShelf)
     }
 
-    /// The Duration Yes/No + wheel — extracted out of `cardScrollBody` so
-    /// it's reusable both by the non-recurring card's own "Time" row
-    /// (Duration + Divisible, folded together the same way the recurring
-    /// card's "Time" row folds them in alongside the clock) and embedded
-    /// directly inside a recurring task's "Time" row (`recurringSection`)
-    /// once Duration folded into it as a qualifier rather than a peer
-    /// section. Identical content, identical interaction, in every
-    /// place — no behavior change from before the extraction.
+    private var isDivisibleConfigured: Bool {
+        Self.isDivisibleConfigured(task: task, shelf: previewedShelf)
+    }
+
+    private var showsDivisibleRow: Bool {
+        durationAllowed && Self.showsDivisibleRow(task: task)
+    }
+
+    /// Duration as a single wheel — no Yes/No question in front of it
+    /// anymore. Extracted out of `cardScrollBody` so it's reusable both
+    /// by the non-recurring card's own "Time" row and embedded directly
+    /// inside a recurring task's "Time" row (`recurringSection`).
+    ///
+    /// `0` is a real, selectable option ("None"), meaning *don't schedule
+    /// this* — see `SchedulingRule.fitStatus`'s `.needsDuration`. What
+    /// distinguishes it from "never answered" is `task.durationPicked`,
+    /// not the value.
+    ///
+    /// **The sentinel is what makes an untouched wheel answerable.**
+    /// `Picker(selection:)` only fires on a genuine value change, so a
+    /// wheel already sitting on the value you want can never mark itself
+    /// answered — the exact bug this codebase has hit repeatedly (see
+    /// `PickedMenuPicker`'s own doc comment for the `Menu` equivalent).
+    /// Prepending `durationNotSelectedTag` while `!durationPicked` means
+    /// the displayed value is never a valid answer, so *every* selection
+    /// is a real change: scrolling to any option, "None" included, fires
+    /// and marks it picked. Once picked, the sentinel drops out of the
+    /// list and can't be returned to.
     @ViewBuilder
     private var durationControl: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // Forced to "No" (and disabled below) whenever the
-            // previewed/actual shelf doesn't track duration — the
-            // real stored answer is untouched so it comes back if
-            // the shelf preview is cancelled.
-            let isYesSelected = durationAllowed && task.durationDecided && task.durationAnsweredYes
-            let isNoSelected = !durationAllowed || (task.durationDecided && !task.durationAnsweredYes)
-
-            HStack(spacing: 8) {
-                Text("Duration")
-
-                Spacer()
-
-                Button {
-                    focusedField = nil
-                    if isYesSelected {
-                        // Untapping Yes clears back to unanswered
-                        // and resets the picker to Not Selected.
-                        task.durationDecided = false
-                        task.durationAnsweredYes = false
-                        task.estimatedMinutes = 0
-                    } else {
-                        task.durationDecided = true
-                        task.durationAnsweredYes = true
-                        // The wheel needs a value actually in its own
-                        // range to show a real selection instead of
-                        // landing on nothing.
-                        if task.estimatedMinutes <= 0 {
-                            task.estimatedMinutes = 2
-                        }
-                    }
-                } label: {
-                    Text("Yes")
+            // No inline "Duration" label — the `CollapsibleAnswerRow`
+            // header this now sits inside supplies both the label and the
+            // current value, so repeating it here would double it up.
+            Picker("Duration", selection: durationWheelSelection) {
+                if !task.durationPicked {
+                    Text("Not selected")
                         .font(.subheadline.weight(.semibold))
-                        .frame(minWidth: 48)
-                        .padding(.vertical, 9)
-                        .background(isYesSelected ? Color.accentColor : Color.secondary.opacity(0.15))
-                        .foregroundStyle(isYesSelected ? Color.white : Color.primary)
-                        .clipShape(Capsule())
+                        .tag(Self.durationNotSelectedTag)
                 }
-                .buttonStyle(.plain)
-
-                Button {
-                    focusedField = nil
-                    if isNoSelected {
-                        task.durationDecided = false
-                    } else {
-                        task.durationDecided = true
-                        task.durationAnsweredYes = false
-                        task.estimatedMinutes = 0
-                    }
-                } label: {
-                    Text("No")
+                ForEach(durationWheelOptions, id: \.self) { minutes in
+                    Text(Self.durationOptionLabel(for: minutes))
                         .font(.subheadline.weight(.semibold))
-                        .frame(minWidth: 48)
-                        .padding(.vertical, 9)
-                        .background(isNoSelected ? Color.accentColor : Color.secondary.opacity(0.15))
-                        .foregroundStyle(isNoSelected ? Color.white : Color.primary)
-                        .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
-
-                if isYesSelected {
-                    Picker("Duration", selection: $task.estimatedMinutes) {
-                        ForEach(durationWheelOptions, id: \.self) { minutes in
-                            Text(minutes == 2 ? "≤2 min" : TaskItem.durationLabel(for: minutes))
-                                .font(.subheadline.weight(.semibold))
-                                .tag(minutes)
-                        }
-                    }
-                    .pickerStyle(.wheel)
-                    .labelsHidden()
-                    .frame(width: 110, height: 40)
-                    .clipped()
-                    .onChange(of: task.estimatedMinutes) { _, _ in
-                        task.durationDecided = true
-                        task.syncScheduledBlockDuration()
-                    }
+                        .tag(minutes)
                 }
             }
+            .pickerStyle(.wheel)
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+            .frame(height: 100)
+            .clipped()
 
             // `estimatedMinutes` itself never changes from a partial
             // placement (see `TaskItem.remainingMinutes`) — this is
             // the one place that surfaces the difference, rather than
             // the duration silently reading as the task's full size
             // while some of it is actually still sitting unplaced.
-            if isYesSelected, task.remainingMinutes < task.estimatedMinutes {
+            if task.durationPicked, task.estimatedMinutes > 0, task.remainingMinutes < task.estimatedMinutes {
                 Text("\(TaskItem.durationLabel(for: task.estimatedMinutes - task.remainingMinutes)) of \(TaskItem.durationLabel(for: task.estimatedMinutes)) scheduled")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -2679,119 +2776,99 @@ struct TaskReviewCard: View {
         .padding(.top, 4)
         .disabled(!durationAllowed)
         .opacity(durationAllowed ? 1 : 0.4)
-        .animation(.easeInOut(duration: 0.15), value: task.durationDecided)
+        .animation(.easeInOut(duration: 0.15), value: task.durationPicked)
         .animation(.easeInOut(duration: 0.15), value: durationAllowed)
     }
 
-    /// Same extraction as `durationControl`, for Divisible. In the
-    /// recurring "Time" row, the caller wraps this in its own
-    /// `estimatedMinutes > 0 && !segmentOptions.isEmpty` condition so the
-    /// row doesn't appear at all when there's nothing splittable yet
-    /// (requirement: "Divisible only appears when a duration is set and
-    /// long enough to split") — here, for a non-recurring task, it stays
-    /// unconditionally visible (disabled + explained instead), unchanged
-    /// from before the extraction.
+    /// The out-of-range value the "Not selected" row carries while
+    /// `!durationPicked`/`!divisiblePicked`. Negative so it can never
+    /// collide with a real minutes value (`0` is "None"/"Not Divisible",
+    /// a genuine answer).
+    static let durationNotSelectedTag = -1
+
+    /// "None" for `0`, "≤2 min" for the 2-minute floor, otherwise
+    /// `TaskItem.durationLabel`. `internal` for direct testability, same
+    /// reasoning as `isRepeatsConfigured`.
+    static func durationOptionLabel(for minutes: Int) -> String {
+        if minutes <= 0 { return "None" }
+        if minutes == 2 { return "≤2 min" }
+        return TaskItem.durationLabel(for: minutes)
+    }
+
+    /// Routes every wheel change through `TaskItem.selectDuration`, so
+    /// the value and `durationPicked` are always written together. The
+    /// sentinel is never written back — it only ever appears as the
+    /// *current* selection of an unpicked wheel, and selecting it isn't
+    /// possible once it's dropped from the list.
+    private var durationWheelSelection: Binding<Int> {
+        Binding(
+            get: { task.durationPicked ? task.estimatedMinutes : Self.durationNotSelectedTag },
+            set: { newValue in
+                guard newValue != Self.durationNotSelectedTag else { return }
+                focusedField = nil
+                // Deliberately no self-collapse: a wheel is scrolled,
+                // not tapped once, so the first tick isn't a finished
+                // answer. Same rule the Divisible wheel and the
+                // Specific-Time clock already follow.
+                TaskItem.selectDuration(newValue, on: task)
+            }
+        )
+    }
+
+    /// Divisible as a single wheel, same shape and same sentinel
+    /// reasoning as `durationControl` — `0` is "Not Divisible," a real
+    /// answer rather than an absence of one.
+    ///
+    /// Whether this row appears at all is the caller's decision now
+    /// (`showsDivisibleRow` — a duration of at least
+    /// `TaskItem.divisibleMinimumDurationMinutes` that something evenly
+    /// divides), so by the time this renders there's always at least one
+    /// real segment size to offer besides "Not Divisible".
     @ViewBuilder
     private var divisibleControl: some View {
         VStack(alignment: .leading, spacing: 6) {
-            let isDivisibleYesSelected = durationAllowed && task.isDivisibleDecided && task.isDivisible
-            let isDivisibleNoSelected = !durationAllowed || (task.isDivisibleDecided && !task.isDivisible)
-
-            HStack(spacing: 8) {
-                Text("Divisible")
-
-                Spacer()
-
-                Button {
-                    focusedField = nil
-                    if isDivisibleYesSelected {
-                        // Untapping Yes clears back to unanswered
-                        // and resets the picker to Not Selected.
-                        task.isDivisibleDecided = false
-                        task.isDivisible = false
-                        task.minimumSegmentMinutes = 0
-                    } else {
-                        task.isDivisibleDecided = true
-                        task.isDivisible = true
-                        // Same reasoning as the Duration wheel above —
-                        // needs a value actually in its own range, and
-                        // now also one that evenly divides the task's
-                        // duration (see `validSegmentOptions(for:)`).
-                        if !segmentOptions.contains(task.minimumSegmentMinutes) {
-                            task.minimumSegmentMinutes = segmentOptions.first ?? 0
-                        }
-                    }
-                } label: {
-                    Text("Yes")
+            Picker("Divisible", selection: divisibleWheelSelection) {
+                if !task.divisiblePicked {
+                    Text("Not selected")
                         .font(.subheadline.weight(.semibold))
-                        .frame(minWidth: 48)
-                        .padding(.vertical, 9)
-                        .background(isDivisibleYesSelected ? Color.accentColor : Color.secondary.opacity(0.15))
-                        .foregroundStyle(isDivisibleYesSelected ? Color.white : Color.primary)
-                        .clipShape(Capsule())
+                        .tag(Self.durationNotSelectedTag)
                 }
-                .buttonStyle(.plain)
-                .disabled(segmentOptions.isEmpty)
-                .opacity(segmentOptions.isEmpty ? 0.4 : 1)
-
-                Button {
-                    focusedField = nil
-                    if isDivisibleNoSelected {
-                        task.isDivisibleDecided = false
-                    } else {
-                        task.isDivisibleDecided = true
-                        task.isDivisible = false
-                        task.minimumSegmentMinutes = 0
-                    }
-                } label: {
-                    Text("No")
+                Text("Not Divisible")
+                    .font(.subheadline.weight(.semibold))
+                    .tag(0)
+                ForEach(segmentOptions, id: \.self) { minutes in
+                    Text(TaskItem.durationLabel(for: minutes))
                         .font(.subheadline.weight(.semibold))
-                        .frame(minWidth: 48)
-                        .padding(.vertical, 9)
-                        .background(isDivisibleNoSelected ? Color.accentColor : Color.secondary.opacity(0.15))
-                        .foregroundStyle(isDivisibleNoSelected ? Color.white : Color.primary)
-                        .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
-
-                if isDivisibleYesSelected, !segmentOptions.isEmpty {
-                    Picker("Minimum Segment", selection: $task.minimumSegmentMinutes) {
-                        ForEach(segmentOptions, id: \.self) { minutes in
-                            Text(TaskItem.durationLabel(for: minutes))
-                                .font(.subheadline.weight(.semibold))
-                                .tag(minutes)
-                        }
-                    }
-                    .pickerStyle(.wheel)
-                    .labelsHidden()
-                    .frame(width: 110, height: 40)
-                    .clipped()
+                        .tag(minutes)
                 }
             }
-            if segmentOptions.isEmpty, task.estimatedMinutes > 0 {
-                // Stated rather than left as a toggle that silently
-                // refuses to turn on — a disabled control with no
-                // reason reads as broken.
-                Text("A \(TaskItem.durationLabel(for: task.estimatedMinutes)) task can't be split into even segments.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
+            .pickerStyle(.wheel)
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+            .frame(height: 100)
+            .clipped()
         }
         .padding(.top, 4)
-        .onChange(of: task.estimatedMinutes) {
-            // Duration edits can invalidate a segment size chosen
-            // earlier, including clearing divisibility entirely when
-            // the new duration has no divisor at all. Re-validating
-            // here (not only on save) means the controls above show
-            // that consequence at the moment it happens, rather than
-            // the user discovering it later.
-            task.validateDivisibility()
-        }
         .disabled(!durationAllowed)
         .opacity(durationAllowed ? 1 : 0.4)
-        .animation(.easeInOut(duration: 0.15), value: task.isDivisibleDecided)
+        .animation(.easeInOut(duration: 0.15), value: task.divisiblePicked)
         .animation(.easeInOut(duration: 0.15), value: durationAllowed)
     }
+
+    /// Same pairing discipline as `durationWheelSelection`, routed
+    /// through `TaskItem.selectDivisibleSegment` so `isDivisible` and
+    /// `minimumSegmentMinutes` can never disagree.
+    private var divisibleWheelSelection: Binding<Int> {
+        Binding(
+            get: { task.divisiblePicked ? task.minimumSegmentMinutes : Self.durationNotSelectedTag },
+            set: { newValue in
+                guard newValue != Self.durationNotSelectedTag else { return }
+                focusedField = nil
+                TaskItem.selectDivisibleSegment(newValue, on: task)
+            }
+        )
+    }
+
 
     /// Same idea as `dueDatesAllowed`, for the Next Step field.
     private var nextStepAllowed: Bool {
@@ -2833,6 +2910,9 @@ struct TaskReviewCard: View {
                 case .some(false): task.priority = .low
                 case .none: task.priority = .unset
                 }
+                // Terminal either way — no coupled control either
+                // answer could still leave mid-adjustment.
+                if isPriorityConfigured { expandedRows.remove(.priority) }
             }
         )
     }
@@ -2960,7 +3040,7 @@ struct TaskReviewCard: View {
             return task.recurrenceTimeMode.label
         case .specific:
             let timeText = Self.formattedTime(minutesSinceMidnight: recurrenceTimeMinutesBinding.wrappedValue)
-            guard task.durationDecided, task.durationAnsweredYes, task.estimatedMinutes > 0 else { return timeText }
+            guard task.durationPicked, task.estimatedMinutes > 0 else { return timeText }
             return "\(timeText) · \(TaskItem.durationLabel(for: task.estimatedMinutes))"
         }
     }
@@ -3019,14 +3099,27 @@ struct TaskReviewCard: View {
     /// decided-yes-with-a-value → the duration itself. Divisible doesn't
     /// factor into the summary any more than it does for the recurring
     /// row's own `timeSummaryText`.
-    static func nonRecurringTimeSummaryText(task: TaskItem) -> String {
-        guard task.durationDecided else { return "Not selected" }
-        guard task.durationAnsweredYes, task.estimatedMinutes > 0 else { return "None" }
-        return TaskItem.durationLabel(for: task.estimatedMinutes)
+    static func durationSummaryText(task: TaskItem) -> String {
+        guard task.durationPicked else { return "Not selected" }
+        return durationOptionLabel(for: task.estimatedMinutes)
     }
 
-    private var nonRecurringTimeSummaryText: String {
-        Self.nonRecurringTimeSummaryText(task: task)
+    private var durationSummaryText: String {
+        Self.durationSummaryText(task: task)
+    }
+
+    /// "Not Divisible" is a real answer (`minimumSegmentMinutes == 0`),
+    /// distinct from never having answered — same shape as
+    /// `durationSummaryText`, reading `divisiblePicked` for the
+    /// distinction rather than the value.
+    static func divisibleSummaryText(task: TaskItem) -> String {
+        guard task.divisiblePicked else { return "Not selected" }
+        guard task.minimumSegmentMinutes > 0 else { return "Not Divisible" }
+        return TaskItem.durationLabel(for: task.minimumSegmentMinutes)
+    }
+
+    private var divisibleSummaryText: String {
+        Self.divisibleSummaryText(task: task)
     }
 
     /// "High"/"Low"/"Not selected" — mirrors `highPriorityAnswer`'s own
@@ -3104,6 +3197,7 @@ struct TaskReviewCard: View {
                 selection: task.recurrenceUnit
             ) { newUnit in
                 Self.selectRecurrenceUnit(newUnit, on: task)
+                if isRepeatsConfigured { expandedRows.remove(.repeats) }
             }
             .fixedSize()
         }
@@ -3128,6 +3222,16 @@ struct TaskReviewCard: View {
                     label: { $0.label },
                     selection: task.relativeRecurrenceScope
                 ) { newScope in
+                    // No self-collapse check here — `relativeRecurrenceMissing`
+                    // is a single flag (`relativeRecurrencePicked`, set by
+                    // this call) that doesn't distinguish "just chose a
+                    // scope" from "also confirmed Day/Position/Weekday,"
+                    // so `isRepeatsConfigured` would already read true the
+                    // instant this fires — before Day (or Position/
+                    // Weekday) has even had a chance to render, let alone
+                    // be looked at. Whichever of those renders next is
+                    // this row's real last control; the check belongs
+                    // there instead.
                     Self.selectMonthlyScope(newScope, on: task)
                 }
             }
@@ -3144,6 +3248,7 @@ struct TaskReviewCard: View {
                         selection: Self.dayOfMonthPosition(for: task)
                     ) { newPosition in
                         Self.selectDayOfMonthPosition(newPosition, on: task)
+                        if isRepeatsConfigured { expandedRows.remove(.repeats) }
                     }
                 }
             } else {
@@ -3157,6 +3262,13 @@ struct TaskReviewCard: View {
                         label: { $0.label },
                         selection: task.relativeRecurrenceOrdinal
                     ) { newOrdinal in
+                        // No self-collapse check — same reasoning as "On
+                        // the" above: `isRepeatsConfigured` is already
+                        // true the instant a scope was picked, so
+                        // checking here would collapse the row before
+                        // "Weekday" (rendered right below, still in this
+                        // same branch) is ever seen. That control is this
+                        // row's real last one.
                         Self.selectRelativeOrdinal(newOrdinal, on: task)
                     }
                 }
@@ -3172,6 +3284,7 @@ struct TaskReviewCard: View {
                         selection: task.relativeRecurrenceWeekday ?? 1
                     ) { newWeekday in
                         Self.selectRelativeWeekday(newWeekday, on: task)
+                        if isRepeatsConfigured { expandedRows.remove(.repeats) }
                     }
                 }
             }
@@ -3181,7 +3294,7 @@ struct TaskReviewCard: View {
     /// `StartDateCalendarPicker` embedded directly rather than behind its
     /// own further popover tap — expanding "Starts" should reveal the
     /// real control immediately, not gate it behind one more reveal.
-    /// Picking a date auto-collapses the row (`isStartsExpanded = false`)
+    /// Picking a date auto-collapses the row (`expandedRows.remove(.starts)`)
     /// — a calendar tap is a discrete, one-shot "I'm done" action, unlike
     /// the Stepper/wheel controls in the other rows, which stay open
     /// through an exploratory adjustment instead of snapping shut after
@@ -3193,7 +3306,7 @@ struct TaskReviewCard: View {
             minimumDate: nil
         ) { selectedDate in
             task.setStartDate(selectedDate)
-            isStartsExpanded = false
+            expandedRows.remove(.starts)
         }
 
         if task.startDatePicked {
@@ -3220,7 +3333,7 @@ struct TaskReviewCard: View {
             label: "Starts",
             summary: startsSummaryText,
             isNotSelected: !task.startDatePicked,
-            isExpanded: $isStartsExpanded,
+            isExpanded: isStartsExpanded,
             onTapHeader: { focusedField = nil }
         ) {
             startsExpandedContent
@@ -3256,23 +3369,9 @@ struct TaskReviewCard: View {
             ) { selectedDate in
                 task.dueDatePicked = true
                 task.dueDate = selectedDate
-                isDueExpanded = false
+                expandedRows.remove(.due)
             }
         }
-    }
-
-    /// The non-recurring card's own "Time" row content — Duration and
-    /// Divisible only, the identical `durationControl`/`divisibleControl`
-    /// the recurring row's own `timeExpandedContent` embeds. Divisible
-    /// stays unconditionally visible here (disabled + explained instead
-    /// of hidden) — same as before this became a collapsible row, see
-    /// `divisibleControl`'s own doc comment for why that's deliberately
-    /// different from the recurring row's "only appears when splittable"
-    /// treatment.
-    @ViewBuilder
-    private var nonRecurringTimeExpandedContent: some View {
-        durationControl
-        divisibleControl
     }
 
     /// The non-recurring card's own "Priority" row — `YesNoToggle`
@@ -3315,6 +3414,7 @@ struct TaskReviewCard: View {
                 selection: task.recurrenceTimeMode
             ) { newMode in
                 Self.selectRecurrenceTimeMode(newMode, on: task)
+                if isTimeConfigured { expandedRows.remove(.time) }
             }
         }
 
@@ -3356,12 +3456,15 @@ struct TaskReviewCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .presentationCompactAdaptation(.popover)
                 }
-            }
-
-            durationControl
-
-            if task.estimatedMinutes > 0, !segmentOptions.isEmpty {
-                divisibleControl
+                // The wheel is scrolled, not tapped once — checking
+                // completeness on every tick (like the Menu pickers
+                // above) would risk collapsing the row mid-scroll.
+                // Popover dismiss is this control's actual "I'm done"
+                // moment, the same role a calendar tap plays for
+                // Starts/Due.
+                .onChange(of: isShowingRecurrenceTimeOfDayPopover) { wasShowing, isShowing in
+                    if wasShowing, !isShowing, isTimeConfigured { expandedRows.remove(.time) }
+                }
             }
         }
     }
@@ -3417,7 +3520,7 @@ struct TaskReviewCard: View {
                     label: "Repeats",
                     summary: repeatsSummaryText,
                     isNotSelected: !isRepeatsConfigured,
-                    isExpanded: $isRepeatsExpanded,
+                    isExpanded: isRepeatsExpanded,
                     onTapHeader: { focusedField = nil }
                 ) {
                     repeatsExpandedContent
@@ -3429,17 +3532,43 @@ struct TaskReviewCard: View {
                     label: "Time",
                     summary: timeSummaryText,
                     isNotSelected: !task.recurrenceTimeModePicked,
-                    isExpanded: $isTimeExpanded,
+                    isExpanded: isTimeExpanded,
                     onTapHeader: { focusedField = nil }
                 ) {
                     timeExpandedContent
                 }
 
                 CollapsibleAnswerRow(
+                    label: "Duration",
+                    summary: durationSummaryText,
+                    isNotSelected: !isDurationConfigured,
+                    isExpanded: isDurationExpanded,
+                    onTapHeader: { focusedField = nil }
+                ) {
+                    durationControl
+                }
+
+                // Only when the duration is long enough to split and something
+                // evenly divides it — see `showsDivisibleRow`. Dynamic: changing
+                // the Duration wheel adds or removes this row immediately, since
+                // it reads `task.estimatedMinutes` on every body pass.
+                if showsDivisibleRow {
+                    CollapsibleAnswerRow(
+                        label: "Divisible",
+                        summary: divisibleSummaryText,
+                        isNotSelected: !isDivisibleConfigured,
+                        isExpanded: isDivisibleExpanded,
+                        onTapHeader: { focusedField = nil }
+                    ) {
+                        divisibleControl
+                    }
+                }
+
+                CollapsibleAnswerRow(
                     label: "Ends",
                     summary: endsSummaryText,
                     isNotSelected: false,
-                    isExpanded: $isEndsExpanded,
+                    isExpanded: isEndsExpanded,
                     onTapHeader: { focusedField = nil }
                 ) {
                     endsExpandedContent
@@ -3530,7 +3659,7 @@ struct TaskReviewCard: View {
                         label: "Due",
                         summary: dueSummaryText,
                         isNotSelected: !isDueConfigured,
-                        isExpanded: $isDueExpanded,
+                        isExpanded: isDueExpanded,
                         onTapHeader: { focusedField = nil }
                     ) {
                         dueExpandedContent
@@ -3538,24 +3667,58 @@ struct TaskReviewCard: View {
 
                     startsRow
 
-                    CollapsibleAnswerRow(
-                        label: "Time",
-                        summary: nonRecurringTimeSummaryText,
-                        isNotSelected: !isDurationConfigured,
-                        isExpanded: $isTimeExpanded,
-                        onTapHeader: { focusedField = nil }
-                    ) {
-                        nonRecurringTimeExpandedContent
-                    }
+                    // Always shown — Duration stays tracked (and greyed,
+                    // not hidden) even for a shelf that doesn't track it,
+                    // matching `durationAllowed`'s own doc comment. Unlike
+                    // Duration and Divisible are their own rows now
+                    // rather than folded into a "Time" row — that row
+                    // held nothing else for a non-recurring task, so
+                    // flattening consumed it. Duration is never hidden
+                    // outright for any shelf (see
+                    // `Shelf.effectiveTracksDuration`); Divisible hides
+                    // by duration and Priority by shelf.
 
                     CollapsibleAnswerRow(
-                        label: "Priority",
-                        summary: prioritySummaryText,
-                        isNotSelected: !isPriorityConfigured,
-                        isExpanded: $isPriorityExpanded,
+                        label: "Duration",
+                        summary: durationSummaryText,
+                        isNotSelected: !isDurationConfigured,
+                        isExpanded: isDurationExpanded,
                         onTapHeader: { focusedField = nil }
                     ) {
-                        priorityExpandedContent
+                        durationControl
+                    }
+
+                    // Only when the duration is long enough to split and something
+                    // evenly divides it — see `showsDivisibleRow`. Dynamic: changing
+                    // the Duration wheel adds or removes this row immediately, since
+                    // it reads `task.estimatedMinutes` on every body pass.
+                    if showsDivisibleRow {
+                        CollapsibleAnswerRow(
+                            label: "Divisible",
+                            summary: divisibleSummaryText,
+                            isNotSelected: !isDivisibleConfigured,
+                            isExpanded: isDivisibleExpanded,
+                            onTapHeader: { focusedField = nil }
+                        ) {
+                            divisibleControl
+                        }
+                    }
+
+                    // Same treatment, same reasoning as recurring's own
+                    // whole-branch Priority omission just above — 2-Minute
+                    // Tasks is a shelf property rather than a task one,
+                    // so it's expressed here via `priorityAllowed`
+                    // instead of a task-level branch.
+                    if priorityAllowed {
+                        CollapsibleAnswerRow(
+                            label: "Priority",
+                            summary: prioritySummaryText,
+                            isNotSelected: !isPriorityConfigured,
+                            isExpanded: isPriorityExpanded,
+                            onTapHeader: { focusedField = nil }
+                        ) {
+                            priorityExpandedContent
+                        }
                     }
                 }
             }
@@ -3826,7 +3989,7 @@ struct TaskReviewCard: View {
         if task.isRecurring {
             return shelves.filter { $0.isRecurringTasks }
         }
-        if task.durationDecided, task.durationAnsweredYes, task.estimatedMinutes > 0, task.estimatedMinutes <= 2 {
+        if task.durationPicked, task.estimatedMinutes > 0, task.estimatedMinutes <= 2 {
             return shelves.filter { $0.isTwoMinuteTasks }
         }
         return shelves.filter { !$0.isTwoMinuteTasks && !$0.isRecurringTasks }

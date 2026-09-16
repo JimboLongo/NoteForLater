@@ -133,7 +133,7 @@ struct UnplacedTask: Identifiable {
         case .noFreeTime:
             return "Your calendar is full during this window."
         case .noContiguousSlot:
-            return task.isDivisible
+            return task.isEffectivelyDivisible
                 ? "Lower this task's minimum segment size."
                 : "Make this task divisible, or shorten it."
         case .horizonReached:
@@ -600,7 +600,7 @@ final class ScheduleReviewViewModel {
             var eligibleGroups: [(segments: [ScheduledBlock], earliestStart: Date)] = []
             for group in groups {
                 guard let task = group.segments.first?.task else { continue }
-                let violatesMinimumSegment = task.isDivisible && task.minimumSegmentMinutes > 0
+                let violatesMinimumSegment = task.isEffectivelyDivisible && task.minimumSegmentMinutes > 0
                     && group.segments.contains { Int($0.endTime.timeIntervalSince($0.startTime) / 60) < task.minimumSegmentMinutes }
                 guard task.isEligible(for: rule), !violatesMinimumSegment else {
                     for block in group.segments {
@@ -985,7 +985,7 @@ final class ScheduleReviewViewModel {
         guard !task.isScheduled else { return false }
         return rules.contains { rule in
             task.isEligible(for: rule)
-                && rule.canEverFit(estimatedMinutes: task.remainingMinutes, isDivisible: task.isDivisible, minimumSegmentMinutes: task.minimumSegmentMinutes)
+                && rule.canEverFit(estimatedMinutes: task.remainingMinutes, isDivisible: task.isEffectivelyDivisible, minimumSegmentMinutes: task.minimumSegmentMinutes)
         }
     }
 
@@ -1097,7 +1097,7 @@ final class ScheduleReviewViewModel {
                 (stats[$0.id]?.eligibleDayCount ?? 0) < (stats[$1.id]?.eligibleDayCount ?? 0)
             }
             let tally = bestRule.flatMap { stats[$0.id] } ?? RuleWalkStats()
-            let requiredMinutes = task.isDivisible && task.minimumSegmentMinutes > 0
+            let requiredMinutes = task.isEffectivelyDivisible && task.minimumSegmentMinutes > 0
                 ? task.minimumSegmentMinutes
                 : task.remainingMinutes
 
@@ -1699,7 +1699,7 @@ final class ScheduleReviewViewModel {
             // trips there) the task's own duration can't fit into.
             if let blockDuration {
                 let fitsWhole = task.estimatedMinutes > 0 && task.estimatedMinutes <= blockDuration
-                let fitsDivisible = task.isDivisible && task.minimumSegmentMinutes > 0 && task.minimumSegmentMinutes <= blockDuration
+                let fitsDivisible = task.isEffectivelyDivisible && task.minimumSegmentMinutes > 0 && task.minimumSegmentMinutes <= blockDuration
                 guard fitsWhole || fitsDivisible else { continue }
             }
             results.append(CandidateEvaluation(task: task, isEligible: true, ineligibleReason: nil))

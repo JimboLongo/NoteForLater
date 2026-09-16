@@ -56,7 +56,8 @@ final class TaskItem {
     /// resolve it. See `YesNoToggle`.
     var nextStepDecided: Bool = false
     /// Which pill "Has next step" landed on, independent of `nextStep` —
-    /// same reason `durationAnsweredYes` exists: Yes can be selected
+    /// the same reason Duration used to carry a second flag before it
+    /// collapsed to one wheel (see `durationPicked`): Yes can be selected
     /// before any text is actually typed, and No clears `nextStep` back
     /// to `""`. Without this, "Yes, nothing typed yet" and "No" would
     /// both collapse to `nextStep.isEmpty`, making them indistinguishable.
@@ -75,17 +76,35 @@ final class TaskItem {
     /// — the task card always shows `estimatedMinutes`, with "X of Y
     /// scheduled" once this drops below it.
     var remainingMinutes: Int = 0
-    /// Same idea as `dueDateDecided`, for "Has duration."
-    var durationDecided: Bool = false
-    /// Which pill "Has duration" landed on, independent of
-    /// `estimatedMinutes` — needed because Yes can be selected before a
-    /// real value's been picked (dropdown starts at 0/"Not Selected"),
-    /// and No resets `estimatedMinutes` to that same 0. Without this,
-    /// "Yes selected" and "No selected" would both collapse to
-    /// `estimatedMinutes == 0`, making it impossible to tell them apart —
-    /// switching from No to Yes would look like nothing happened. Only
-    /// meaningful when `durationDecided` is true.
-    var durationAnsweredYes: Bool = false
+    /// Whether Duration has actually been answered — the one flag that
+    /// distinguishes "never touched" from "deliberately None," since
+    /// `estimatedMinutes == 0` is itself a real, choosable answer
+    /// (the wheel's "None" option, meaning *don't schedule this* — see
+    /// `SchedulingRule.fitStatus`'s `.needsDuration`). Same `...Picked`
+    /// convention as `startDatePicked`/`dueDatePicked`/
+    /// `recurrenceIntervalPicked`.
+    ///
+    /// Renamed from `durationDecided` when Duration collapsed from a
+    /// Yes/No-pills-plus-wheel pair into a single wheel;
+    /// `@Attribute(originalName:)` keeps it mapped to that same column so
+    /// existing answers survive the rename (see `docs/session-handoff.md`'s
+    /// SwiftData trap entry). The old `durationAnsweredYes` half lives on
+    /// only as `legacyDurationAnsweredYes` below, read once by the
+    /// migration that reconciles the two.
+    @Attribute(originalName: "durationDecided")
+    var durationPicked: Bool = false
+    /// The retired Yes/No half of the old two-question Duration control.
+    /// Written only by code that no longer exists; read exactly once, by
+    /// `NoteForLaterApp.migrateDurationDivisibleToSingleWheelIfNeeded`,
+    /// to tell the one pair of old states apart that `estimatedMinutes`
+    /// alone can't: "said Yes but never picked a value" (still
+    /// unanswered) versus "said No" (deliberately None). Both have
+    /// `estimatedMinutes == 0`. Dead weight after that migration runs —
+    /// left in place rather than removed, since removing it later is a
+    /// no-risk cleanup and re-adding it after shipping without it would
+    /// not recover lost data.
+    @Attribute(originalName: "durationAnsweredYes")
+    var legacyDurationAnsweredYes: Bool = false
     var tags: [String] = []
     var priorityRaw: String = Priority.unset.rawValue
     var isScheduled: Bool = false
@@ -894,15 +913,54 @@ final class TaskItem {
     /// Recurring Tasks shelf (`Shelf.isRecurringTasks`) — a default, not
     /// a lock, freely toggled off afterward from the task's own card.
     ///
+    /// Same treatment for the 2-Minute Tasks shelf (`Shelf.isTwoMinuteTasks`):
+    /// duration defaults to "≤2 min" (`estimatedMinutes == 2`, the same
+    /// sentinel value the Duration wheel's own top option already uses)
+    /// rather than being left unanswered. Duration is scheduling-inert
+    /// for this shelf either way — `AISchedulingService` never places one
+    /// of its tasks onto the calendar at all — but the field stays
+    /// visible and editable (unlike Divisible/Priority, which are hidden
+    /// outright for this shelf — Divisible by duration (see
+    /// `divisibleMinimumDurationMinutes`), Priority by shelf (see
+    /// `Shelf.effectiveTracksPriority`)): there's a real case for jotting an
+    /// actual duration here even though nothing schedules against it,
+    /// where there isn't one for splitting a ≤2-minute task or ranking it
+    /// against others that never compete for calendar time at all.
+    /// Without this default, a task landing here would otherwise sit
+    /// flagged as missing an attribute the shelf's own visible Duration
+    /// row asks for. Gated on `effectiveTracksDuration` so this does
+    /// nothing on the (unusual) case where duration tracking has been
+    /// turned off for this shelf entirely — matching how `TaskCardSheet
+    /// .onMove` already treats other tracked-attribute defaults
+    /// elsewhere. `durationPicked`/`divisiblePicked` are set alongside
+    /// their values, not left for the values alone to imply — the
+    /// same picked-flag-with-its-value discipline `makeRecurring()`'s own
+    /// extraction exists to keep a single call site responsible for,
+    /// rather than risking a value that looks set but still reports
+    /// missing. `remainingMinutes` is set too: `TaskItem.init` above
+    /// already fixed it at `estimatedMinutes`' default (`0`) before this
+    /// runs, and nothing else re-syncs it.
+    ///
     /// Only ever applied here, at creation. Moving an *existing* task
-    /// onto this shelf later — `InboxViewModel.route`, or either card's
-    /// `onMove` handler — never calls this and never touches
-    /// `isRecurring`, so a task moved in from elsewhere keeps whatever it
-    /// already was, not auto-flipped.
+    /// onto either shelf later — `InboxViewModel.route`, or either card's
+    /// `onMove` handler — never calls this, so a task moved in from
+    /// elsewhere keeps whatever it already was, not auto-set.
     static func makeForDirectCapture(title: String, shelf: Shelf) -> TaskItem {
         let task = TaskItem(title: title, shelf: shelf)
         if shelf.isRecurringTasks {
             task.makeRecurring()
+        }
+        if shelf.isTwoMinuteTasks, shelf.effectiveTracksDuration {
+            task.estimatedMinutes = 2
+            task.remainingMinutes = 2
+            task.durationPicked = true
+            // Divisible is deliberately *not* pre-answered here. At 2
+            // minutes the row doesn't exist and isn't reported missing
+            // (see `divisibleMinimumDurationMinutes`), so there's nothing
+            // to answer — and pre-marking it would mean that raising the
+            // duration to an hour reveals a Divisible row already reading
+            // "Not Divisible", as though it had been chosen. It should
+            // read "Not selected", because it hasn't been.
         }
         return task
     }
@@ -995,19 +1053,56 @@ final class TaskItem {
     /// (different times/slots the same day) if it doesn't fit in one
     /// contiguous window. Each piece is at least `minimumSegmentMinutes`.
     var isDivisible: Bool = false
-    /// 0 is the "Not Selected" sentinel, same convention as
-    /// `estimatedMinutes` — a real minimum has to be actively chosen once
-    /// Divisible is Yes.
+    /// `0` means "Not Divisible" — a real answer (the wheel's first
+    /// option), not an absence of one. `divisiblePicked` is what carries
+    /// whether it's been answered at all.
     var minimumSegmentMinutes: Int = 0
-    /// Same idea as `durationDecided` — whether "Divisible" has actually
-    /// been answered either way, so the Yes/No pills start unanswered
-    /// instead of "No" reading as already picked.
-    var isDivisibleDecided: Bool = false
+    /// Same role as `durationPicked`, for Divisible: distinguishes "never
+    /// touched" from "deliberately Not Divisible," since both leave
+    /// `minimumSegmentMinutes == 0`. Renamed from `isDivisibleDecided`
+    /// with `@Attribute(originalName:)` keeping its column — see
+    /// `durationPicked`'s own doc comment. Needs no `legacy...` companion
+    /// the way Duration did: the state its old partner flag carried
+    /// (`isDivisible`) is a *kept* field, so the migration can read it
+    /// directly.
+    @Attribute(originalName: "isDivisibleDecided")
+    var divisiblePicked: Bool = false
+    /// Set once `NoteForLaterApp.migrateDurationDivisibleToSingleWheelIfNeeded`
+    /// has reconciled this row's Duration/Divisible flags — checked
+    /// *before* reconciling, so a second invocation skips the row rather
+    /// than re-deriving it. Committed in the same `context.save()` as the
+    /// flags it guards, so the two can never land out of sync the way the
+    /// migration's own `UserDefaults` completion flag and the data store
+    /// can. Same shape and reasoning as
+    /// `ScheduledBlock.hasMigratedThreeState`.
+    var hasMigratedSingleWheel: Bool = false
 
     /// The chunk sizes worth offering as a minimum segment, in general —
     /// not a uniform step, just the values that make sense to a person.
     /// `validSegmentOptions(for:)` is what any UI should actually show.
     static let segmentOptionCandidates = [15, 30, 45, 60, 90, 120, 240]
+
+    /// Below this, a task is never split and the Divisible question is
+    /// never asked — splitting something shorter than an hour buys
+    /// nothing worth the fragmentation. `>=`, so a task of exactly 60
+    /// minutes *is* divisible-eligible; 59 is not.
+    static let divisibleMinimumDurationMinutes = 60
+
+    /// Whether this task may **actually** be split right now — the one
+    /// predicate every scheduling decision asks, rather than reading
+    /// `isDivisible` raw.
+    ///
+    /// `isDivisible` is the user's stored *intent*; this is whether that
+    /// intent currently applies. They diverge whenever the duration sits
+    /// below `divisibleMinimumDurationMinutes`: the stored value is kept
+    /// (so raising the duration again restores exactly what was there —
+    /// see `validateDivisibility`'s own early return) but nothing acts on
+    /// it while it's dormant. Writers and the edit snapshot keep using
+    /// `isDivisible` directly; they're recording intent, not asking
+    /// whether it holds.
+    var isEffectivelyDivisible: Bool {
+        isDivisible && estimatedMinutes >= Self.divisibleMinimumDurationMinutes
+    }
 
     /// Which of `segmentOptionCandidates` evenly divide `minutes` and are
     /// strictly smaller than it.
@@ -1068,6 +1163,43 @@ final class TaskItem {
         return repaired == remainingMinutes ? nil : repaired
     }
 
+    /// The single place Duration is answered from the card's wheel —
+    /// writes the value and `durationPicked` together, unconditionally,
+    /// so a value can never be left looking set while still reporting
+    /// missing. Same discipline (and same reason) as
+    /// `TaskReviewCard.selectRecurrenceUnit` and friends. `0` is a real
+    /// selection ("None"), not a no-op — it marks Duration answered just
+    /// as any other value does.
+    ///
+    /// Re-syncs `remainingMinutes` and re-validates divisibility, both of
+    /// which a duration edit can invalidate: `remainingMinutes` is
+    /// clamped so it never exceeds the new estimate, and a segment size
+    /// chosen against the old duration may no longer divide the new one
+    /// (see `validateDivisibility`).
+    static func selectDuration(_ minutes: Int, on task: TaskItem) {
+        task.estimatedMinutes = max(0, minutes)
+        task.durationPicked = true
+        task.remainingMinutes = min(task.remainingMinutes, task.estimatedMinutes)
+        if task.remainingMinutes <= 0 { task.remainingMinutes = task.estimatedMinutes }
+        task.validateDivisibility()
+        task.syncScheduledBlockDuration()
+    }
+
+    /// The single place Divisible is answered from the card's wheel —
+    /// `0` means "Not Divisible," anything else is a real minimum segment
+    /// size. Keeps `isDivisible` and `minimumSegmentMinutes` consistent
+    /// in one named place rather than at each call site (the two are
+    /// separate stored fields because the scheduler reads `isDivisible`
+    /// directly in many places; collapsing it into a computed
+    /// `minimumSegmentMinutes > 0` would be the stored→computed SwiftData
+    /// trap documented in `docs/session-handoff.md`). Sets
+    /// `divisiblePicked` alongside, same reasoning as `selectDuration`.
+    static func selectDivisibleSegment(_ minutes: Int, on task: TaskItem) {
+        task.isDivisible = minutes > 0
+        task.minimumSegmentMinutes = max(0, minutes)
+        task.divisiblePicked = true
+    }
+
     /// Forces `isDivisible`/`minimumSegmentMinutes` into a state the
     /// packer can actually satisfy. Call after **any** write to
     /// `estimatedMinutes` or `isDivisible` — notably shelf moves, which
@@ -1092,6 +1224,16 @@ final class TaskItem {
             minimumSegmentMinutes = 0
             return previousSegment != 0
         }
+
+        // Below the threshold the stored value is dormant — every
+        // scheduling read goes through `isEffectivelyDivisible`, which is
+        // already false here — so there's no invariant left for this
+        // function to protect and no reason to destroy the value. Leaving
+        // it intact is what makes a dip below an hour non-destructive:
+        // raise the duration back and the segment size is still there.
+        // Without this, a drop to e.g. 2 minutes would hit the
+        // `options.isEmpty` branch below and clear it permanently.
+        guard estimatedMinutes >= TaskItem.divisibleMinimumDurationMinutes else { return false }
 
         let options = TaskItem.validSegmentOptions(for: estimatedMinutes)
         if options.isEmpty {
@@ -1540,14 +1682,14 @@ final class TaskItem {
         isRecurring && recurrenceTimeMode != .specific
     }
 
-    /// True if "Has duration" is Yes but nothing's been picked from the
-    /// dropdown yet (still sitting on "Not Selected"). False (not missing)
-    /// once a real duration's chosen, or once the answer is an explicit
-    /// "No" (`durationAnsweredYes == false`).
+    /// True only if Duration has never been answered at all. `0` minutes
+    /// ("None") is a real answer, not an absence of one — see
+    /// `durationPicked`. False (not missing) once anything at all has
+    /// been chosen from the wheel, "None" included.
     private func durationMissing(on shelf: Shelf?) -> Bool {
         guard shelf?.effectiveTracksDuration ?? true else { return false }
         guard !recurringAndUntimed else { return false }
-        return !durationDecided || (durationAnsweredYes && estimatedMinutes == 0)
+        return !durationPicked
     }
 
     /// True if `shelf` has scheduling rules to weigh in on and nothing's
@@ -1559,14 +1701,32 @@ final class TaskItem {
         !(shelf?.schedulingRules ?? []).isEmpty && includedSchedulingRuleIDs.isEmpty
     }
 
-    /// Same shape as `durationMissing` — "Divisible" is Yes but the
-    /// minimum-segment dropdown is still on "Not Selected." Only tracked
-    /// on shelves that track duration at all, matching where the
-    /// Divisible row itself is shown.
+    /// Same shape as `durationMissing` — true only if Divisible has never
+    /// been answered. "Not Divisible" (`minimumSegmentMinutes == 0`) is a
+    /// real answer, not an absence of one. Only tracked on shelves that
+    /// offer Divisible at all, matching where the row itself is shown.
+    ///
+    /// Also never missing when this task's own duration admits no valid
+    /// segment size (`validSegmentOptions` empty — a duration of 2, or
+    /// any prime/indivisible one): the wheel would then have exactly one
+    /// selectable option, "Not Divisible," and a question with a single
+    /// possible answer isn't a real question to flag as unanswered. That
+    /// check previously lived only as an ad-hoc condition inside
+    /// `TaskReviewCard.isDurationConfigured`; folding it in here means
+    /// the card and the missing-badge agree by construction rather than
+    /// by both remembering to special-case it.
     private func divisibleMissing(on shelf: Shelf?) -> Bool {
         guard shelf?.effectiveTracksDuration ?? true else { return false }
         guard !recurringAndUntimed else { return false }
-        return !isDivisibleDecided || (isDivisible && minimumSegmentMinutes == 0)
+        // Too short to split — the row isn't shown, so it can't be
+        // unanswered. See `divisibleMinimumDurationMinutes`.
+        guard estimatedMinutes >= Self.divisibleMinimumDurationMinutes else { return false }
+        // Long enough in principle, but no segment size evenly divides
+        // it (70 minutes, say) — a separate check from the threshold
+        // above, not a redundant one: 70 clears the hour bar and still
+        // has no valid option.
+        guard !Self.validSegmentOptions(for: estimatedMinutes).isEmpty else { return false }
+        return !divisiblePicked
     }
 
     /// Flagged for the Nightly Review's attribute-cleanup pass — true if

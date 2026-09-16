@@ -1521,7 +1521,7 @@ private struct DayTimelineSegment: View {
     private func blockActionButtons(for block: ScheduledBlock) -> some View {
         if let task = block.task {
             Button("See Task Card") { taskCardTarget = task }
-            if task.isDivisible {
+            if task.isEffectivelyDivisible {
                 Button("Adjust Scheduled Time") { divisibleAdjustTarget = block }
             }
             Button("Replace Task") { onPickReplacement(block) }

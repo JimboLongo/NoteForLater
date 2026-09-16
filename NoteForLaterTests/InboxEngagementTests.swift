@@ -90,8 +90,8 @@ final class InboxEngagementTests: XCTestCase {
         taskA.nextStepDecided = true
         taskA.nextStepAnsweredYes = true
         taskA.dueDateDecided = true
-        taskA.durationDecided = true
-        taskA.isDivisibleDecided = true
+        taskA.durationPicked = true
+        taskA.divisiblePicked = true
         taskA.priority = .low
         let taskB = makeTask(title: "B") // still unsorted — still unresolved
         let timer = InboxEngagementTimer(remaining: 90)
@@ -123,8 +123,8 @@ final class InboxEngagementTests: XCTestCase {
         taskA.nextStepDecided = true
         taskA.nextStepAnsweredYes = true
         taskA.dueDateDecided = true
-        taskA.durationDecided = true
-        taskA.isDivisibleDecided = true
+        taskA.durationPicked = true
+        taskA.divisiblePicked = true
         taskA.priority = .low
         // Plenty of time left — if this were gated on the timer alone,
         // it would wrongly wrap.

@@ -93,7 +93,8 @@ struct TaskCardSheet: View {
                     } else {
                         task.attributeReviewSnoozedUntil = nil
                     }
-                }
+                },
+                isNewlyCreated: isNewlyCreated
             )
             .padding(.top, 4)
             .toolbar {
@@ -180,11 +181,10 @@ struct TaskEditSnapshot: Equatable {
     let priority: Priority
     let estimatedMinutes: Int
     let remainingMinutes: Int
-    let durationDecided: Bool
-    let durationAnsweredYes: Bool
+    let durationPicked: Bool
     let isDivisible: Bool
     let minimumSegmentMinutes: Int
-    let isDivisibleDecided: Bool
+    let divisiblePicked: Bool
     let tags: [String]
     let includedSchedulingRuleIDs: [UUID]
     let attributeReviewSnoozedUntil: Date?
@@ -218,11 +218,10 @@ struct TaskEditSnapshot: Equatable {
         priority = task.priority
         estimatedMinutes = task.estimatedMinutes
         remainingMinutes = task.remainingMinutes
-        durationDecided = task.durationDecided
-        durationAnsweredYes = task.durationAnsweredYes
+        durationPicked = task.durationPicked
         isDivisible = task.isDivisible
         minimumSegmentMinutes = task.minimumSegmentMinutes
-        isDivisibleDecided = task.isDivisibleDecided
+        divisiblePicked = task.divisiblePicked
         tags = task.tags
         includedSchedulingRuleIDs = task.includedSchedulingRuleIDs
         attributeReviewSnoozedUntil = task.attributeReviewSnoozedUntil
@@ -261,11 +260,10 @@ struct TaskEditSnapshot: Equatable {
         task.priority = priority
         task.estimatedMinutes = estimatedMinutes
         task.remainingMinutes = remainingMinutes
-        task.durationDecided = durationDecided
-        task.durationAnsweredYes = durationAnsweredYes
+        task.durationPicked = durationPicked
         task.isDivisible = isDivisible
         task.minimumSegmentMinutes = minimumSegmentMinutes
-        task.isDivisibleDecided = isDivisibleDecided
+        task.divisiblePicked = divisiblePicked
         task.validateDivisibility()
         task.tags = tags
         task.includedSchedulingRuleIDs = includedSchedulingRuleIDs

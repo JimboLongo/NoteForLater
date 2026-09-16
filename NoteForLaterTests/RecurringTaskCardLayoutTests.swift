@@ -107,12 +107,16 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
 
     /// Specific Time with the mode picked but no duration yet — still
     /// unconfigured, since Duration is now folded into this row.
-    func test_timeUnconfigured_specific_modePickedButNoDuration() {
+    /// Renamed in spirit: Duration is its own row now, so the "Time" row
+    /// is Mode-only and answering the mode fully configures it. What's
+    /// still unanswered is Duration, asserted directly.
+    func test_durationUnconfigured_specific_modePickedButNoDuration() {
         let task = makeRecurringTask()
         task.recurrenceTimeModePicked = true
         task.recurrenceTimeMode = .specific
 
-        XCTAssertFalse(TaskReviewCard.isTimeConfigured(task: task, shelf: task.shelf, segmentOptions: []))
+        XCTAssertTrue(TaskReviewCard.isTimeConfigured(task: task, shelf: task.shelf, segmentOptions: []), "Time is Mode-only now")
+        XCTAssertFalse(TaskReviewCard.isDurationConfigured(task: task, shelf: task.shelf))
     }
 
     /// Specific Time, mode + duration both picked, duration NOT
@@ -123,8 +127,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
         let task = makeRecurringTask()
         task.recurrenceTimeModePicked = true
         task.recurrenceTimeMode = .specific
-        task.durationDecided = true
-        task.durationAnsweredYes = true
+        task.durationPicked = true
         task.estimatedMinutes = 7 // no proper divisors — matches `TaskItem.validSegmentOptions`'s own rule
 
         XCTAssertTrue(TaskItem.validSegmentOptions(for: 7).isEmpty, "sanity: 7 minutes must not be splittable")
@@ -134,17 +137,19 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     /// Specific Time, mode + duration picked, duration IS splittable, but
     /// Divisible itself hasn't been answered — must read unconfigured,
     /// since the row now appears and asks the question.
-    func test_timeUnconfigured_specific_splittableDuration_divisibleNotAnswered() {
+    /// Same rename reasoning — Divisible has its own row and its own
+    /// check now. Uses 60 minutes rather than 30: below
+    /// `TaskItem.divisibleMinimumDurationMinutes` the row isn't shown at
+    /// all, so a 30-minute fixture would assert nothing.
+    func test_divisibleUnconfigured_specific_splittableDurationNotAnswered() {
         let task = makeRecurringTask()
         task.recurrenceTimeModePicked = true
         task.recurrenceTimeMode = .specific
-        task.durationDecided = true
-        task.durationAnsweredYes = true
-        task.estimatedMinutes = 30
-        let segmentOptions = TaskItem.validSegmentOptions(for: 30)
+        task.durationPicked = true
+        task.estimatedMinutes = 60
 
-        XCTAssertFalse(segmentOptions.isEmpty, "sanity: 30 minutes must be splittable")
-        XCTAssertFalse(TaskReviewCard.isTimeConfigured(task: task, shelf: task.shelf, segmentOptions: segmentOptions))
+        XCTAssertTrue(TaskReviewCard.showsDivisibleRow(task: task), "sanity: 60 minutes shows the Divisible row")
+        XCTAssertFalse(TaskReviewCard.isDivisibleConfigured(task: task, shelf: task.shelf))
     }
 
     /// Full Specific Time configuration — mode, duration, and Divisible
@@ -153,10 +158,9 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
         let task = makeRecurringTask()
         task.recurrenceTimeModePicked = true
         task.recurrenceTimeMode = .specific
-        task.durationDecided = true
-        task.durationAnsweredYes = true
+        task.durationPicked = true
         task.estimatedMinutes = 30
-        task.isDivisibleDecided = true
+        task.divisiblePicked = true
         task.isDivisible = false
         let segmentOptions = TaskItem.validSegmentOptions(for: 30)
 
@@ -211,10 +215,9 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
         task.isPushable = false
         task.startDate = Calendar.current.startOfDay(for: .now)
         task.startDatePicked = true
-        task.durationDecided = true
-        task.durationAnsweredYes = true
+        task.durationPicked = true
         task.estimatedMinutes = 30
-        task.isDivisibleDecided = true
+        task.divisiblePicked = true
         task.isDivisible = true
         task.minimumSegmentMinutes = 15
 
@@ -237,10 +240,10 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
         task.isPushable = true
         task.startDate = nil
         task.startDatePicked = false
-        task.durationDecided = false
-        task.durationAnsweredYes = false
+        task.durationPicked = false
+        task.durationPicked = true
         task.estimatedMinutes = 0
-        task.isDivisibleDecided = false
+        task.divisiblePicked = false
         task.isDivisible = false
         task.minimumSegmentMinutes = 0
 
@@ -262,10 +265,10 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
         XCTAssertFalse(task.isPushable)
         XCTAssertNotNil(task.startDate)
         XCTAssertTrue(task.startDatePicked)
-        XCTAssertTrue(task.durationDecided)
-        XCTAssertTrue(task.durationAnsweredYes)
+        XCTAssertTrue(task.durationPicked)
+        XCTAssertTrue(task.durationPicked)
         XCTAssertEqual(task.estimatedMinutes, 30)
-        XCTAssertTrue(task.isDivisibleDecided)
+        XCTAssertTrue(task.divisiblePicked)
         XCTAssertTrue(task.isDivisible)
         XCTAssertEqual(task.minimumSegmentMinutes, 15)
     }
@@ -421,5 +424,175 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
 
         XCTAssertEqual(task.recurrenceSummary, "Every month on the fourth Saturday")
         XCTAssertEqual(task.recurrenceShortSummary, "Monthly · 4th Saturday")
+    }
+
+    // MARK: - Auto-collapse: initialExpandedRow (recurring)
+
+    /// Nothing answered yet — must seed the *first* row in display
+    /// order, not just any unconfigured one.
+    func test_initialExpandedRow_recurring_freshTask_seedsRepeats() {
+        let task = makeRecurringTask()
+
+        XCTAssertEqual(TaskReviewCard.initialExpandedRow(task: task, shelf: task.shelf, segmentOptions: []), .repeats)
+    }
+
+    /// Repeats answered, Starts isn't — must skip past the already-
+    /// configured row to the next unconfigured one, not stop at the
+    /// first row in the list regardless of its state.
+    func test_initialExpandedRow_recurring_repeatsAnsweredStartsNot_seedsStarts() {
+        let task = makeRecurringTask()
+        task.recurrenceIntervalPicked = true
+
+        XCTAssertEqual(TaskReviewCard.initialExpandedRow(task: task, shelf: task.shelf, segmentOptions: []), .starts)
+    }
+
+    /// Repeats and Starts both answered, Time isn't.
+    func test_initialExpandedRow_recurring_onlyTimeUnanswered_seedsTime() {
+        let task = makeRecurringTask()
+        task.recurrenceIntervalPicked = true
+        task.startDatePicked = true
+
+        XCTAssertEqual(TaskReviewCard.initialExpandedRow(task: task, shelf: task.shelf, segmentOptions: []), .time)
+    }
+
+    /// Everything answered — the card must open fully collapsed, and
+    /// `.ends` must never be the seed even though "Never" (its default)
+    /// technically has no "picked" flag of its own — Ends simply isn't a
+    /// candidate at all, matching its pre-existing "never auto-expands"
+    /// behavior.
+    func test_initialExpandedRow_recurring_everythingAnswered_seedsNil() {
+        let task = makeRecurringTask()
+        task.recurrenceIntervalPicked = true
+        task.startDatePicked = true
+        task.recurrenceTimeModePicked = true
+
+        XCTAssertNil(TaskReviewCard.initialExpandedRow(task: task, shelf: task.shelf, segmentOptions: []))
+    }
+
+    // MARK: - Auto-collapse: Repeats stays open until every REQUIRED sub-field is picked
+
+    /// `relativeRecurrenceMissing` gates "Pattern" on one flag
+    /// (`relativeRecurrencePicked`), not on Position/Weekday individually
+    /// — picking "On the" alone (via `selectMonthlyScope`) already
+    /// satisfies it, same as `test_repeatsConfigured_specificDate_onceEveryPicked`
+    /// already shows for the non-monthly case. This is exactly why the
+    /// self-collapse check does **not** live on "On the"'s own
+    /// `PickedMenuPicker` call site (see that call site's own comment in
+    /// `repeatsExpandedContent`) — checking there would collapse the row
+    /// before Day/Position/Weekday, the actually-last-rendered controls
+    /// for this branch, have even appeared. Position/Weekday themselves
+    /// already have real stored defaults (`RelativeRecurrenceOrdinal`,
+    /// `relativeRecurrenceWeekday ?? 1`), same "accepting a default
+    /// counts as answering" shape the interval `Stepper`'s own default
+    /// does — they're refinements of an already-answered Pattern, not
+    /// additional gates on it.
+    func test_repeatsConfigured_relativeDate_onceScopePicked_positionWeekdayStillAtDefaults() {
+        let task = makeRecurringTask()
+        task.recurrenceUnit = .months
+        task.recurrenceIntervalPicked = true
+
+        XCTAssertFalse(TaskReviewCard.isRepeatsConfigured(task: task, shelf: task.shelf), "Pattern not yet picked at all")
+
+        TaskReviewCard.selectMonthlyScope(.weekdayOfMonth, on: task)
+
+        XCTAssertTrue(task.relativeRecurrencePicked)
+        XCTAssertTrue(TaskReviewCard.isRepeatsConfigured(task: task, shelf: task.shelf), "scope alone answers Pattern — Position/Weekday need no separate pick")
+    }
+
+    /// The genuinely still-open case: interval picked, unit is `.months`,
+    /// but "On the" itself hasn't been picked yet — the one real gate
+    /// `relativeRecurrenceMissing` has. Complements
+    /// `test_repeatsUnconfigured_relativeDate_intervalPickedButPatternNot`,
+    /// which already covers this same shape.
+    func test_repeatsUnconfigured_relativeDate_intervalPickedScopeNot_thenScopeAnswers() {
+        let task = makeRecurringTask()
+        task.recurrenceUnit = .months
+        task.recurrenceIntervalPicked = true
+
+        XCTAssertFalse(TaskReviewCard.isRepeatsConfigured(task: task, shelf: task.shelf))
+
+        TaskReviewCard.selectMonthlyScope(.dayOfMonth, on: task)
+        TaskReviewCard.selectDayOfMonthPosition(.sameAsAnchor, on: task)
+
+        XCTAssertTrue(TaskReviewCard.isRepeatsConfigured(task: task, shelf: task.shelf))
+    }
+
+    // MARK: - Auto-collapse: accepting an already-current value still answers the row
+
+    /// `PickedMenuPicker` fires its `onSelect` even when re-choosing the
+    /// value already showing (see that type's own doc comment) — proving
+    /// the *effect* that depends on: calling a `selectXxx` function with
+    /// the task's current value must still flip its "picked" flag, which
+    /// is what lets the row's self-collapse condition become true purely
+    /// from accepting a default, with no value change at all.
+    func test_selectRecurrenceUnit_withValueAlreadyCurrent_stillMarksPicked() {
+        let task = makeRecurringTask()
+        task.recurrenceUnit = .days
+        XCTAssertFalse(task.recurrenceIntervalPicked)
+
+        TaskReviewCard.selectRecurrenceUnit(.days, on: task) // same value as already set
+
+        XCTAssertTrue(task.recurrenceIntervalPicked)
+        XCTAssertEqual(task.recurrenceUnit, .days, "must not have changed the value, only the picked flag")
+        XCTAssertTrue(TaskReviewCard.isRepeatsConfigured(task: task, shelf: task.shelf), "Specific Date mode needs nothing past Every, so accepting the default alone must fully answer this row")
+    }
+
+    // MARK: - Auto-collapse: initialExpandedRows — new vs. existing task
+
+    /// A brand-new task (never saved) opens with every row for its mode
+    /// expanded at once — not just the unanswered ones, `.ends` included
+    /// — regardless of anything already being answered. The card is a
+    /// form to work down, not a compact summary to read.
+    func test_initialExpandedRows_recurring_newTask_seedsEveryRow_evenIfSomeAlreadyAnswered() {
+        let task = makeRecurringTask()
+        task.recurrenceIntervalPicked = true // already answered — must not shrink the seeded set
+
+        let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: true)
+
+        XCTAssertEqual(rows, [.repeats, .starts, .time, .duration, .ends], "no .divisible — the default 0-minute duration is below the threshold")
+    }
+
+    /// A reopened, already-saved, fully-configured task opens fully
+    /// collapsed — the empty set, not just a `nil` single row.
+    func test_initialExpandedRows_recurring_existingTask_fullyConfigured_seedsNothing() {
+        let task = makeRecurringTask()
+        task.recurrenceIntervalPicked = true
+        task.startDatePicked = true
+        task.recurrenceTimeModePicked = true
+
+        let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: false)
+
+        XCTAssertTrue(rows.isEmpty)
+    }
+
+    /// A reopened, already-saved task with exactly one field left
+    /// unanswered opens with only that field expanded — `initialExpandedRows`
+    /// wrapping `initialExpandedRow` unchanged, per the earlier requirement.
+    func test_initialExpandedRows_recurring_existingTask_oneUnanswered_seedsOnlyThatRow() {
+        let task = makeRecurringTask()
+        task.recurrenceIntervalPicked = true
+        // Starts left unanswered.
+        task.recurrenceTimeModePicked = true
+
+        let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: false)
+
+        XCTAssertEqual(rows, [.starts])
+    }
+
+    /// Filling in a field on a new task collapses only that field — the
+    /// same "picked flag flips, isXConfigured reads true" mechanism
+    /// self-collapse is conditioned on (`expandedRows.remove(.x)` at each
+    /// call site), demonstrated here against a starting set that has
+    /// every other row open too. `Set.remove` only ever touches the
+    /// element named, so the other three rows being left alone isn't
+    /// separately asserted — that's a stdlib guarantee, not new logic.
+    func test_fillingRepeatsOnNewTask_wouldCollapseOnlyRepeats() {
+        let task = makeRecurringTask()
+        let seeded = TaskReviewCard.initialExpandedRows(task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: true)
+        XCTAssertEqual(seeded, [.repeats, .starts, .time, .duration, .ends], "starting point: everything open")
+
+        TaskReviewCard.selectRecurrenceUnit(task.recurrenceUnit, on: task) // answers Repeats (Specific Date needs nothing else)
+
+        XCTAssertTrue(TaskReviewCard.isRepeatsConfigured(task: task, shelf: task.shelf), "this is the condition each self-collapse call site checks before removing just .repeats from expandedRows")
     }
 }
