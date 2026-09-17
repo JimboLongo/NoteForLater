@@ -159,7 +159,18 @@ struct NightlyReviewView: View {
         // reads are `advance()`/`back()`'s own arithmetic, both of which
         // re-derive fresh off the enum's current order every time, never a
         // stored number from a previous run.
-        case chooseDay, habits, twoMinuteTasks, today, inbox, atRisk, meals, tomorrow
+        // Order is the declaration order — `advance()`/`back()` do
+        // `rawValue ±1` off whatever this says, never a hardcoded number,
+        // and nothing persists a raw value across launches (`step` is plain
+        // `@State`, always starting at `.chooseDay`). So reordering is this
+        // line plus nothing else.
+        //
+        // Inbox now precedes the 2-Minute step and both precede Review
+        // Schedule, so shelf changes made while sorting the Inbox are
+        // already in place by the time anything schedules against them.
+        // That also separated "arriving at Inbox" from "leaving Review
+        // Schedule", which used to be the same edge — see `runExitEffects`.
+        case chooseDay, habits, inbox, twoMinuteTasks, today, atRisk, meals, tomorrow
 
         /// `planDate` is only meaningful for `.meals`/`.tomorrow` — the day
         /// right after whichever day was picked in Choose Day, not
@@ -200,6 +211,28 @@ struct NightlyReviewView: View {
             case .tomorrow: return "Plan Tomorrow"
             }
         }
+
+        /// What leaving this step commits, if anything.
+        ///
+        /// Exists so the *anchor* is assertable from a test rather than
+        /// only readable in `runExitEffects`. The commit used to hang off
+        /// arriving at `.inbox`; it belongs to leaving `.today`, and those
+        /// stopped being the same edge when Inbox moved ahead of Review
+        /// Schedule.
+        enum ExitEffect: Equatable { case commitReviewSchedule }
+
+        var exitEffect: ExitEffect? {
+            switch self {
+            case .today: return .commitReviewSchedule
+            default: return nil
+            }
+        }
+
+        /// `back()` deliberately runs no exit effects — reversing out of
+        /// Review Schedule must not re-commit. Pinned as a constant so the
+        /// intent is assertable; `back()` itself passes `onEnter: { _ in }`
+        /// and never calls `runExitEffects`.
+        static let exitEffectsRunOnAdvanceOnly = true
 
         /// Steps `advance()`/`back()` are allowed to walk straight past
         /// when they turn out empty — deliberately excludes `.chooseDay`
@@ -543,6 +576,60 @@ struct NightlyReviewView: View {
     /// `guaranteePlacement`) to run, exactly as if the user had tapped
     /// Next onto it and then off again, even though it's never actually
     /// shown on screen.
+    /// Effects that belong to *leaving* a step, not entering one.
+    ///
+    /// The Review Schedule commit lives here. It used to hang off
+    /// `runEntryEffects(for: .inbox)` — but its own comment always said
+    /// what it meant: *"this whole batch runs 'on Next from the Today
+    /// step'"*. Arriving at Inbox and leaving Review Schedule were the same
+    /// edge only because those steps were adjacent. Reordering separated
+    /// them, so the anchor moved to the thing it was always about.
+    ///
+    /// Keyed to departure rather than arrival deliberately: it now survives
+    /// any future reordering, because nothing about it depends on which
+    /// step comes next.
+    ///
+    /// Only `advance()` calls this. `back()` does not — reversing out of
+    /// Review Schedule must not re-commit — which is the same reason
+    /// `back()` passes `onEnter: { _ in }`. The batch is independently safe
+    /// against re-entry either way (see
+    /// `NightlyReviewCommitTests.test_runningTwice_doesNotDoublePush`), but
+    /// that is a backstop, not the mechanism.
+    private func runExitEffects(for current: Step) {
+        if current.exitEffect == .commitReviewSchedule, todayViewModel != nil, let tomorrowViewModel {
+            // Body lifted verbatim into `ScheduleReviewViewModel
+            // .commitTodayStep` / `.finishTodayStepCommit` — see those for
+            // what it does and why it had to move (it was unreachable from
+            // any test in here, and sabotaging the whole batch failed
+            // nothing).
+            //
+            // The `Task {}` stays unstructured here, exactly as before.
+            // That is a latent risk rather than a new one: nothing awaits
+            // it, so dismissing the review cannot know it finished. On the
+            // open list rather than changed under cover of a move.
+            let handoff = ScheduleReviewViewModel.commitTodayStep(
+                reviewableBlocks: reviewableBlocks,
+                reviewCutoff: reviewCutoff,
+                allBlocks: allBlocks,
+                allTasks: allTasks,
+                reviewDate: reviewDate,
+                immediatelyPushedRecurringOccurrenceIDs: &immediatelyPushedRecurringOccurrenceIDs,
+                modelContext: modelContext,
+                markUnresolvedHabitOccurrencesAsMissed: markUnresolvedHabitOccurrencesAsMissed
+            )
+            Task {
+                await ScheduleReviewViewModel.finishTodayStepCommit(
+                    handoff,
+                    tomorrowViewModel: tomorrowViewModel,
+                    allShelves: allShelves,
+                    allHabits: allHabits,
+                    eligibleHoursWindows: eligibleHoursWindows,
+                    modelContext: modelContext
+                )
+            }
+        }
+    }
+
     private func runEntryEffects(for next: Step) {
         if next == .habits {
             // Frozen exactly once, on entry — see `frozenTodayHabitOccurrences`'s
@@ -603,38 +690,6 @@ struct NightlyReviewView: View {
         if next == .inbox {
             startAttributeReviewSession()
         }
-        if next == .inbox, todayViewModel != nil, let tomorrowViewModel {
-            // Body lifted verbatim into `ScheduleReviewViewModel
-            // .commitTodayStep` / `.finishTodayStepCommit` — see those for
-            // what it does and why it had to move (it was unreachable from
-            // any test in here, and sabotaging the whole batch failed
-            // nothing).
-            //
-            // The `Task {}` stays unstructured here, exactly as before.
-            // That is a latent risk rather than a new one: nothing awaits
-            // it, so dismissing the review cannot know it finished. Noted
-            // on the open list rather than changed under cover of a move.
-            let handoff = ScheduleReviewViewModel.commitTodayStep(
-                reviewableBlocks: reviewableBlocks,
-                reviewCutoff: reviewCutoff,
-                allBlocks: allBlocks,
-                allTasks: allTasks,
-                reviewDate: reviewDate,
-                immediatelyPushedRecurringOccurrenceIDs: &immediatelyPushedRecurringOccurrenceIDs,
-                modelContext: modelContext,
-                markUnresolvedHabitOccurrencesAsMissed: markUnresolvedHabitOccurrencesAsMissed
-            )
-            Task {
-                await ScheduleReviewViewModel.finishTodayStepCommit(
-                    handoff,
-                    tomorrowViewModel: tomorrowViewModel,
-                    allShelves: allShelves,
-                    allHabits: allHabits,
-                    eligibleHoursWindows: eligibleHoursWindows,
-                    modelContext: modelContext
-                )
-            }
-        }
         if next == .tomorrow, let tomorrowViewModel {
             // The Inbox step just left can route tasks onto a shelf via
             // `TaskReviewCard.advance()`, which already sets
@@ -694,6 +749,10 @@ struct NightlyReviewView: View {
         if step == .chooseDay {
             setupViewModels()
         }
+        // Before `step` moves, so the batch still sees the step it belongs
+        // to. Auto-skip can carry the landing several steps forward; the
+        // departure is a single, known edge regardless.
+        runExitEffects(for: step)
         let start = Step(rawValue: step.rawValue + 1) ?? .tomorrow
         let result = StepAutoSkip.walkForward(
             from: start,

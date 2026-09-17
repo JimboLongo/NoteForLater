@@ -199,6 +199,48 @@ final class NightlyReviewCommitTests: XCTestCase {
         )
     }
 
+    // MARK: - The trigger: which edge fires it
+
+    /// **The re-anchor, pinned.** The commit is keyed to *leaving* Review
+    /// Schedule, not to arriving at Inbox.
+    ///
+    /// Those were the same edge until the reorder put Inbox first — and the
+    /// old code keyed on arrival while its own comment said it meant
+    /// departure ("this whole batch runs 'on Next from the Today step'").
+    /// Keying on departure also makes it survive the next reorder.
+    func test_commitFiresOnLeavingReviewSchedule_notOnEnteringInbox() {
+        XCTAssertEqual(NightlyReviewView.Step.today.exitEffect, .commitReviewSchedule)
+        for step in NightlyReviewView.Step.allCases where step != .today {
+            XCTAssertNil(step.exitEffect, "\(step) must not commit")
+        }
+    }
+
+    /// ⚠️ **What these two tests do NOT cover: the wiring.**
+    ///
+    /// They pin which step *declares* the commit. They cannot see whether
+    /// `advance()` actually calls `runExitEffects` — deleting that one line
+    /// so the batch never fires at all is caught by **nothing** (verified by
+    /// sabotage: 0 failures).
+    ///
+    /// Same shape as the `CardRow`-vs-render drift: the rule is asserted,
+    /// the code that consumes the rule is not, and the failure shows up as
+    /// something that silently stops happening. It survives here because
+    /// `advance()` is a private method on a SwiftUI `View`, the same
+    /// unreachability that left the batch itself uncovered until 3f2d959.
+    ///
+    /// Closing it means extracting the step-transition logic the way the
+    /// batch itself was extracted — `StepAutoSkip.walkForward` is already a
+    /// testable free function, so the seam exists. Not done here: that is a
+    /// second extraction, and this change is already anchored on one.
+    ///
+    /// `back()` must never re-commit. It passes `onEnter: { _ in }` and
+    /// never calls the exit hook, so stepping back into Review Schedule and
+    /// forward again fires the batch a second time *by design of the
+    /// view* — which is why the batch itself is also re-entry safe below.
+    func test_onlyForwardNavigationHasAnExitEffect() {
+        XCTAssertTrue(NightlyReviewView.Step.exitEffectsRunOnAdvanceOnly)
+    }
+
     // MARK: - Runs once
 
     /// **The property the re-anchoring has to preserve.** Running the batch

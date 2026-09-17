@@ -79,12 +79,27 @@ final class NightlyReviewHabitsStepTests: XCTestCase {
     /// `.twoMinuteTasks` must come right after `.habits` — pins the full
     /// intended order (chooseDay -> habits -> twoMinuteTasks -> ...), not
     /// just the first hop.
-    func test_twoMinuteTasksStep_immediatelyFollowsHabits() {
-        let habitsRawValue = NightlyReviewView.Step.habits.rawValue
+    /// Was `test_twoMinuteTasksStep_immediatelyFollowsHabits`. **Updated
+    /// for the reorder, not deleted:** Inbox now sits between them, so that
+    /// shelf changes made while sorting the Inbox are in place before
+    /// anything schedules against them.
+    ///
+    /// Still pins that Habits comes straight after Choose Day — the one
+    /// ordering constraint that is structural rather than preference, since
+    /// the habit list depends on `reviewDate`, which Choose Day sets.
+    func test_inboxImmediatelyFollowsHabits_andHabitsFollowsChooseDay() {
+        XCTAssertEqual(NightlyReviewView.Step(rawValue: NightlyReviewView.Step.chooseDay.rawValue + 1), .habits)
+        XCTAssertEqual(NightlyReviewView.Step(rawValue: NightlyReviewView.Step.habits.rawValue + 1), .inbox)
+    }
 
-        let next = NightlyReviewView.Step(rawValue: habitsRawValue + 1)
-
-        XCTAssertEqual(next, .twoMinuteTasks)
+    /// The full order, pinned as an exact array. Order is user-visible, and
+    /// `advance()`/`back()` derive from declaration order — so a reorder
+    /// should be an explicit diff here rather than a silent behaviour shift.
+    func test_stepOrder() {
+        XCTAssertEqual(
+            NightlyReviewView.Step.allCases,
+            [.chooseDay, .habits, .inbox, .twoMinuteTasks, .today, .atRisk, .meals, .tomorrow]
+        )
     }
 
     // MARK: - Fail-then-pass target: `.habits` is auto-skip eligible, unlike `.today`
@@ -118,7 +133,8 @@ final class NightlyReviewHabitsStepTests: XCTestCase {
         )
 
         XCTAssertEqual(result.landed, .today)
-        XCTAssertEqual(result.skipped, [.habits, .twoMinuteTasks])
+        XCTAssertEqual(result.skipped, [.habits, .inbox, .twoMinuteTasks],
+                       "Inbox now sits between Habits and the 2-Minute step")
     }
 
     // MARK: - The Habits step's own gate

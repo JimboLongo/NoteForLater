@@ -138,13 +138,19 @@ final class NightlyReviewAutoSkipTests: XCTestCase {
         XCTAssertEqual(result.skipped, [.twoMinuteTasks])
     }
 
-    /// Same shape, starting at `.inbox` so every remaining eligible step
-    /// (`.inbox`, `.atRisk`, `.meals`) reports empty and gets skipped —
-    /// the walk must still stop dead at `.tomorrow`, never past it,
-    /// because `.tomorrow` is likewise excluded from `autoSkipEligible`.
+    /// Same shape, starting at `.atRisk` so every remaining eligible step
+    /// (`.atRisk`, `.meals`) reports empty and gets skipped — the walk must
+    /// still stop dead at `.tomorrow`, never past it, because `.tomorrow`
+    /// is likewise excluded from `autoSkipEligible`.
+    ///
+    /// Started at `.inbox` before the reorder, which then had nothing but
+    /// eligible steps left ahead of it. Inbox now precedes `.today`, which
+    /// is *not* auto-skippable, so a walk from there stops at Review
+    /// Schedule and never reaches the property under test. Moved to the
+    /// first step after `.today` to keep testing what it was written for.
     func test_realStep_tomorrowNeverAutoSkippedEvenWhenReportedEmpty() {
         let result = StepAutoSkip.walkForward(
-            from: NightlyReviewView.Step.inbox,
+            from: NightlyReviewView.Step.atRisk,
             next: { NightlyReviewView.Step(rawValue: $0.rawValue + 1) ?? .tomorrow },
             isEligible: { NightlyReviewView.Step.autoSkipEligible.contains($0) },
             isEmpty: { _ in true },
@@ -153,7 +159,7 @@ final class NightlyReviewAutoSkipTests: XCTestCase {
         )
 
         XCTAssertEqual(result.landed, .tomorrow)
-        XCTAssertEqual(result.skipped, [.inbox, .atRisk, .meals])
+        XCTAssertEqual(result.skipped, [.atRisk, .meals])
     }
 
     /// `.chooseDay` is never reached as a forward "next" candidate in
