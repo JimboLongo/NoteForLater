@@ -2644,27 +2644,6 @@ struct TaskReviewCard: View {
         )
     }
 
-    /// Backs the Occurrence Time wheels directly with minutes-since-
-    /// midnight — `HourMinutePeriodPicker` works in hour/minute/period
-    /// terms, not `Date`, so there's no `DatePicker`-carrier round trip
-    /// needed here at all. Reads `effectiveRecurrenceTimeOfDayMinutes`
-    /// (not the raw field) so an existing recurring task that's never
-    /// touched this picker shows its actual current placement time
-    /// (derived from `dueDate`) rather than a misleading default the
-    /// moment the card opens. Retimes every future block on `set` — see
-    /// `TaskItem.retimeFutureSpecificOccurrences`'s own doc comment for
-    /// why this updates in place instead of deferring to the next
-    /// regenerate.
-    private var recurrenceTimeMinutesBinding: Binding<Int> {
-        Binding(
-            get: { task.effectiveRecurrenceTimeOfDayMinutes },
-            set: { newValue in
-                task.recurrenceTimeOfDayMinutes = newValue
-                task.retimeFutureSpecificOccurrences()
-            }
-        )
-    }
-
     /// Formats minutes-since-midnight (e.g. `570` → "9:30 AM") for the
     /// Occurrence Time button's label — routes through `Date` purely
     /// because `DateFormatter`/`.formatted(time:)` only know how to
@@ -3183,12 +3162,12 @@ struct TaskReviewCard: View {
     /// "9:00 AM" for Specific Time, or the bare mode label
     /// ("AM"/"Midday"/"PM") for an untimed occurrence.
     ///
-    /// This used to append the duration ("9:00 AM · 30 min"), from when
-    /// Duration was folded into this same "Time" row and had nowhere else
-    /// to show. Duration is its own row directly below now, so the suffix
-    /// only restated the next line down. Display-only: nothing reads this
-    /// string, and `isTimeConfigured` still runs its own Duration check —
-    /// dropping the suffix doesn't stop the card prompting for one.
+    /// Just the mode label now. It used to append a duration, and before
+    /// that a clock time for Specific Time — both gone: Duration is its own
+    /// row, and a task can no longer be Specific Time at all. `.specific`
+    /// still has to be handled because `HabitOccurrenceTimeMode` keeps the
+    /// case for habits; it renders its label like any other, and is only
+    /// reachable by a legacy row the migration hasn't run on yet.
     /// Shows the *live* value even before "Time" has actually been
     /// picked — same reasoning, and same "cosmetic only" guarantee, as
     /// `repeatsSummaryText`'s own doc comment: `recurrenceTimeMode`'s
@@ -3199,12 +3178,7 @@ struct TaskReviewCard: View {
     /// `missingAttributeNames` — this alone doesn't make a task silently,
     /// unconfirmedly Midday.
     private var timeSummaryText: String {
-        switch task.recurrenceTimeMode {
-        case .am, .midday, .pm:
-            return task.recurrenceTimeMode.label
-        case .specific:
-            return Self.formattedTime(minutesSinceMidnight: recurrenceTimeMinutesBinding.wrappedValue)
-        }
+        task.recurrenceTimeMode.label
     }
 
     /// "Never" is a real, fully-decided answer (see `isEndsExpanded`'s
@@ -4613,96 +4587,6 @@ private struct StartDateCalendarPicker: UIViewRepresentable {
             guard let dateComponents, let date = Calendar.current.date(from: dateComponents) else { return }
             onSelect(date)
         }
-    }
-}
-
-/// Three plain SwiftUI `Picker(.wheel)`s — hour (1–12), minute (in
-/// 15-minute steps: 0/15/30/45), AM/PM — rather than a `DatePicker` of
-/// any kind. This used to be `QuarterHourTimePicker`, a `UIDatePicker`
-/// (`.time` mode) wrapped in `UIViewRepresentable`, built to get
-/// `minuteInterval = 15` since SwiftUI's own time `DatePicker` has no
-/// such knob. But `UIDatePicker` in `.time` mode spins its wheels
-/// infinitely regardless — that's standard UIKit behavior for a time
-/// picker, not something `minuteInterval` changes — so it never actually
-/// stopped at 12/45 the way a bounded picker should. A plain
-/// `Picker(.wheel)` over a finite, explicit set of tags (`1...12`,
-/// `[0, 15, 30, 45]`) doesn't wrap: SwiftUI's wheel picker only spins
-/// forever when its `ForEach` content is unbounded or synthetically
-/// looped, neither of which applies here. `HabitEditView`'s own
-/// `WrappingTimePicker` isn't reused either — that's a single continuous
-/// wheel with its own formatted-label rows on a fixed 10-minute grid, a
-/// different interaction shape from the three-wheel hour/minute/period
-/// layout every other time-of-day question in this app already presents.
-private struct HourMinutePeriodPicker: View {
-    @Binding var minutesSinceMidnight: Int
-
-    // Each wheel reads/writes through `QuarterHourClockTime` rather than
-    // doing its own hour/minute/period arithmetic inline — same
-    // conversion `RecurringTaskTimePickerTests` exercises directly, so
-    // there's one implementation, not a tested copy and a second
-    // untested one living here.
-    private var hour12: Binding<Int> {
-        Binding(
-            get: { QuarterHourClockTime(minutesSinceMidnight: minutesSinceMidnight).hour12 },
-            set: { newHour12 in
-                var clock = QuarterHourClockTime(minutesSinceMidnight: minutesSinceMidnight)
-                clock.hour12 = newHour12
-                minutesSinceMidnight = clock.minutesSinceMidnight
-            }
-        )
-    }
-
-    private var minuteComponent: Binding<Int> {
-        Binding(
-            get: { QuarterHourClockTime(minutesSinceMidnight: minutesSinceMidnight).minute },
-            set: { newMinute in
-                var clock = QuarterHourClockTime(minutesSinceMidnight: minutesSinceMidnight)
-                clock.minute = newMinute
-                minutesSinceMidnight = clock.minutesSinceMidnight
-            }
-        )
-    }
-
-    private var isPM: Binding<Bool> {
-        Binding(
-            get: { QuarterHourClockTime(minutesSinceMidnight: minutesSinceMidnight).isPM },
-            set: { newIsPM in
-                var clock = QuarterHourClockTime(minutesSinceMidnight: minutesSinceMidnight)
-                clock.isPM = newIsPM
-                minutesSinceMidnight = clock.minutesSinceMidnight
-            }
-        )
-    }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            Picker("Hour", selection: hour12) {
-                ForEach(1...12, id: \.self) { hour in
-                    Text("\(hour)").tag(hour)
-                }
-            }
-            .pickerStyle(.wheel)
-            .frame(width: 60)
-
-            Text(":")
-                .font(.title3.weight(.semibold))
-
-            Picker("Minute", selection: minuteComponent) {
-                ForEach([0, 15, 30, 45], id: \.self) { minute in
-                    Text(String(format: "%02d", minute)).tag(minute)
-                }
-            }
-            .pickerStyle(.wheel)
-            .frame(width: 60)
-
-            Picker("Period", selection: isPM) {
-                Text("AM").tag(false)
-                Text("PM").tag(true)
-            }
-            .pickerStyle(.wheel)
-            .frame(width: 70)
-        }
-        .frame(height: 150)
     }
 }
 

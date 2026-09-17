@@ -67,22 +67,6 @@ final class RecurringTaskTimePickerTests: XCTestCase {
 
     // MARK: - The projection for a future day uses it too
 
-    func test_projectedRecurringTaskOccurrence_usesExplicitTimeOfDay() {
-        let anchor = day(2026, 9, 1)
-        let task = makeSpecificTimeTask(anchor: anchor)
-        task.recurrenceTimeOfDayMinutes = 7 * 60 + 15 // 7:15 AM
-
-        let futureDay = day(2026, 9, 20)
-        let result = ScheduleReviewViewModel.projectedRecurringTaskOccurrences(
-            tasks: [task], materializedRows: [], targetDate: futureDay, context: context, calendar: calendar, today: anchor
-        )
-
-        XCTAssertEqual(result.count, 1)
-        let components = calendar.dateComponents([.hour, .minute], from: result.first!.startTime)
-        XCTAssertEqual(components.hour, 7)
-        XCTAssertEqual(components.minute, 15)
-    }
-
     // MARK: - Switching modes and back preserves the time
 
     func test_switchingAwayFromSpecificAndBack_preservesTimeOfDay() {
@@ -127,44 +111,6 @@ final class RecurringTaskTimePickerTests: XCTestCase {
     }
 
     // MARK: - Changing the time moves already-generated future blocks
-
-    func test_retimeFutureSpecificOccurrences_movesFutureIncompleteBlocks_leavesPastAndCompletedAlone() {
-        let today = day(2026, 9, 10)
-        let task = makeSpecificTimeTask(anchor: day(2026, 9, 1))
-
-        let pastBlock = ScheduledBlock(
-            date: day(2026, 9, 5),
-            startTime: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: day(2026, 9, 5))!,
-            endTime: calendar.date(bySettingHour: 9, minute: 15, second: 0, of: day(2026, 9, 5))!,
-            task: task
-        )
-        context.insert(pastBlock)
-
-        let completedFutureBlock = ScheduledBlock(
-            date: day(2026, 9, 15),
-            startTime: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: day(2026, 9, 15))!,
-            endTime: calendar.date(bySettingHour: 9, minute: 15, second: 0, of: day(2026, 9, 15))!,
-            task: task
-        )
-        completedFutureBlock.isCompleted = true
-        context.insert(completedFutureBlock)
-
-        let futureBlock = ScheduledBlock(
-            date: day(2026, 9, 20),
-            startTime: calendar.date(bySettingHour: 9, minute: 0, second: 0, of: day(2026, 9, 20))!,
-            endTime: calendar.date(bySettingHour: 9, minute: 15, second: 0, of: day(2026, 9, 20))!,
-            task: task
-        )
-        context.insert(futureBlock)
-
-        task.recurrenceTimeOfDayMinutes = 18 * 60 // 6 PM
-        task.retimeFutureSpecificOccurrences(today: today, calendar: calendar)
-
-        XCTAssertEqual(calendar.component(.hour, from: pastBlock.startTime), 9, "a past block must not move")
-        XCTAssertEqual(calendar.component(.hour, from: completedFutureBlock.startTime), 9, "a completed block must not move, even if its date is in the future")
-        XCTAssertEqual(calendar.component(.hour, from: futureBlock.startTime), 18, "a future, incomplete block must follow the new time")
-        XCTAssertEqual(futureBlock.endTime.timeIntervalSince(futureBlock.startTime), 15 * 60, "duration must be preserved")
-    }
 
     // MARK: - `QuarterHourClockTime` — the Occurrence Time wheels' own conversion
 

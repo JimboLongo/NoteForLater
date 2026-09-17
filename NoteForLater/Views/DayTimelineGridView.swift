@@ -83,7 +83,6 @@ final class ScrollGeometryBox {
 /// projection reads its own (so far nonexistent) log and stays open.
 ///
 /// Deliberately **not** a `ScheduledBlock` stand-in beyond sharing its
-/// time/title for display: `DayTimelineRow.projectedRecurringTask`'s own
 /// case (see below) is what actually keeps it from being confused with a
 /// real block everywhere that matters — `isLockedRow` reports it locked
 /// (same mechanism a habit-linked block already uses to mean "tap to
@@ -429,24 +428,6 @@ struct DayTimelineGridView: View {
         return result
     }
 
-    /// Specific-Time recurring task occurrences that need a *projection*
-    /// (see `ProjectedRecurringTaskOccurrence`) — only for a task with no
-    /// real `ScheduledBlock` already on `targetDate`. A real block,
-    /// whenever generation has already reached that far, is still the
-    /// actual row shown (drag/replace/lock all keep working on it exactly
-    /// as before) — this is purely the fallback for a day generation
-    /// hasn't reached yet, never a duplicate of a block that already
-    /// exists. `materializedRows` (not the merged `rows` `body` actually
-    /// renders) is what's checked here deliberately — checking the merged
-    /// list would make "already has a block" and "already has a
-    /// projection from an earlier call" indistinguishable, risking a
-    /// projection re-projecting itself.
-    private func projectedRecurringTaskOccurrences(carriedForwardTaskIDs: Set<UUID>) -> [ProjectedRecurringTaskOccurrence] {
-        ScheduleReviewViewModel.projectedRecurringTaskOccurrences(
-            tasks: allTasks, materializedRows: materializedRows, targetDate: targetDate, carriedForwardTaskIDs: carriedForwardTaskIDs, context: modelContext
-        )
-    }
-
     private var amOccurrences: [OpenHabitOccurrence] { openHabitOccurrences(mode: .am) }
     private var middayOccurrences: [OpenHabitOccurrence] { openHabitOccurrences(mode: .midday) }
     private var pmOccurrences: [OpenHabitOccurrence] { openHabitOccurrences(mode: .pm) }
@@ -600,14 +581,12 @@ struct DayTimelineGridView: View {
         // bounded backward/forward walk independently.
         let carriedForwardTaskIDs = computeCarriedForwardTaskIDs()
         let occurrenceLists = computeOpenHabitOccurrenceLists(carriedForwardTaskIDs: carriedForwardTaskIDs)
-        // Computed once here, same reasoning as `occurrenceLists` above —
-        // every other use of the day's rows below (the hour bounds, the
-        // AM/PM split, and each `DayTimelineSegment` itself) reads this
-        // one local rather than re-deriving it, so a projected occurrence
-        // never costs more than one `projectedRecurringTaskOccurrences()`
-        // call per body pass no matter how many times its result is
-        // consulted.
-        let displayRows = materializedRows + projectedRecurringTaskOccurrences(carriedForwardTaskIDs: carriedForwardTaskIDs).map(DayTimelineRow.projectedRecurringTask)
+        // Projected rows are gone: they existed only for Specific-Time
+        // recurring tasks, which no longer exist (see
+        // `HabitOccurrenceTimeMode.taskSelectableCases`). Every recurring
+        // task surfaces through `openRecurringTaskOccurrences(mode:)`
+        // instead, in the day's untimed sections.
+        let displayRows = materializedRows
         let hourRange = visibleHourRange(rows: displayRows)
         let morningQuarterRange = morningRange(hourRange: hourRange)
         let afternoonQuarterRange = afternoonRange(hourRange: hourRange)
@@ -1793,11 +1772,6 @@ private struct DayTimelineSegment: View {
             } else {
                 actionsTargetBlock = block
             }
-        case .projectedRecurringTask(let occurrence):
-            // No real block to open an actions sheet for — the whole row
-            // just toggles completion, same as tapping the AM/Midday/PM
-            // occurrence rows above the grid already does.
-            onCycleRecurringTaskOccurrence(occurrence.task)
         }
     }
 
@@ -2053,7 +2027,6 @@ private struct DayTimelineSegment: View {
         switch draggedRow {
         case .event(let event): draggedRef = .event(event.id)
         case .proposed(let block): draggedRef = .block(block.id)
-        case .projectedRecurringTask: draggedRef = nil
         }
         guard let draggedRef else { return }
         var unlockedOrder: [ScheduleReviewViewModel.TimelineEntryRef] = rows.compactMap { entry in
@@ -2062,9 +2035,6 @@ private struct DayTimelineSegment: View {
                 return lockedStore.isLocked(event.id) ? nil : .event(event.id)
             case .proposed(let block):
                 return block.isLocked ? nil : .block(block.id)
-            case .projectedRecurringTask:
-                // No real block to reorder or ripple against.
-                return nil
             }
         }
         if preferSideBySide,
@@ -2076,7 +2046,6 @@ private struct DayTimelineSegment: View {
             switch target {
             case .event(let event): targetRef = .event(event.id)
             case .proposed(let block): targetRef = .block(block.id)
-            case .projectedRecurringTask: targetRef = nil
             }
             if let targetRef {
                 unlockedOrder.removeAll { $0 == targetRef }
@@ -2173,15 +2142,6 @@ private struct DayTimelineSegment: View {
             // comment) — checked here too regardless, same defense-in-depth
             // the habit case already has, in case that ever changes.
             return block.isLocked || block.habit != nil || block.mealSelection != nil
-        case .projectedRecurringTask:
-            // Same reasoning as the habit case above, and for the same
-            // reason: there's no real block here to drag, ripple, swipe-
-            // delete, or replace — the only thing a projection can do is
-            // report its own day's completion. Reusing "locked" rather
-            // than adding a parallel concept is what makes every one of
-            // those gestures (all keyed off this same flag) disable
-            // themselves for free instead of needing their own case.
-            return true
         }
     }
 
@@ -2331,63 +2291,6 @@ private struct DayTimelineSegment: View {
                                 }
                             )
                     }
-                }
-                .padding(2)
-            }
-        case .projectedRecurringTask(let occurrence):
-            // Dashed outline and no fill — deliberately the opposite
-            // visual weight of a real block's solid, shelf-colored card,
-            // so this never reads as "a task that's actually scheduled."
-            // The recurring-arrow icon reinforces the same thing at a
-            // glance: this is a standing pattern showing through on a day
-            // nothing has actually been placed on yet, not a commitment.
-            Group {
-                if isCompact {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text(occurrence.task.title)
-                            .font(.caption.weight(.semibold))
-                            .lineLimit(1)
-                            .strikethrough(occurrence.isCompleted)
-                        if occurrence.isPushed {
-                            pushedTag
-                        }
-                        Text(timeRangeText(occurrence.startTime, occurrence.endTime))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                } else {
-                    VStack(alignment: .leading, spacing: 1) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.caption2)
-                            Text(occurrence.task.title)
-                                .font(.caption.weight(.semibold))
-                                .lineLimit(2)
-                                .strikethrough(occurrence.isCompleted)
-                            if occurrence.isPushed {
-                                pushedTag
-                            }
-                        }
-                        .foregroundStyle(occurrence.isCompleted ? .secondary : .primary)
-                        Text(timeRangeText(occurrence.startTime, occurrence.endTime))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .padding(6)
-            .frame(maxWidth: .infinity, alignment: isCompact ? .leading : .topLeading)
-            .frame(height: height, alignment: isCompact ? .center : .top)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.4), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
-            .opacity(occurrence.isCompleted || occurrence.isMissed ? 0.5 : 1)
-            .overlay(alignment: .topTrailing) {
-                completeCircle(isCompleted: occurrence.isCompleted, isMissed: occurrence.isMissed) {
-                    onCycleRecurringTaskOccurrence(occurrence.task)
                 }
                 .padding(2)
             }

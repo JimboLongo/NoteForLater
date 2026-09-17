@@ -49,20 +49,18 @@ final class PushedRecurringOccurrence {
 }
 
 extension PushedRecurringOccurrence {
-    /// True once a real, already-complete representation exists for
-    /// `occurrence.currentDate` — a Specific Time block someone checked
-    /// off on the calendar, or (AM/Midday/PM) a completed
-    /// `RecurringTaskLog` for that day. Checked *before* trying to push
+    /// True once a completed `RecurringTaskLog` exists for
+    /// `occurrence.currentDate`.
+    ///
+    /// There used to be a second source here: a Specific Time block checked
+    /// off on the calendar. A recurring task has no block any more, and
+    /// `RecurringTaskLog` is its single source of truth regardless of mode
+    /// (see `TaskItem.cycleRecurringOccurrence`). Checked *before* trying to push
     /// further, so completing the pushed instance through its normal,
     /// already-existing "mark complete" UI is all it takes to resolve the
     /// chain — nothing else needs to know a push was ever in progress.
     static func isAlreadyResolved(_ occurrence: PushedRecurringOccurrence, task: TaskItem, calendar: Calendar, context: ModelContext) -> Bool {
-        if task.recurrenceTimeMode == .specific {
-            return (task.scheduledBlocks ?? []).contains {
-                calendar.isDate($0.date, inSameDayAs: occurrence.currentDate) && $0.isCompleted
-            }
-        }
-        return RecurringTaskLog.log(taskID: task.id, on: occurrence.currentDate, context: context, calendar: calendar)?.isCompleted ?? false
+        RecurringTaskLog.log(taskID: task.id, on: occurrence.currentDate, context: context, calendar: calendar)?.isCompleted ?? false
     }
 
     /// Advances `occurrence` forward by exactly one day, from `cursor`
@@ -81,68 +79,24 @@ extension PushedRecurringOccurrence {
     /// recurrence day for `task` — the ordinary recurrence pattern takes
     /// over from there, with `AISchedulingService
     /// .placeHabitsAndRecurringTasks`'s own "already exists" check
-    /// preventing a duplicate once a Specific Time block is later inserted
-    /// for that same day. Otherwise relocates the Specific Time placeholder
-    /// block (a no-op for AM/Midday/PM — see `relocatePlaceholderBlock`)
-    /// and advances `occurrence.currentDate`. Returns whether the
-    /// occurrence was resolved, so a calling loop knows to stop.
+    /// preventing a duplicate. Otherwise advances `occurrence.currentDate`.
+    /// Returns whether the occurrence was resolved, so a calling loop knows
+    /// to stop.
+    ///
+    /// This used to relocate a Specific Time placeholder `ScheduledBlock`
+    /// alongside the date advance, and delete it on resolve. A recurring
+    /// task can no longer be Specific Time (see `HabitOccurrenceTimeMode
+    /// .taskSelectableCases`), so it has no block to move — the push is
+    /// purely a date advance now, and completion lives in
+    /// `RecurringTaskLog` for every recurring task.
     @discardableResult
     static func advanceOneHop(_ occurrence: PushedRecurringOccurrence, task: TaskItem, from cursor: Date, to next: Date, calendar: Calendar, context: ModelContext) -> Bool {
         if task.hasRecurringOccurrence(on: next, calendar: calendar) {
-            removePlaceholderBlock(for: task, on: cursor, calendar: calendar, context: context)
             context.delete(occurrence)
             return true
         }
-        relocatePlaceholderBlock(for: task, from: cursor, to: next, calendar: calendar, context: context)
         occurrence.currentDate = next
         return false
     }
 
-    /// Moves the Specific Time placeholder `ScheduledBlock` for a pushed
-    /// occurrence from `oldDate` to `newDate` — or creates it fresh at
-    /// `newDate` if none exists yet, which is exactly the case on the very
-    /// first push (`clearIncompletePastBlocks` already deleted the
-    /// original incomplete block before this ever runs). Either way there
-    /// is only ever one block tracking the chain, never one left behind
-    /// at every day it passed through. No-op for AM/Midday/PM tasks —
-    /// those have no `ScheduledBlock` at all; `DayTimelineGridView` reads
-    /// `PushedRecurringOccurrence.currentDate` directly instead.
-    ///
-    /// Routed through `RippleSchedulingService` (fresh at depth 0 for
-    /// each hop — a multi-day catch-up walk is a series of independent
-    /// placements, not one long recursion chain) rather than just
-    /// setting the date/time directly, so a recurring task's push gets
-    /// the same lock-respecting, bump-don't-overflow treatment an
-    /// ordinary task's does (see `ScheduleReviewViewModel
-    /// .guaranteePlacement`) instead of silently landing on top of
-    /// whatever else is already on `newDate`.
-    private static func relocatePlaceholderBlock(for task: TaskItem, from oldDate: Date, to newDate: Date, calendar: Calendar, context: ModelContext) {
-        guard task.recurrenceTimeMode == .specific else { return }
-        guard let start = task.recurringOccurrenceTime(on: newDate, calendar: calendar) else { return }
-        let minutes = task.estimatedMinutes > 0 ? task.estimatedMinutes : 30
-        let end = start.addingTimeInterval(TimeInterval(minutes * 60))
-        let block: ScheduledBlock
-        if let existing = (task.scheduledBlocks ?? []).first(where: { calendar.isDate($0.date, inSameDayAs: oldDate) }) {
-            existing.date = calendar.startOfDay(for: newDate)
-            existing.startTime = start
-            existing.endTime = end
-            block = existing
-        } else {
-            block = ScheduledBlock(date: newDate, startTime: start, endTime: end, task: task, isEstimatedDuration: task.estimatedMinutes <= 0)
-            context.insert(block)
-        }
-        RippleSchedulingService.insertWithRipple(block, context: context)
-    }
-
-    /// Deletes the Specific Time placeholder block left at `date` once the
-    /// chain resolves onto a real recurrence day — the genuine occurrence
-    /// for that day is created separately by `AISchedulingService
-    /// .placeHabitsAndRecurringTasks`, so the placeholder must go rather
-    /// than sit there as a duplicate.
-    private static func removePlaceholderBlock(for task: TaskItem, on date: Date, calendar: Calendar, context: ModelContext) {
-        guard task.recurrenceTimeMode == .specific else { return }
-        if let existing = (task.scheduledBlocks ?? []).first(where: { calendar.isDate($0.date, inSameDayAs: date) }) {
-            context.delete(existing)
-        }
-    }
 }

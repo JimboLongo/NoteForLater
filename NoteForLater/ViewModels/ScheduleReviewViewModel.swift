@@ -476,8 +476,19 @@ final class ScheduleReviewViewModel {
             if let habit = block.habit {
                 return habit.timeMode(for: block.habitOccurrenceIndex) != .specific
             }
+            // KEPT, not deleted, and deliberately widened from
+            // `task.recurrenceTimeMode != .specific` to plain
+            // `task.isRecurring`. Those are now the same set — a recurring
+            // task can't be Specific Time — so this is a simplification,
+            // not a behavior change.
+            //
+            // It survives stage 4b because it isn't dead: no recurring task
+            // should ever have a future incomplete block again, and this is
+            // the only sweep that cleans one up if one somehow appears. The
+            // migration handles the blocks that exist today; this handles
+            // anything that slips through afterwards.
             if let task = block.task, task.isRecurring {
-                return task.recurrenceTimeMode != .specific
+                return true
             }
             return false
         }
@@ -2332,60 +2343,6 @@ final class ScheduleReviewViewModel {
         }
     }
 
-    /// `DayTimelineGridView.projectedRecurringTaskOccurrences`'s core
-    /// logic, extracted so it's unit-testable without constructing a live
-    /// view. A Specific-Time recurring task's occurrence only shows up on
-    /// the calendar via a real `ScheduledBlock` — block generation
-    /// (`regenerateFromNow`) only reaches as far ahead as its own walk has
-    /// actually run (in practice this is *not* a fixed "today/tomorrow"
-    /// horizon — it's whatever that walk last reached, which can be as
-    /// close as tomorrow if it hasn't run recently or 44 days out
-    /// (`habitPopulationDays` + `taskStallThresholdDays`) if it has), so a
-    /// day past that point would otherwise show nothing at all for it.
-    /// This produces a *projection* instead: pure `TaskItem
-    /// .hasRecurringOccurrence(on:)` date math plus that day's own
-    /// `RecurringTaskLog`, skipped entirely for a task that already has a
-    /// real block on `targetDate` (checked against `materializedRows`, the
-    /// real-only list — never the merged list this feeds into, which would
-    /// make a projection indistinguishable from an already-projected one).
-    ///
-    /// A completed occurrence on a *future* day (strictly after `today`) is
-    /// dropped entirely rather than shown faded — a deliberate divergence
-    /// from every other completed row/block in this app, which stays
-    /// visible as a record of what was actually done. A future day hasn't
-    /// happened yet, so there's nothing to keep a record of — a pre-
-    /// completed occurrence sitting there is just noise. Do not "fix" this
-    /// to match the general convention; it's intentional. `today` is a
-    /// parameter (defaulting to `.now`) rather than reading `Date.now`
-    /// inline purely for testability — production callers never override it.
-    /// `carriedForwardTaskIDs` — see `carriedForwardRecurringTaskIDs` — is
-    /// what lets a task with *no* real recurrence on `targetDate` still
-    /// get a projected row here: an incomplete occurrence from on-or-before
-    /// today, standing in for the real `PushedRecurringOccurrence` Nightly
-    /// Review hasn't created yet. Marked `isPushed` the same as a genuine
-    /// one, reusing the existing "Pushed" indicator rather than a second
-    /// one — see that indicator's own doc comment on `OpenRecurringTaskOccurrence`.
-    static func projectedRecurringTaskOccurrences(tasks: [TaskItem], materializedRows: [DayTimelineRow], targetDate: Date, carriedForwardTaskIDs: Set<UUID> = [], context: ModelContext, calendar: Calendar = .current, today: Date = .now) -> [ProjectedRecurringTaskOccurrence] {
-        let tasksWithRealBlockToday = Set(materializedRows.compactMap { row -> UUID? in
-            guard case .proposed(let block) = row, let task = block.task, task.isRecurring else { return nil }
-            return task.id
-        })
-        let isFutureDay = calendar.startOfDay(for: targetDate) > calendar.startOfDay(for: today)
-        var result: [ProjectedRecurringTaskOccurrence] = []
-        for task in tasks where task.isRecurring && task.recurrenceTimeMode == .specific {
-            guard !tasksWithRealBlockToday.contains(task.id) else { continue }
-            let isCarriedForward = carriedForwardTaskIDs.contains(task.id)
-            guard task.hasRecurringOccurrence(on: targetDate, calendar: calendar) || isCarriedForward,
-                  let startTime = task.recurringOccurrenceTime(on: targetDate, calendar: calendar)
-            else { continue }
-            let status = RecurringTaskLog.log(taskID: task.id, on: targetDate, context: context, calendar: calendar)?.status ?? .none
-            guard !(isFutureDay && status == .complete) else { continue }
-            let endTime = calendar.date(byAdding: .minute, value: max(task.estimatedMinutes, 15), to: startTime) ?? startTime
-            result.append(ProjectedRecurringTaskOccurrence(id: "projectedRecurringTask.\(task.id)", task: task, startTime: startTime, endTime: endTime, status: status, isPushed: isCarriedForward))
-        }
-        return result
-    }
-
     /// Task IDs whose most recent occurrence at or before `today` is still
     /// unresolved and needs to display as carried forward onto
     /// `targetDate` — a stand-in for the real `PushedRecurringOccurrence`
@@ -2445,6 +2402,15 @@ final class ScheduleReviewViewModel {
     /// `projectedRecurringTaskOccurrences` — the only place a *projected*
     /// Specific-Time completion could have landed).
     static func isRecurringTaskOccurrenceComplete(task: TaskItem, on day: Date, context: ModelContext, calendar: Calendar = .current) -> Bool {
+        // KEPT DESPITE BEING UNREACHABLE FOR NEW DATA — do not delete.
+        //
+        // No recurring task can be Specific Time any more, so nothing will
+        // create another block for one. But `migrateRecurringSpecificTimeTasksIfNeeded`
+        // deliberately keeps *past and completed* blocks: they're the record
+        // that the occurrence actually happened. This is the only thing that
+        // still reads them. Deleting it would silently report a genuinely
+        // completed historical occurrence as incomplete — four lines saved
+        // in exchange for losing a user's completion history.
         if task.recurrenceTimeMode == .specific {
             let hasCompletedBlock = (task.scheduledBlocks ?? []).contains { calendar.isDate($0.date, inSameDayAs: day) && $0.isCompleted }
             if hasCompletedBlock { return true }

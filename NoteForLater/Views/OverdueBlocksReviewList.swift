@@ -94,6 +94,12 @@ enum ReviewItem: Identifiable {
         case .habit: return false // unreachable — see `unresolvedGateReviewItems`'s own doc comment
         case .recurringTask(let occurrence): return occurrence.status == .none
         case .block(let block):
+            // KEPT DESPITE BEING UNREACHABLE FOR NEW DATA — same reason as
+            // `ScheduleReviewViewModel.isRecurringTaskOccurrenceComplete`'s
+            // own retained branch. The migration keeps past incomplete
+            // blocks, and an overdue-review row for one must still read its
+            // status from `RecurringTaskLog` rather than falling through to
+            // the ordinary `block.status` path below.
             if let task = block.task, task.isRecurring, task.recurrenceTimeMode == .specific {
                 return ScheduleReviewViewModel.recurringTaskOccurrenceStatus(task: task, on: block.date, context: context) == .none
             }

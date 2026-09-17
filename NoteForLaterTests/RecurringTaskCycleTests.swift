@@ -316,52 +316,6 @@ final class RecurringTaskCycleTests: XCTestCase {
 
     // MARK: - Day calendar consolidation (DayTimelineGridView routes through the same cycle)
 
-    /// Fail-then-pass target #1 ("advances through all three states and
-    /// wraps"): `DayTimelineGridView`'s own occurrence-list types
-    /// (`OpenRecurringTaskOccurrence`, private) and the testable
-    /// `ProjectedRecurringTaskOccurrence` both used to carry only a bare
-    /// `isCompleted: Bool` — before this turn, there was no field to put
-    /// `.missed` in at all, so the calendar's own read-path (what a tap's
-    /// resulting state actually renders as) could never represent it
-    /// regardless of what `TaskItem.cycleRecurringOccurrence` produced.
-    /// This exercises the real cycle through `projectedRecurringTaskOccurrences`
-    /// (the Specific-Time read-path real blocks and the calendar's own
-    /// projection both resolve through) at each of the three states.
-    ///
-    /// Verified fail-then-pass by temporarily collapsing the constructed
-    /// `status` back to `status == .complete ? .complete : .none` (the
-    /// exact pre-fix shape — anything but complete reads as untouched) in
-    /// `ScheduleReviewViewModel.projectedRecurringTaskOccurrences`: this
-    /// test failed on the missed-state assertion. Restored and reran:
-    /// green. Both via `xcodebuild test`.
-    func test_projectedRecurringTaskOccurrences_surfacesAllThreeStates_asCycleAdvances() {
-        let today = day(2026, 9, 9)
-        let task = makeSpecificTimeTask(anchor: today)
-
-        func projected() -> ProjectedRecurringTaskOccurrence? {
-            ScheduleReviewViewModel.projectedRecurringTaskOccurrences(
-                tasks: [task], materializedRows: [], targetDate: today, context: context, calendar: calendar, today: today
-            ).first
-        }
-
-        XCTAssertEqual(projected()?.status, OccurrenceStatus.none)
-
-        XCTAssertEqual(task.cycleRecurringOccurrence(on: today, context: context, calendar: calendar), .complete)
-        XCTAssertEqual(projected()?.status, OccurrenceStatus.complete)
-        XCTAssertEqual(projected()?.isCompleted, true)
-        XCTAssertEqual(projected()?.isMissed, false)
-
-        XCTAssertEqual(task.cycleRecurringOccurrence(on: today, context: context, calendar: calendar), .missed)
-        XCTAssertEqual(projected()?.status, OccurrenceStatus.missed, "the calendar's own read-path must be able to represent .missed")
-        XCTAssertEqual(projected()?.isCompleted, false)
-        XCTAssertEqual(projected()?.isMissed, true)
-
-        XCTAssertEqual(task.cycleRecurringOccurrence(on: today, context: context, calendar: calendar), .none, "must wrap back to none — no .excused")
-        XCTAssertEqual(projected()?.status, OccurrenceStatus.none)
-        XCTAssertEqual(projected()?.isCompleted, false)
-        XCTAssertEqual(projected()?.isMissed, false)
-    }
-
     /// The block path is the one most likely to get missed in this
     /// consolidation, since it shares `DayTimelineGridView.completeCircle(for:)`
     /// with every ordinary (non-recurring) task block. Confirms a

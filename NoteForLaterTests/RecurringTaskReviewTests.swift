@@ -135,130 +135,52 @@ final class RecurringTaskReviewTests: XCTestCase {
         XCTAssertEqual(pending?.count, 1, "should still be exactly the one pre-existing record, not two")
     }
 
-    // MARK: - Gap 2: immediate one-hop relocation, and no double-placement on relaunch
+    // MARK: - advanceOneHop: what survives the removal of Specific Time
 
-    /// The behavior `NightlyReviewView`'s today→tomorrow `Task` now
-    /// performs: create the record, then hop it once, synchronously,
-    /// instead of leaving it at today's date for the next app launch.
-    func test_advanceOneHop_relocatesSpecificTimeMissImmediately() {
+    /// Three tests used to live here, all built around the Specific-Time
+    /// *placeholder block* — relocating it a day at a time, and not
+    /// double-placing it on relaunch. That block no longer exists (stage
+    /// 4b), so those tests went with it.
+    ///
+    /// **What they were also covering incidentally still matters**, and
+    /// would have been left bare: `advanceOneHop`'s own date walk. These two
+    /// pin exactly that, so the surviving half of the function keeps its
+    /// coverage rather than losing it as a side effect of deleting the half
+    /// that went away.
+    func test_advanceOneHop_advancesTheCursor_whenNextIsNotARecurrenceDay() {
         let anchor = day(2026, 8, 31)
-        let task = TaskItem(title: "Pay rent", dueDate: anchor, estimatedMinutes: 15)
-        task.isRecurring = true
-        task.recurrenceUnit = .months
-        task.recurrenceIntervalCount = 1
-        // Legacy row shape: the setter refuses `.specific` for tasks now
-        // (see `TaskItem.recurrenceTimeMode`), so this writes the raw
-        // column directly, which is exactly the pre-migration state
-        // `migrateRecurringSpecificTimeTasksIfNeeded` exists to clear. The
-        // machinery under test is retired but not yet deleted — see stage
-        // 4b — so it stays covered until it goes.
-        task.recurrenceTimeModeRaw = HabitOccurrenceTimeMode.specific.rawValue
-        context.insert(task)
-
+        let task = makeMiddayRecurringTask(anchor: anchor)
         let occurrence = PushedRecurringOccurrence(taskID: task.id, originalDate: anchor)
         context.insert(occurrence)
 
-        let tomorrow = day(2026, 9, 1)
-        let resolved = PushedRecurringOccurrence.advanceOneHop(occurrence, task: task, from: anchor, to: tomorrow, calendar: calendar, context: context)
+        let next = day(2026, 9, 1)
+        let resolved = PushedRecurringOccurrence.advanceOneHop(
+            occurrence, task: task, from: anchor, to: next, calendar: calendar, context: context
+        )
 
-        XCTAssertFalse(resolved)
-        XCTAssertEqual(calendar.startOfDay(for: occurrence.currentDate), tomorrow)
-        let blocks = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
-        XCTAssertEqual(blocks.count, 1, "exactly one placeholder block should exist, relocated to tomorrow")
-        XCTAssertEqual(blocks.first.map { calendar.startOfDay(for: $0.date) }, tomorrow)
+        XCTAssertFalse(resolved, "not a recurrence day, so the chain continues")
+        XCTAssertEqual(occurrence.currentDate, next)
     }
 
-    /// The double-placement question flagged during design: if Nightly
-    /// Review already hopped an occurrence forward tonight, a same-night
-    /// app relaunch must not hop it again. Simulates
-    /// `NoteForLaterApp.advanceOneDay`'s `while cursor < today` loop
-    /// directly, with "today" still equal to the night of the review
-    /// (nothing has actually rolled over) — the loop must see
-    /// `occurrence.currentDate` already at-or-past that "today" and do
-    /// nothing.
-    func test_advanceOneHop_sameNightRelaunch_doesNotDoublePlace() {
+    /// The resolving half: landing on a real recurrence day deletes the
+    /// pushed record and lets the ordinary pattern take over.
+    func test_advanceOneHop_resolves_whenNextIsARecurrenceDay() throws {
         let anchor = day(2026, 8, 31)
-        let task = TaskItem(title: "Pay rent", dueDate: anchor, estimatedMinutes: 15)
-        task.isRecurring = true
-        task.recurrenceUnit = .months
-        task.recurrenceIntervalCount = 1
-        // Legacy row shape: the setter refuses `.specific` for tasks now
-        // (see `TaskItem.recurrenceTimeMode`), so this writes the raw
-        // column directly, which is exactly the pre-migration state
-        // `migrateRecurringSpecificTimeTasksIfNeeded` exists to clear. The
-        // machinery under test is retired but not yet deleted — see stage
-        // 4b — so it stays covered until it goes.
-        task.recurrenceTimeModeRaw = HabitOccurrenceTimeMode.specific.rawValue
-        context.insert(task)
-
+        let task = makeMiddayRecurringTask(anchor: anchor)
         let occurrence = PushedRecurringOccurrence(taskID: task.id, originalDate: anchor)
         context.insert(occurrence)
-        let tonight = anchor
-        let tomorrow = day(2026, 9, 1)
+        try context.save()
 
-        // Tonight's review: one immediate hop, same as the production call
-        // site in `NightlyReviewView`.
-        _ = PushedRecurringOccurrence.advanceOneHop(occurrence, task: task, from: tonight, to: tomorrow, calendar: calendar, context: context)
-        let blocksAfterReview = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
-        XCTAssertEqual(blocksAfterReview.count, 1)
+        let next = day(2026, 9, 30)
+        XCTAssertTrue(task.hasRecurringOccurrence(on: next, calendar: calendar), "sanity: a real pattern day")
 
-        // Simulated same-night relaunch: `NoteForLaterApp.init()`'s
-        // catch-up walk, with `today` still `tonight` (no day has actually
-        // elapsed) — mirrors the loop body of `advanceOneDay` exactly.
-        var cursor = calendar.startOfDay(for: occurrence.currentDate)
-        var changed = false
-        while cursor < calendar.startOfDay(for: tonight) {
-            guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
-            let resolved = PushedRecurringOccurrence.advanceOneHop(occurrence, task: task, from: cursor, to: next, calendar: calendar, context: context)
-            changed = true
-            if resolved { break }
-            cursor = next
-        }
+        let resolved = PushedRecurringOccurrence.advanceOneHop(
+            occurrence, task: task, from: anchor, to: next, calendar: calendar, context: context
+        )
+        try context.save()
 
-        XCTAssertFalse(changed, "the loop must not advance at all once currentDate already reaches today")
-        XCTAssertEqual(calendar.startOfDay(for: occurrence.currentDate), tomorrow, "should still sit at exactly the day the review hopped it to")
-        let blocksAfterRelaunch = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
-        XCTAssertEqual(blocksAfterRelaunch.count, 1, "must still be exactly one block — no duplicate created by the simulated relaunch")
-    }
-
-    /// Same double-placement question, one calendar day further on: the
-    /// app is opened the *next* day (a completely ordinary relaunch, not
-    /// same-night) — the walk should find nothing left to do, since
-    /// tonight's hop already caught it up to exactly that day.
-    func test_advanceOneHop_nextDayRelaunch_findsNothingLeftToCatchUp() {
-        let anchor = day(2026, 8, 31)
-        let task = TaskItem(title: "Pay rent", dueDate: anchor, estimatedMinutes: 15)
-        task.isRecurring = true
-        task.recurrenceUnit = .months
-        task.recurrenceIntervalCount = 1
-        // Legacy row shape: the setter refuses `.specific` for tasks now
-        // (see `TaskItem.recurrenceTimeMode`), so this writes the raw
-        // column directly, which is exactly the pre-migration state
-        // `migrateRecurringSpecificTimeTasksIfNeeded` exists to clear. The
-        // machinery under test is retired but not yet deleted — see stage
-        // 4b — so it stays covered until it goes.
-        task.recurrenceTimeModeRaw = HabitOccurrenceTimeMode.specific.rawValue
-        context.insert(task)
-
-        let occurrence = PushedRecurringOccurrence(taskID: task.id, originalDate: anchor)
-        context.insert(occurrence)
-        let tomorrow = day(2026, 9, 1)
-        _ = PushedRecurringOccurrence.advanceOneHop(occurrence, task: task, from: anchor, to: tomorrow, calendar: calendar, context: context)
-
-        // Relaunch the *next* day: "today" for the launch-time walk is now
-        // `tomorrow` itself.
-        var cursor = calendar.startOfDay(for: occurrence.currentDate)
-        var changed = false
-        while cursor < tomorrow {
-            guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
-            let resolved = PushedRecurringOccurrence.advanceOneHop(occurrence, task: task, from: cursor, to: next, calendar: calendar, context: context)
-            changed = true
-            if resolved { break }
-            cursor = next
-        }
-
-        XCTAssertFalse(changed)
-        let blocks = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
-        XCTAssertEqual(blocks.count, 1)
+        XCTAssertTrue(resolved)
+        let pending = try context.fetch(FetchDescriptor<PushedRecurringOccurrence>())
+        XCTAssertTrue(pending.isEmpty, "resolved chains are deleted, not left sitting")
     }
 }

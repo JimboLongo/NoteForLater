@@ -936,44 +936,6 @@ final class SchedulingEngineTests: XCTestCase {
         )
     }
 
-    /// A recurring task's fixed-anchor block may still overlap a
-    /// rule-packed one. Whether it *should* is a real open question, but
-    /// changing it here would be a silent behavior change.
-    func test_overlapInvariant_stillAllowsRecurringBlockOverTaskBlock() async throws {
-        let testDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
-        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
-        let ordinary = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
-
-        let recurring = TaskItem(title: "Daily", shelf: shelf, estimatedMinutes: 30)
-        recurring.isRecurring = true
-        recurring.recurrenceIntervalCount = 1
-        recurring.recurrenceUnit = .days
-        // This test is specifically about a *timed*, block-placed
-        // recurring task's overlap behavior, which needs Specific Time to
-        // produce a block at all. A task can't be set to that mode any
-        // more — the setter refuses it (see `TaskItem.recurrenceTimeMode`)
-        // — so this writes the raw column, giving the pre-migration row
-        // shape `migrateRecurringSpecificTimeTasksIfNeeded` clears. The
-        // placement machinery is retired but not yet deleted (stage 4b),
-        // so its overlap invariant stays covered until it goes.
-        recurring.recurrenceTimeModeRaw = HabitOccurrenceTimeMode.specific.rawValue
-        // Anchored at 9am, the same hour the packer will start from.
-        recurring.dueDate = calendar.date(byAdding: .hour, value: 9, to: testDay)!
-        recurring.setEligible(true, for: rule)
-        context.insert(recurring)
-        shelf.tasks = [ordinary, recurring]
-
-        let calendarService = FakeCalendarService()
-        calendarService.freeSlotsProvider = { [self.businessHoursSlot(on: $0)] }
-        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: testDay)
-
-        await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
-
-        let recurringBlocks = ((try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? [])
-            .filter { $0.task?.isRecurring == true }
-        XCTAssertFalse(recurringBlocks.isEmpty, "the recurring task must still be placed — the invariant exempts it")
-    }
-
     // MARK: - Migration: repairing remainingMinutes drained by the leak
 
     /// No blocks at all — the whole estimate is owed. This is the shape of

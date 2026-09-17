@@ -610,45 +610,6 @@ final class TaskItem {
         return calendar.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: date)
     }
 
-    /// Moves every future, not-yet-completed block already generated for
-    /// this task's Specific-Time occurrence onto its current time-of-day
-    /// — called whenever the time picker changes, so an edit follows
-    /// through to what's already on the calendar instead of only
-    /// applying to occurrences placed from here on. Keeps each block's
-    /// own date, just updates its clock time (preserving duration).
-    ///
-    /// Updates in place rather than deleting and re-placing
-    /// (`HabitEditView.removeStaleBlocks`'s approach for the identical
-    /// habit-side question): a recurring task's real blocks can already
-    /// be generated up to ~44 days out
-    /// (`AISchedulingService`'s own population horizon), and deleting
-    /// all of them would need a full regenerate to refill anything past
-    /// today — changing one field shouldn't require that. Doesn't
-    /// collision-check against anything else already on those days,
-    /// same as a manual drag-to-retime of a single block wouldn't
-    /// either — this is a deliberate, explicit edit, not a placement
-    /// decision. A past or already-completed block is left alone (it's
-    /// history). An approved block drops back to "proposed" so the next
-    /// Approve All actually pushes the corrected time to Google
-    /// Calendar, same reasoning `syncScheduledBlockDuration` already
-    /// uses for a duration edit. `today` is a parameter (defaulting to
-    /// `.now`) purely for testability — production callers never
-    /// override it.
-    func retimeFutureSpecificOccurrences(today: Date = .now, calendar: Calendar = .current) {
-        guard recurrenceTimeMode == .specific else { return }
-        let today = calendar.startOfDay(for: today)
-        let minutes = effectiveRecurrenceTimeOfDayMinutes
-        for block in (scheduledBlocks ?? []) where !block.isCompleted && block.date >= today {
-            guard let newStart = calendar.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: block.date) else { continue }
-            let duration = block.endTime.timeIntervalSince(block.startTime)
-            block.startTime = newStart
-            block.endTime = newStart.addingTimeInterval(duration)
-            if block.approvalStatus == .approved {
-                block.approvalStatus = .proposed
-            }
-        }
-    }
-
     /// The recurring-task counterpart to `Habit.cycleOccurrence` — same
     /// "log is truth, a linked block is a mirror" shape, but a shorter
     /// cycle: `none -> complete -> missed -> none`. No `.excused` — a
