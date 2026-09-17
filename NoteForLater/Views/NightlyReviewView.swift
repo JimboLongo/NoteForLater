@@ -749,16 +749,17 @@ struct NightlyReviewView: View {
         if step == .chooseDay {
             setupViewModels()
         }
-        // Before `step` moves, so the batch still sees the step it belongs
-        // to. Auto-skip can carry the landing several steps forward; the
-        // departure is a single, known edge regardless.
-        runExitEffects(for: step)
-        let start = Step(rawValue: step.rawValue + 1) ?? .tomorrow
-        let result = StepAutoSkip.walkForward(
-            from: start,
+        // `StepAutoSkip.advance`, not `walkForward` — it runs the
+        // departing step's exit effects first, so the commit batch still
+        // sees the step it belongs to before anything moves. That ordering
+        // used to live here as a bare line above the walk, where no test
+        // could see whether it happened at all.
+        let result = StepAutoSkip.advance(
+            from: step,
             next: { Step(rawValue: $0.rawValue + 1) ?? .tomorrow },
             isEligible: { Step.autoSkipEligible.contains($0) },
             isEmpty: isStepCurrentlyEmpty,
+            onExit: runExitEffects,
             onEnter: runEntryEffects,
             maxSteps: Step.allCases.count
         )

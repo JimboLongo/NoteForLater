@@ -44,4 +44,41 @@ enum StepAutoSkip {
         }
         return (candidate, skipped)
     }
+
+    /// One forward step: **the departing step's exit effects, then the
+    /// walk.** Ordering is the whole point — the exit effects have to see
+    /// the step being left, before anything moves.
+    ///
+    /// Extracted from `NightlyReviewView.advance()` because the call to
+    /// `runExitEffects` was invisible to every test. Deleting that single
+    /// line — so the Nightly Review's whole commit batch never fired, and
+    /// nothing got closed out — was caught by **nothing** (verified by
+    /// sabotage: 0 failures out of 567). The batch itself had already been
+    /// extracted and characterized; this is the wiring that *invokes* it,
+    /// which is the same rule-asserted / consumer-unasserted split that let
+    /// `CardRow`'s hidden rows keep rendering.
+    ///
+    /// `advance` rather than a returned plan, deliberately: a value
+    /// describing what *should* happen can't express that the exit effects
+    /// ran first. Performing the sequence here lets a test pass recording
+    /// closures and assert the order itself.
+    static func advance<Step: Hashable>(
+        from current: Step,
+        next: (Step) -> Step,
+        isEligible: (Step) -> Bool,
+        isEmpty: (Step) -> Bool,
+        onExit: (Step) -> Void,
+        onEnter: (Step) -> Void,
+        maxSteps: Int
+    ) -> (landed: Step, skipped: [Step]) {
+        onExit(current)
+        return walkForward(
+            from: next(current),
+            next: next,
+            isEligible: isEligible,
+            isEmpty: isEmpty,
+            onEnter: onEnter,
+            maxSteps: maxSteps
+        )
+    }
 }
