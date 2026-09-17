@@ -513,17 +513,21 @@ Possible second job, same call or a later one: **semantic placement hints the ru
 
 `NoteForLaterApp.swift:215` carries the existing TODO. Deliberately **after #1**: a background refresh that fires a regeneration walk currently costs up to ~44 sequential network round-trips per run, which is a poor fit for a background task's execution budget and would burn battery for it. Once regeneration is one ranged call, this becomes reasonable to schedule.
 
-### 4. Make synchronous viewmodel construction in tests fail loudly
+### 4. Make synchronous construction of implicitly-`@MainActor` types in tests fail loudly
 
-Constructing a `ScheduleReviewViewModel` inside a **non-`async`** XCTest method corrupts the heap and takes down the whole test runner with `malloc: pointer being freed was not allocated`, before any assertion runs. Full diagnosis in the Open Decisions entry above: `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` makes the class implicitly `@MainActor`, so its `deinit` is an isolated deinit, and releasing one with no enclosing Swift Task trips a runtime bug in task-local scope teardown.
+Constructing **any implicitly-`@MainActor` class** inside a **non-`async`** XCTest method corrupts the heap and takes down the whole test runner with `malloc: pointer being freed was not allocated`, before any assertion runs. Full diagnosis in the Open Decisions entry above: `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` makes the class implicitly `@MainActor`, so its `deinit` is an isolated deinit, and releasing one with no enclosing Swift Task trips a runtime bug in task-local scope teardown.
 
-The failure mode is the problem, not just the bug. It produces no message naming the cause, no failing assertion, and no pointer to the offending test — just a truncated run and a restart loop. **It has already been walked into twice by the same person who wrote the warning comment about it**, once while adding the §8 candidate-filter tests and again while adding the block-deletion regression tests. A comment in one file is evidently not sufficient guardrail.
+**This was previously written up as a `ScheduleReviewViewModel` problem. It is not — it is a property of the build setting, and it applies to every class that setting touches.** It was hit again on `MockAISchedulingService` (the production packer) with no view model anywhere in the test. Scoping the warning to one class made it worse than silence: the next person to hit it reads a note about a view model, correctly concludes it doesn't describe their situation, and goes back to suspecting the production code.
+
+That mis-scoping has a measurable cost. Both habit block-placement rules in `placeHabitsAndRecurringTasks` had **zero** test coverage while 553 other tests passed, and this is the most plausible reason — nothing called that function at all, and the first attempt to call it looks exactly like a crash in the packer.
+
+The failure mode is the problem, not just the bug. It produces no message naming the cause, no failing assertion, and no pointer to the offending test — just `Executed 0 tests`, `** TEST FAILED **`, a malloc abort attributed to production code, and a restart loop. **It has already been walked into three times**: twice while adding the §8 candidate-filter and block-deletion tests, and again while adding `HabitUntimedBlockPlacementTests`. A comment in one file is evidently not sufficient guardrail.
 
 Worth investigating whether this can be made self-announcing, roughly in order of preference:
 
 - A test-only helper (e.g. `makeViewModel(...)` on the test case) that is itself `async`, so a synchronous test simply cannot call it and fails to compile rather than at runtime.
 - An `XCTestCase` subclass or `setUp` assertion that detects a synchronous test method and fails with a real message.
-- Failing that, a lint or CI grep for `ScheduleReviewViewModel(` inside a `func test_...()` lacking `async`.
+- Failing that, a lint or CI grep for construction of any of these types inside a `func test_...()` lacking `async` — `ScheduleReviewViewModel(` and `MockAISchedulingService(` at minimum, and the grep should be by type list rather than by the one type that happens to be remembered.
 
 Not urgent — no user-facing impact, tests currently pass. But the cost is paid in confusing debugging sessions each time, and the first option is cheap.
 

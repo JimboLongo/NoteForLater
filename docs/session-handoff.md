@@ -62,21 +62,50 @@ you happened to think of. Fail-then-pass on a *new* test proves that test
 works; sabotage against the *old* suite proves what the old suite was
 missing. They answer different questions.
 
-**Test-harness trap, and a likely cause of "uncovered" scheduling code:** a
-test that constructs `MockAISchedulingService` (the production packer — the
-name is a leftover) or `ScheduleReviewViewModel` **must be `async`**. A
-synchronous one crashes the whole test host with `malloc: pointer being
-freed was not allocated` *before any assertion runs*, so the run reports
-`Executed 0 tests` and `** TEST FAILED **` with no failing test named. It
-is not specific to a view model's `deinit`, and not specific to doing
-anything with the object — bare construction in a sync test is enough.
+**Test-harness trap — and the reason two real rules had zero coverage.
+This is not merely a gotcha; read it before concluding any scheduling code
+is untestable.**
 
-This is worth knowing beyond the fix, because of how it presents: a first
-attempt to cover this code looks like a crash *in the production code*, not
-like a rule about the harness. `placeHabitsAndRecurringTasks` had zero
-tests calling it at all, and that is the most plausible reason why.
-Whenever a scheduling path looks mysteriously untestable, try `async`
-before concluding the code is broken.
+**The rule:** an XCTest method that constructs *any* implicitly-`@MainActor`
+class — `ScheduleReviewViewModel`, `MockAISchedulingService` (the
+production packer; the name is a leftover) — **must be `async`**. Bare
+construction is enough to trigger it. Doing nothing else with the object
+still crashes.
+
+**The symptom, which is the important part:**
+```
+NoteForLater(…) malloc: *** error for object 0x…: pointer being freed was not allocated
+	 Executed 0 tests, with 0 failures (0 unexpected)
+** TEST FAILED **
+```
+The host dies *before any assertion runs*. The run reports **zero tests
+executed and no failing test named** — so there is nothing pointing at your
+test, and the only visible artifact is a malloc abort inside a call to
+production code. **It presents as "the scheduler is broken," not as "my
+test is shaped wrong."** A reasonable person writing the first test for
+`placeHabitsAndRecurringTasks` sees a crash in the packer, concludes
+they've found a real bug or that the code can't be exercised in isolation,
+and stops. That is the most plausible reason both habit block-placement
+rules went uncovered while 553 other tests passed.
+
+**The fix is the single word `async` on the test method.** Nothing else.
+
+**Root cause** (full version in the scheduling spec's Open Decisions):
+`SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` makes these classes implicitly
+`@MainActor`, so `deinit` is an *isolated* deinit. Releasing one with no
+enclosing Swift Task trips a runtime bug in task-local scope teardown.
+Nothing about the class's own code is involved, which is why reading it
+tells you nothing.
+
+⚠️ **The earlier version of this note was worse than no note at all.** It
+attributed the crash to `ScheduleReviewViewModel`'s `deinit` specifically.
+The mechanism was right, the scope was wrong — and stated that narrowly, it
+actively misleads: anyone hitting this while constructing a *scheduling
+service*, with no view model anywhere in the test, would read the note,
+correctly conclude it didn't apply to them, and go on believing they'd
+found a production crash. A note scoped to one class is a note that
+excludes every other class. State the rule by the property that causes it
+(implicitly `@MainActor`), not by the one example where it was first seen.
 
 **Testing practice, general — the render baselines now actually compare,
 and the story of why they didn't is worth keeping.**
