@@ -150,16 +150,42 @@ final class CardRowVisibilityTests: XCTestCase {
     /// its stored value is still legible; Divisible disappears, having
     /// nothing to show without a duration to divide. Pre-existing
     /// asymmetry, pinned here so it's a decision rather than an accident.
-    func test_greyed_duration_butHidden_divisible_whenShelfDoesNotTrackDuration() {
+    /// Was `test_greyed_duration_butHidden_divisible_…`, pinning a
+    /// deliberate asymmetry: Duration greyed where Divisible hid.
+    /// **That asymmetry is gone — both hide now.**
+    ///
+    /// The old rationale for greying Duration was that it kept a stored
+    /// value legible. It doesn't: `Shelf.resolvedDuration` returns 0 for a
+    /// non-tracking shelf and both move paths apply it, so the value is
+    /// wiped on commit regardless. A row you turned off, can't edit, and
+    /// whose value is about to be zeroed is just clutter.
+    func test_hidden_durationAndDivisible_whenShelfDoesNotTrackDuration() {
         let task = plainTask(minutes: 120)
         let shelf = shelfTracking(duration: false)
 
-        XCTAssertEqual(CardRow.duration.visibility(task: task, shelf: shelf), .greyed)
+        XCTAssertEqual(CardRow.duration.visibility(task: task, shelf: shelf), .hidden)
         XCTAssertEqual(CardRow.divisible.visibility(task: task, shelf: shelf), .hidden)
     }
 
-    func test_greyed_due_whenShelfDoesNotTrackDueDates() {
-        XCTAssertEqual(CardRow.due.visibility(task: plainTask(), shelf: shelfTracking(dueDates: false)), .greyed)
+    /// The one exception, and it is load-bearing: on the shelf that
+    /// Duration's own value selects, the row stays `.shown` — editable, not
+    /// merely visible — even with that shelf's Duration toggle off.
+    /// Otherwise the task is stranded: duration uneditable, and the shelf
+    /// picker already narrowed to 2-Minute shelves only.
+    func test_shown_duration_onTheDestinationTriggerShelf_evenWhenUntracked() {
+        let task = plainTask(minutes: 2)
+        let shelf = shelfTracking(duration: false)
+        shelf.isTwoMinuteTasks = true
+
+        XCTAssertEqual(CardRow.duration.visibility(task: task, shelf: shelf), .shown)
+    }
+
+    /// Was `test_greyed_due_…`. **Inverted deliberately:** off means gone.
+    /// The greyed state only became user-visible when the 2-Minute
+    /// hardcoding was removed, and it read as a bug — a row you switched
+    /// off that stays on screen and can't be edited.
+    func test_hidden_due_whenShelfDoesNotTrackDueDates() {
+        XCTAssertEqual(CardRow.due.visibility(task: plainTask(), shelf: shelfTracking(dueDates: false)), .hidden)
     }
 
     // MARK: - Always-shown rows
@@ -321,16 +347,28 @@ final class CardRowVisibilityTests: XCTestCase {
 
     /// Hidden rows drop out of the order entirely; greyed rows stay,
     /// because greyed means drawn-but-disabled rather than absent.
-    func test_scrollBodyOrder_dropsHiddenKeepsGreyed() {
+    /// Was `test_scrollBodyOrder_dropsHiddenKeepsGreyed`, using Due and
+    /// Duration as the greyed examples. Both hide now, so every row a
+    /// non-tracking shelf switches off drops out of the order.
+    ///
+    /// **`.greyed` is currently produced by nothing.** The case still exists
+    /// on `CardRow.Visibility` and `scrollBodyOrder` still keeps it, but no
+    /// rule returns it and no view renders it differently — it is dead until
+    /// something needs "offered but unanswerable" again. Asserted here so
+    /// that fact is recorded rather than discovered.
+    func test_scrollBodyOrder_dropsEveryRowTheShelfSwitchesOff() {
         let task = plainTask(minutes: 120)
         let shelf = shelfTracking(duration: false, dueDates: false, priority: false, futureReminder: false)
         let order = CardRow.scrollBodyOrder(task: task, shelf: shelf)
 
-        XCTAssertTrue(order.contains(.duration), "greyed stays in the order")
-        XCTAssertTrue(order.contains(.due), "greyed stays in the order")
-        XCTAssertFalse(order.contains(.divisible), "hidden drops out")
-        XCTAssertFalse(order.contains(.priority), "hidden drops out")
-        XCTAssertFalse(order.contains(.remindIn), "hidden drops out")
+        for row in [CardRow.duration, .due, .divisible, .priority, .remindIn] {
+            XCTAssertFalse(order.contains(row), "\(row) was switched off, so it must drop out")
+        }
+
+        XCTAssertTrue(
+            CardRow.allCases.allSatisfy { $0.visibility(task: task, shelf: shelf) != .greyed },
+            "nothing produces .greyed today — if this fails, update the comment above rather than this assertion"
+        )
     }
 
     /// Never includes `.nextStep` — that row is drawn in `cardHeader`,

@@ -647,38 +647,65 @@ final class RecurringTaskCardRenderTests: XCTestCase {
         }
     }
 
-    /// No fixture may build a rendered date from the clock.
+    /// **Every date a fixture carries must be a fixed value.**
     ///
     /// Companion to `test_fixturesAreNotAtRiskAtTheRenderMoment`, which
-    /// guards the *evaluation* axis. This guards the *data* axis, which that
-    /// one cannot see: `makeFullTailTask` called
-    /// `setStartDate(startOfDay(for: .now))`, so the rendered "Can Start By"
-    /// value changed at every midnight and a baseline went red on a day
-    /// nobody had touched the code. Pinning `asOf` did not help, because the
-    /// date was baked into the fixture before evaluation ever happened.
+    /// guards the *evaluation* axis. This guards the *data* axis.
     ///
-    /// Asserted *positively* — the start date must be the pinned constant —
-    /// rather than as "must not be today". The first version did the latter
-    /// and was wrong twice over: a hardcoded literal that happens to equal
-    /// today is not drift, and these fixtures' due dates are literals
-    /// evaluated against `renderAsOf`, not against the real clock. A
-    /// positive check fails the moment `.now` comes back and never fires on
-    /// a date that is merely unlucky.
-    func test_fixtureStartDatesArePinned_notDerivedFromTheClock() {
-        let expected = Calendar.current.startOfDay(for: Self.renderAsOf)
-        for (name, task) in [
+    /// Written as a sweep over every `Date` property rather than over the
+    /// ones I thought to check, because inspection has now missed this twice
+    /// on two different axes:
+    /// 1. `atRiskBlocker()` defaulted to `.now`, so a fixture crossed an
+    ///    at-risk threshold mid-afternoon and grew a banner. Fixed by
+    ///    pinning `asOf` — which could not see axis 2.
+    /// 2. `makeFullTailTask` called `setStartDate(startOfDay(for: .now))`,
+    ///    so "Can Start By" changed at midnight. The `asOf` fix and its
+    ///    guard both looked right past it.
+    ///
+    /// So this asserts the property over the whole surface: `dueDate`,
+    /// `startDate`, `recurrenceEndDate` and `attributeReviewSnoozedUntil`
+    /// must each be nil or a fixed constant, for every fixture.
+    ///
+    /// `createdAt` is deliberately exempt and that exemption is the one
+    /// thing to re-check if a third axis ever appears: it is `.now` by
+    /// construction on every `TaskItem`, and the card never renders it.
+    /// If the card ever shows an "added" age, this exemption becomes a bug.
+    func test_everyFixtureDateIsFixed_notDerivedFromTheClock() {
+        let today = Calendar.current.startOfDay(for: .now)
+        let fixtures: [(String, TaskItem)] = [
             ("tail_recurring", makeFullTailTask(recurring: true)),
             ("tail_nonrecurring", makeFullTailTask(recurring: false)),
-        ] {
-            guard let start = task.startDate else { continue }
-            XCTAssertEqual(
-                Calendar.current.startOfDay(for: start), expected,
-                "\(name)'s start date must be the pinned renderAsOf day, or the baseline drifts at midnight"
-            )
+            ("pattern_row_render", makeWorstCaseRelativeTask()),
+            ("non_recurring_rows_render", makeWorstCaseNonRecurringTask()),
+        ]
+        for (name, task) in fixtures {
+            // Positive check where a constant is expected: the start date
+            // must *be* the pinned day, which fails the moment `.now`
+            // returns and never fires on a literal that is merely unlucky
+            // enough to equal today.
+            if let start = task.startDate {
+                XCTAssertEqual(
+                    Calendar.current.startOfDay(for: start),
+                    Calendar.current.startOfDay(for: Self.renderAsOf),
+                    "\(name): startDate must be the pinned renderAsOf day"
+                )
+            }
+            // The rest are literals or nil today. A clock-derived value
+            // would land on today; a literal chosen years out never does.
+            for (field, date) in [
+                ("recurrenceEndDate", task.recurrenceEndDate),
+                ("attributeReviewSnoozedUntil", task.attributeReviewSnoozedUntil),
+            ] {
+                guard let date else { continue }
+                XCTAssertNotEqual(
+                    Calendar.current.startOfDay(for: date), today,
+                    "\(name).\(field) is today — it looks clock-derived and will drift"
+                )
+            }
         }
     }
 
-    /// Guards the repo against the cost of these baselines.
+    /// Guards the repo against the cost of these baselines.    /// Guards the repo against the cost of these baselines.
     ///
     /// `UIImage.pngData()` writes PNGs about 4x larger than the content
     /// needs — the five fixtures came to 12.2 MB as recorded, and *every*

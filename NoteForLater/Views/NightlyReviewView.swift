@@ -3813,21 +3813,30 @@ struct TaskReviewCard: View {
                 // doesn't render rather than needing its own disabled
                 // state.
                 VStack(alignment: .leading, spacing: 14) {
-                    CollapsibleAnswerRow(
-                        label: "Due",
-                        summary: dueSummaryText,
-                        isNotSelected: !isDueConfigured,
-                        isExpanded: isDueExpanded,
-                        onTapHeader: { focusedField = nil }
-                    ) {
-                        dueExpandedContent
+                    // Gated on `CardRow`, like Tags and the Recurring
+                    // toggle above. It was drawn unconditionally before,
+                    // which meant `CardRow.due`'s rule — and therefore the
+                    // shelf's own Due toggle — had no effect on whether the
+                    // row appeared at all. That is precisely the
+                    // rule-vs-render drift `CardRow` was created to end, and
+                    // it survived here because the row's *missing-check*
+                    // consulted `CardRow` while its rendering didn't.
+                    if CardRow.due.visibility(task: task, shelf: previewedShelf) != .hidden {
+                        CollapsibleAnswerRow(
+                            label: "Due",
+                            summary: dueSummaryText,
+                            isNotSelected: !isDueConfigured,
+                            isExpanded: isDueExpanded,
+                            onTapHeader: { focusedField = nil }
+                        ) {
+                            dueExpandedContent
+                        }
                     }
 
                     startsRow
 
-                    // Always shown — Duration stays tracked (and greyed,
-                    // not hidden) even for a shelf that doesn't track it,
-                    // matching `durationAllowed`'s own doc comment. Unlike
+                    // Same `CardRow` gate as Due above, and same reason.
+                    // Unlike
                     // Duration and Divisible are their own rows now
                     // rather than folded into a "Time" row — that row
                     // held nothing else for a non-recurring task, so
@@ -3836,14 +3845,16 @@ struct TaskReviewCard: View {
                     // `Shelf.effectiveTracksDuration`); Divisible hides
                     // by duration and Priority by shelf.
 
-                    CollapsibleAnswerRow(
-                        label: "Duration",
-                        summary: durationSummaryText,
-                        isNotSelected: !isDurationConfigured,
-                        isExpanded: isDurationExpanded,
-                        onTapHeader: { focusedField = nil }
-                    ) {
-                        durationControl
+                    if CardRow.duration.visibility(task: task, shelf: previewedShelf) != .hidden {
+                        CollapsibleAnswerRow(
+                            label: "Duration",
+                            summary: durationSummaryText,
+                            isNotSelected: !isDurationConfigured,
+                            isExpanded: isDurationExpanded,
+                            onTapHeader: { focusedField = nil }
+                        ) {
+                            durationControl
+                        }
                     }
 
                     // Only when the duration is long enough to split and something

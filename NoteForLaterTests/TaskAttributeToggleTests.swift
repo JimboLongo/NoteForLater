@@ -313,12 +313,10 @@ final class TaskAttributeToggleTests: XCTestCase {
         // Duration is *not* in that hidden list any more: it stays visible
         // on a 2-Minute task because it's the control that puts a task
         // there, and the only way back off.
-        // `.due` is present because turning Due off on a shelf **greys**
-        // the row rather than hiding it — pre-existing, and the same
-        // treatment Duration gets. Only `.priority`, `.tags` and
-        // `.nextStep` disappear outright. Worth knowing when reading "the
-        // shelf's settings decide": they decide differently per row.
-        XCTAssertEqual(rows, [.due, .canStartBy, .duration], "Priority and Tags hide; Due greys; Duration stays")
+        // Every row this shelf switches off is gone — Due included, now
+        // that it hides rather than greys. Duration stays because this is
+        // the shelf its own value selects (`durationIsTheDestinationTrigger`).
+        XCTAssertEqual(rows, [.canStartBy, .duration], "Due, Priority and Tags are off; Duration is the trigger and stays")
     }
 
     /// AM/Midday/PM never places a calendar block, so Duration and
@@ -1282,13 +1280,14 @@ final class TaskAttributeToggleTests: XCTestCase {
         // Hidden by the destination shelf's own toggles → cleared.
         XCTAssertEqual(task.priority, .unset)
         XCTAssertEqual(task.tags, [])
-        // Due is *not* cleared: turning Due off on a shelf greys the row
-        // rather than hiding it, so it never leaves the visible set and the
-        // derived reset — which clears only what disappeared — can't reach
-        // it. Correct by the rule, and worth pinning so the greyed/hidden
-        // asymmetry is a decision rather than a surprise.
-        XCTAssertTrue(task.dueDateDecided, "Due greys rather than hides, so it survives")
-        XCTAssertNotNil(task.dueDate)
+        // Due *is* cleared again: it hides rather than greys now, so it
+        // leaves the visible set and the derived reset reaches it. This
+        // assertion flipped twice in one session — first when removing the
+        // 2-Minute hardcoding exposed the greyed state, then back when
+        // greyed became hidden. The rule never changed: the reset clears
+        // exactly what disappeared.
+        XCTAssertFalse(task.dueDateDecided)
+        XCTAssertNil(task.dueDate)
         // Still shown → untouched. This is the over-reach check.
         XCTAssertEqual(task.nextStep, "Find it", "Next Step is still shown, so it must survive")
         XCTAssertTrue(task.nextStepDecided)

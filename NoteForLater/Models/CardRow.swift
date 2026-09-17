@@ -115,20 +115,22 @@ enum CardRow: CaseIterable {
             // hide it while Specific-Time recurring tasks still need a
             // block length they'd have no way to set.
             if task.recurringAndUntimed { return .hidden }
-            // **Never `.hidden` on the shelf Duration itself selects** —
-            // see `Shelf.durationIsTheDestinationTrigger`. That invariant
-            // needs no branch here, because the non-tracking fallback is
-            // already `.greyed` rather than `.hidden`: the value stays
-            // legible even where the shelf has Duration switched off.
+            // **Never hidden on the shelf Duration itself selects** — see
+            // `Shelf.durationIsTheDestinationTrigger`. This exception is now
+            // load-bearing rather than vacuous: the fallback below hides, so
+            // without it a 2-Minute shelf with Duration switched off would
+            // strand the task — the duration uneditable, and the shelf picker
+            // already narrowed to 2-Minute shelves only, so no way back.
             //
-            // It is pinned by
-            // `test_duration_isNeverHiddenOnTheDestinationTriggerShelf`
-            // rather than by structure, deliberately — if this fallback is
-            // ever changed to `.hidden`, that test fails and the trigger
-            // shelf has to be excepted explicitly. A branch that returns the
-            // same value on both sides would document nothing and drift
-            // silently.
-            return (shelf?.effectiveTracksDuration ?? true) ? .shown : .greyed
+            // `.shown`, not `.greyed`: it has to stay *editable*, because
+            // raising the duration is the way off this shelf.
+            if shelf?.durationIsTheDestinationTrigger == true { return .shown }
+            // Hidden rather than greyed, matching Due below. The old
+            // rationale was that greying kept a stored value legible — but
+            // `Shelf.resolvedDuration` returns 0 for a non-tracking shelf and
+            // both move paths apply it, so the value is wiped on commit
+            // anyway. There is nothing left to keep legible.
+            return (shelf?.effectiveTracksDuration ?? true) ? .shown : .hidden
 
         case .divisible:
             if task.recurringAndUntimed { return .hidden }
@@ -154,7 +156,11 @@ enum CardRow: CaseIterable {
 
         case .due:
             if task.isRecurring { return .hidden }
-            return (shelf?.effectiveTracksDueDates ?? true) ? .shown : .greyed
+            // Hidden, not greyed. A row you turned off and still can't edit
+            // is clutter; off means gone. (This greyed until the 2-Minute
+            // hardcoding was removed, at which point the greyed state became
+            // user-visible for the first time and read as a bug.)
+            return (shelf?.effectiveTracksDueDates ?? true) ? .shown : .hidden
 
         case .priority:
             if task.isRecurring { return .hidden }
