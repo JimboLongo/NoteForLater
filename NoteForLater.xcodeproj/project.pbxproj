@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		05E9FEF2A09F4F60BD0F50C8 /* SchedulingEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5013E3FBE3449FA3A0C911 /* SchedulingEngineTests.swift */; };
 		44949A2913540744E6AFDDAB /* CardRowVisibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C343D5FD1A57B5FDA730DA8F /* CardRowVisibilityTests.swift */; };
+		44949A2913540744E6AFDDAE /* NightlyReviewCommitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C343D5FD1A57B5FDA730DABF /* NightlyReviewCommitTests.swift */; };
 		44949A2913540744E6AFDDAD /* HabitUntimedBlockPlacementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C343D5FD1A57B5FDA730DAAF /* HabitUntimedBlockPlacementTests.swift */; };
 		44949A2913540744E6AFDDAC /* RecurringSpecificTimeMigrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C343D5FD1A57B5FDA730DA9F /* RecurringSpecificTimeMigrationTests.swift */; };
 		DDCFBDD2640429073F34B092 /* DayTimelineGeometryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79741595DC85CA02751F418F /* DayTimelineGeometryTests.swift */; };
@@ -67,6 +68,7 @@
 		A3F965C18B2385814DF25BDD /* HabitRollingStatsTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HabitRollingStatsTests.swift; sourceTree = "<group>"; };
 		DA5013E3FBE3449FA3A0C911 /* SchedulingEngineTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SchedulingEngineTests.swift; sourceTree = "<group>"; };
 		C343D5FD1A57B5FDA730DA8F /* CardRowVisibilityTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CardRowVisibilityTests.swift; sourceTree = "<group>"; };
+		C343D5FD1A57B5FDA730DABF /* NightlyReviewCommitTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NightlyReviewCommitTests.swift; sourceTree = "<group>"; };
 		C343D5FD1A57B5FDA730DAAF /* HabitUntimedBlockPlacementTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HabitUntimedBlockPlacementTests.swift; sourceTree = "<group>"; };
 		C343D5FD1A57B5FDA730DA9F /* RecurringSpecificTimeMigrationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecurringSpecificTimeMigrationTests.swift; sourceTree = "<group>"; };
 		79741595DC85CA02751F418F /* DayTimelineGeometryTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DayTimelineGeometryTests.swift; sourceTree = "<group>"; };
@@ -152,6 +154,7 @@
 				0445FFD6E3084A6D9EF502B1 /* FakeCalendarService.swift */,
 				DA5013E3FBE3449FA3A0C911 /* SchedulingEngineTests.swift */,
 				C343D5FD1A57B5FDA730DA8F /* CardRowVisibilityTests.swift */,
+				C343D5FD1A57B5FDA730DABF /* NightlyReviewCommitTests.swift */,
 				C343D5FD1A57B5FDA730DAAF /* HabitUntimedBlockPlacementTests.swift */,
 				C343D5FD1A57B5FDA730DA9F /* RecurringSpecificTimeMigrationTests.swift */,
 				79741595DC85CA02751F418F /* DayTimelineGeometryTests.swift */,
@@ -312,6 +315,7 @@
 				7CC5EBE6035848FA82FDB754 /* FakeCalendarService.swift in Sources */,
 				05E9FEF2A09F4F60BD0F50C8 /* SchedulingEngineTests.swift in Sources */,
 				44949A2913540744E6AFDDAB /* CardRowVisibilityTests.swift in Sources */,
+				44949A2913540744E6AFDDAE /* NightlyReviewCommitTests.swift in Sources */,
 				44949A2913540744E6AFDDAD /* HabitUntimedBlockPlacementTests.swift in Sources */,
 				44949A2913540744E6AFDDAC /* RecurringSpecificTimeMigrationTests.swift in Sources */,
 				DDCFBDD2640429073F34B092 /* DayTimelineGeometryTests.swift in Sources */,
