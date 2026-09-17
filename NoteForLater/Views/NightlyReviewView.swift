@@ -1310,74 +1310,14 @@ struct NightlyReviewView: View {
     /// call site in `advance()` for why this only happens here rather
     /// than in the shared block-clearing helpers.
     private func markUnresolvedHabitOccurrencesAsMissed() {
-        // PERMANENT, deliberately — kept when the rest of the
-        // duplicate-investigation instrumentation is stripped, for the same
-        // reason `DiagFileLog`'s overlap-rejection line is kept.
-        //
-        // This routine overwrites real user data once a night and leaves no
-        // other trace. Without these two counts, "the sweep protected every
-        // completion" and "the sweep never ran at all" produce **identical**
-        // output — an unchanged miss count — and the first attempt to verify
-        // the guard was unfalsifiable for exactly that reason. Every claim
-        // ever made about this function before this line existed rested on
-        // absence of evidence from a test that had never run.
-        //
-        // `untimedOccurrences=0` means the run was vacuous and any pass
-        // drawn from it is worthless. That is the whole value of the line.
-        //
-        // Deliberately NOT `reviewableBlocks`/`openHabitOccurrencesForReview`
-        // — those are scoped to `reviewDisplayCutoff` (what the step
-        // *shows*) rather than `reviewCutoff` (what this sweep *acts* on).
-        // The two are computed identically now (see `reviewCutoff`'s own
-        // doc comment for why the old `.now`-clamped version got removed —
-        // a habit due later tonight is now correctly swept, not protected
-        // from it), but this stays reading `reviewCutoff` specifically
-        // rather than switching to `reviewDisplayCutoff` directly: they
-        // answer different questions that only happen to agree today, and
-        // a future divergence between them should change this sweep's
-        // behavior by way of `reviewCutoff` actually changing, not
-        // silently by way of which property happened to get read here.
-        let sweepBlocks = allBlocks.filter { ($0.startTime < reviewCutoff || $0.isCompleted) && $0.habit != nil }
-        let sweepOccurrences = ScheduleReviewViewModel.openHabitOccurrencesForReview(
-            habits: allHabits,
-            context: modelContext,
-            upTo: reviewCutoff,
-            completedSince: NightlyReviewCompletionState.shared.lastClosedReviewDay
+        ScheduleReviewViewModel.markUnresolvedHabitOccurrencesAsMissed(
+            allBlocks: allBlocks,
+            allHabits: allHabits,
+            reviewCutoff: reviewCutoff,
+            reviewDate: reviewDate,
+            modelContext: modelContext,
+            habitLog: habitLog(for:on:)
         )
-        DiagFileLog.write("SWEEP ENTER reviewDate=\(ISO8601DateFormatter().string(from: reviewDate).prefix(10)) cutoff=\(ISO8601DateFormatter().string(from: reviewCutoff).prefix(19)) habitBlocks=\(sweepBlocks.count) untimedOccurrences=\(sweepOccurrences.count)")
-        for block in sweepBlocks {
-            guard let habit = block.habit else { continue }
-            // The LOG is authoritative; `block.isCompleted` is a mirror
-            // written alongside it by every habit-completion path. This
-            // loop used to consult only the flag and never the log, so a
-            // log saying `.complete` got overwritten with `.missed`
-            // whenever the flag had drifted — e.g. `HabitDetailView
-            // .setDay`, which writes the log for a whole day and never
-            // touches any block.
-            //
-            // Reading the log also closes the converse (flag `true`, log
-            // `.none`, reachable by cycling a day back to unselected in
-            // that same calendar): the old flag check skipped those, and
-            // nothing else ever swept them, so the occurrence stayed
-            // unresolved forever and counted as neither complete nor
-            // missed in streak/rolling-30 math.
-            //
-            // `habitLog(for:on:)` routes through `Habit.logOrCreate`,
-            // which FETCHES rather than traversing `habit.logs`, so this
-            // sees a pending unsaved completion. Reading it any other way
-            // would reintroduce the same blindness one layer up.
-            let log = habitLog(for: habit, on: block.date)
-            let status = log.occurrenceStatus(block.habitOccurrenceIndex)
-            guard status == .none else { continue }
-            log.setOccurrence(block.habitOccurrenceIndex, to: .missed)
-        }
-        for occurrence in sweepOccurrences {
-            let log = habitLog(for: occurrence.habit, on: occurrence.targetTime)
-            let status = log.occurrenceStatus(occurrence.index)
-            guard !occurrence.isCompleted, status == .none else { continue }
-            log.setOccurrence(occurrence.index, to: .missed)
-        }
-        HabitStatsRefreshCoordinator.shared.habitLogsChanged()
     }
 
     // MARK: - Step 3: Inbox (walks TaskCardSheet, one task at a time)
