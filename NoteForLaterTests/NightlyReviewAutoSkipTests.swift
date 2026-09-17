@@ -169,4 +169,69 @@ final class NightlyReviewAutoSkipTests: XCTestCase {
     func test_realStep_chooseDayNotEligible() {
         XCTAssertFalse(NightlyReviewView.Step.autoSkipEligible.contains(.chooseDay))
     }
+
+    // MARK: - advance(): the exit effect actually gets invoked
+
+    /// **The property the whole extraction exists for.** `advance` must run
+    /// the departing step's exit effects, and run them *before* the walk.
+    ///
+    /// Recorded as an ordered log rather than two independent assertions,
+    /// because the ordering is the point: the Nightly Review's commit batch
+    /// reads `reviewableBlocks` for the step being left, so firing it after
+    /// the walk would hand it the wrong step's state.
+    func test_advance_runsExitEffectsForTheDepartingStep_beforeWalking() {
+        enum Event: Equatable { case exit(NightlyReviewView.Step), enter(NightlyReviewView.Step) }
+        var log: [Event] = []
+
+        let result = StepAutoSkip.advance(
+            from: NightlyReviewView.Step.today,
+            next: { NightlyReviewView.Step(rawValue: $0.rawValue + 1) ?? .tomorrow },
+            isEligible: { NightlyReviewView.Step.autoSkipEligible.contains($0) },
+            isEmpty: { _ in false },
+            onExit: { log.append(.exit($0)) },
+            onEnter: { log.append(.enter($0)) },
+            maxSteps: NightlyReviewView.Step.allCases.count
+        )
+
+        XCTAssertEqual(log.first, .exit(.today), "the departing step's exit effects run first")
+        XCTAssertEqual(log, [.exit(.today), .enter(.atRisk)])
+        XCTAssertEqual(result.landed, .atRisk)
+    }
+
+    /// Exit effects fire for the step being *left*, never the one landed on
+    /// — including when auto-skip carries the landing several steps past it.
+    func test_advance_exitEffectIsTheDepartedStep_evenWhenAutoSkipCarriesFurther() {
+        var exited: [NightlyReviewView.Step] = []
+
+        let result = StepAutoSkip.advance(
+            from: NightlyReviewView.Step.today,
+            next: { NightlyReviewView.Step(rawValue: $0.rawValue + 1) ?? .tomorrow },
+            isEligible: { NightlyReviewView.Step.autoSkipEligible.contains($0) },
+            isEmpty: { _ in true },
+            onExit: { exited.append($0) },
+            onEnter: { _ in },
+            maxSteps: NightlyReviewView.Step.allCases.count
+        )
+
+        XCTAssertEqual(exited, [.today], "exactly one exit, for the step left")
+        XCTAssertEqual(result.landed, .tomorrow, "skipped straight through atRisk and meals")
+        XCTAssertEqual(result.skipped, [.atRisk, .meals])
+    }
+
+    /// And exactly once — not once per step the walk passes through.
+    func test_advance_runsExitEffectsExactlyOnce() {
+        var exitCount = 0
+
+        _ = StepAutoSkip.advance(
+            from: NightlyReviewView.Step.habits,
+            next: { NightlyReviewView.Step(rawValue: $0.rawValue + 1) ?? .tomorrow },
+            isEligible: { NightlyReviewView.Step.autoSkipEligible.contains($0) },
+            isEmpty: { _ in true },
+            onExit: { _ in exitCount += 1 },
+            onEnter: { _ in },
+            maxSteps: NightlyReviewView.Step.allCases.count
+        )
+
+        XCTAssertEqual(exitCount, 1)
+    }
 }
