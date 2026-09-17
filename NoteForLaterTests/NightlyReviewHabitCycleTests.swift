@@ -347,4 +347,60 @@ final class NightlyReviewHabitCycleTests: XCTestCase {
         XCTAssertTrue(result.allSatisfy { $0.status == .none }, "the operational list must never return anything but .none")
         XCTAssertEqual(result.map(\.habit.id), [noneHabit.id], "only the untouched habit should be a sweep candidate")
     }
+
+    private func occurrence(id: String, on date: Date, status: OccurrenceStatus) -> HabitReviewOccurrence {
+        HabitReviewOccurrence(
+            id: id, habit: makeHabit(name: id, mode: .am, startDate: date),
+            index: 0, status: status, targetTime: date, modeLabel: "AM"
+        )
+    }
+
+    // MARK: - The gate is backlog-only
+
+    /// **Today's habits must not block Next.** An evening habit at 9pm may
+    /// still legitimately happen; backlog from earlier days is genuinely
+    /// unaddressed. "Today" is the *review date* — the day being closed out
+    /// — not the wall clock, so "Plan Today" (which reviews yesterday)
+    /// scopes to yesterday.
+    func test_backlogHabitOccurrences_excludesTheReviewDaysOwn() {
+        let reviewDate = day(2026, 1, 5)
+        let occurrences = [
+            occurrence(id: "yesterday", on: day(2026, 1, 4), status: .none),
+            occurrence(id: "today", on: reviewDate, status: .none),
+        ]
+
+        let blocking = ScheduleReviewViewModel.backlogHabitOccurrences(occurrences, before: reviewDate)
+
+        XCTAssertEqual(blocking.map(\.id), ["yesterday"], "only earlier days block")
+    }
+
+    /// Already-answered backlog doesn't block either — the gate is about
+    /// *unresolved* work, not about age.
+    func test_backlogHabitOccurrences_onlyCountsUnresolved() {
+        let reviewDate = day(2026, 1, 5)
+        let occurrences = [
+            occurrence(id: "done", on: day(2026, 1, 4), status: .complete),
+            occurrence(id: "missed", on: day(2026, 1, 3), status: .missed),
+            occurrence(id: "excused", on: day(2026, 1, 2), status: .excused),
+            occurrence(id: "open", on: day(2026, 1, 1), status: .none),
+        ]
+
+        let blocking = ScheduleReviewViewModel.backlogHabitOccurrences(occurrences, before: reviewDate)
+
+        XCTAssertEqual(blocking.map(\.id), ["open"])
+    }
+
+    /// A time-of-day on the review date itself is still the review date —
+    /// the comparison is by day, not by instant, or a 9pm occurrence would
+    /// block while a 9am one didn't.
+    func test_backlogHabitOccurrences_comparesByDayNotInstant() {
+        let reviewDate = day(2026, 1, 5)
+        let lateEvening = Calendar.current.date(byAdding: .hour, value: 21, to: reviewDate)!
+
+        let blocking = ScheduleReviewViewModel.backlogHabitOccurrences(
+            [occurrence(id: "tonight", on: lateEvening, status: .none)], before: reviewDate
+        )
+
+        XCTAssertTrue(blocking.isEmpty)
+    }
 }

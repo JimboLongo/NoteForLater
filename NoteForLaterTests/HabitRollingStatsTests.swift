@@ -246,4 +246,49 @@ final class HabitRollingStatsTests: XCTestCase {
         XCTAssertEqual(day30.dayOfThirty, 30)
         XCTAssertTrue(day30.isRecordEligible)
     }
+
+    // MARK: - An unmarked past day already counts as a miss
+
+    /// **The property that makes backlog-only sweeping safe, and nothing
+    /// stated it before.**
+    ///
+    /// `markUnresolvedHabitOccurrencesAsMissed` no longer sweeps the review
+    /// day's own occurrences, so one can sit `.none` overnight. That is only
+    /// acceptable because `status(on:asOf:)` already treats an unmarked
+    /// *past* day as `.no` on its own — the explicit `.missed` marker is
+    /// what the Habits screen draws an icon from, not what the arithmetic
+    /// counts. The sweep is cosmetic correctness, not arithmetic
+    /// correctness.
+    ///
+    /// If someone ever "fixes" that fall-through — say, by returning `nil`
+    /// for unmarked days so they stop counting — every unswept day silently
+    /// drops out of streaks and percentages. This fails first.
+    func test_unmarkedPastDayCountsAsAMiss_withoutAnExplicitMissedMarker() {
+        let calendar = Calendar.current
+        let start = calendar.date(from: DateComponents(year: 2026, month: 1, day: 1))!
+        let habit = Habit(name: "Stretch", startDate: start)
+
+        // A day with a log that was never marked — exactly what an unswept
+        // occurrence leaves behind. Built directly and read through the
+        // `logsByDay:` overload, so this needs no store at all.
+        let unmarkedDay = calendar.date(byAdding: .day, value: 1, to: start)!
+        let logsByDay = [calendar.startOfDay(for: unmarkedDay): HabitLog(habit: habit, date: unmarkedDay)]
+
+        let asOf = calendar.date(byAdding: .day, value: 3, to: start)!
+        XCTAssertEqual(habit.status(on: unmarkedDay, asOf: asOf, calendar: calendar, logsByDay: logsByDay), .no,
+                       "an unmarked past day is already a miss — the sweep only adds the icon")
+    }
+
+    /// The other half of the same rule, and why the sweep can skip today:
+    /// the *current* day stays pending while anything is unmarked, so it is
+    /// omitted from the counts rather than scored as a miss.
+    func test_unmarkedCurrentDayIsPending_notAMiss() {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let habit = Habit(name: "Stretch", startDate: calendar.date(byAdding: .day, value: -3, to: today)!)
+        let logsByDay = [today: HabitLog(habit: habit, date: today)]
+
+        XCTAssertNil(habit.status(on: today, asOf: today, calendar: calendar, logsByDay: logsByDay),
+                     "pending, so it neither helps nor hurts until it's answered")
+    }
 }

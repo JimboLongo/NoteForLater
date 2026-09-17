@@ -2274,6 +2274,34 @@ final class ScheduleReviewViewModel {
         occurrences.filter { $0.status == .none }
     }
 
+    /// Unresolved occurrences from days **before** `reviewDate` — the ones
+    /// that actually block Next on the Habits step.
+    ///
+    /// The review day's own are deliberately excluded. A habit due this
+    /// evening may still legitimately happen: planning tomorrow at 9pm and
+    /// being made to declare the 10pm habit missed or done is a false
+    /// choice. Backlog from earlier days is different — those days are over,
+    /// and nothing about them is still pending.
+    ///
+    /// **`reviewDate`, not the wall clock.** That is the day being closed
+    /// out, and it is what every other boundary in this step already uses
+    /// (`nightlyReviewOperationalCutoff` is `reviewDate + 1`). Under "Plan
+    /// Today" the review date is *yesterday*, so the split lands there too —
+    /// which is right: yesterday is the day being closed, so yesterday's
+    /// habits are the ones still live.
+    ///
+    /// Compared by day rather than by instant, or a 9pm occurrence would
+    /// block while a 9am one on the same date didn't.
+    static func backlogHabitOccurrences(
+        _ occurrences: [HabitReviewOccurrence],
+        before reviewDate: Date,
+        calendar: Calendar = .current
+    ) -> [HabitReviewOccurrence] {
+        let reviewDay = calendar.startOfDay(for: reviewDate)
+        return unresolvedHabitOccurrences(occurrences)
+            .filter { calendar.startOfDay(for: $0.targetTime) < reviewDay }
+    }
+
 
     /// `NightlyReviewView.completedTasksWithNoBlock`'s core logic,
     /// extracted so the day-granularity bound (via `NightlyReviewCompletionState
