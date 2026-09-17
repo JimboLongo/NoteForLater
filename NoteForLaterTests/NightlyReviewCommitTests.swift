@@ -270,4 +270,80 @@ final class NightlyReviewCommitTests: XCTestCase {
         XCTAssertEqual(afterSecond, afterFirst, "a second pass must not create more pushes")
         XCTAssertTrue(pushed.isEmpty)
     }
+
+    // MARK: - The habit-miss sweep (characterization)
+
+    private func makeHabit(name: String, startDate: Date, mode: HabitOccurrenceTimeMode = .am) -> Habit {
+        let habit = Habit(name: name, startDate: startDate, reminderTimesOfDay: [9 * 60])
+        habit.occurrenceTimeModesRaw = [mode.rawValue]
+        context.insert(habit)
+        return habit
+    }
+
+    private func sweep(habits: [Habit], reviewDate: Date) throws {
+        ScheduleReviewViewModel.markUnresolvedHabitOccurrencesAsMissed(
+            allBlocks: try context.fetch(FetchDescriptor<ScheduledBlock>()),
+            allHabits: habits,
+            reviewCutoff: ScheduleReviewViewModel.nightlyReviewOperationalCutoff(reviewDate: reviewDate),
+            reviewDate: reviewDate,
+            modelContext: context,
+            habitLog: { habit, date in habit.logOrCreate(on: date, context: self.context) }
+        )
+    }
+
+    /// An untimed occurrence left unmarked on a day before the review date
+    /// is swept to `.missed`. This is the sweep's core job.
+    func test_sweepMarksUnresolvedBacklogOccurrenceMissed() throws {
+        let reviewDate = day(2026, 1, 5)
+        let habit = makeHabit(name: "Stretch", startDate: day(2026, 1, 1))
+        try context.save()
+
+        try sweep(habits: [habit], reviewDate: reviewDate)
+
+        let log = habit.logOrCreate(on: day(2026, 1, 4), context: context)
+        XCTAssertEqual(log.occurrenceStatus(0), .missed)
+    }
+
+    /// An already-answered occurrence is never overwritten — completing
+    /// something and then committing must not turn it into a miss.
+    ///
+    /// ⚠️ **This pins the behaviour, not the guard.** Removing the sweep's
+    /// own `guard !occurrence.isCompleted, status == .none` fails nothing,
+    /// because `openHabitOccurrencesForReview` already filters to `.none`
+    /// (plus `alsoInclude`/`completedRecently`) before the loop sees
+    /// anything — so a completion never reaches the guard. The guard is
+    /// defence-in-depth behind that filter, and this test is genuinely
+    /// covering the filter. Stated so the next person doesn't read a
+    /// passing test as proof the guard itself is load-bearing.
+    func test_sweepNeverOverwritesACompletion() throws {
+        let reviewDate = day(2026, 1, 5)
+        let habit = makeHabit(name: "Stretch", startDate: day(2026, 1, 1))
+        let earlier = day(2026, 1, 4)
+        let log = habit.logOrCreate(on: earlier, context: context)
+        log.setOccurrence(0, to: .complete)
+        try context.save()
+
+        try sweep(habits: [habit], reviewDate: reviewDate)
+
+        XCTAssertEqual(habit.logOrCreate(on: earlier, context: context).occurrenceStatus(0), .complete)
+    }
+
+    /// A habit block whose log says complete is likewise left alone — the
+    /// log is authoritative, the block's flag is only a mirror.
+    func test_sweepReadsTheLogNotTheBlockFlag() throws {
+        let reviewDate = day(2026, 1, 5)
+        let earlier = day(2026, 1, 4)
+        let habit = makeHabit(name: "Stretch", startDate: day(2026, 1, 1), mode: .specific)
+        let start = calendar.date(byAdding: .hour, value: 9, to: earlier)!
+        let block = ScheduledBlock(date: earlier, startTime: start, endTime: start.addingTimeInterval(900), task: nil, habit: habit)
+        block.status = .none          // flag says not done...
+        context.insert(block)
+        habit.logOrCreate(on: earlier, context: context).setOccurrence(0, to: .complete)   // ...log says done
+        try context.save()
+
+        try sweep(habits: [habit], reviewDate: reviewDate)
+
+        XCTAssertEqual(habit.logOrCreate(on: earlier, context: context).occurrenceStatus(0), .complete,
+                       "the log wins — a drifted block flag must not destroy a completion")
+    }
 }
