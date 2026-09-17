@@ -2752,9 +2752,23 @@ struct TaskReviewCard: View {
                     Image(systemName: "arrow.turn.down.right")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                    TextField("Next step", text: $task.nextStep, axis: .vertical)
-                        .font(task.nextStep.count > 30 ? .subheadline.weight(.medium) : .body.weight(.medium))
-                        .animation(.easeInOut(duration: 0.1), value: task.nextStep.count > 30)
+                    // Single-line so Return can dismiss the keyboard. The
+                    // `axis: .vertical` that used to be here made Return
+                    // insert a newline instead, leaving the toolbar Done as
+                    // the only way out.
+                    //
+                    // The font-shrink rule (`.subheadline` past 30
+                    // characters) went with it. It existed to keep a
+                    // *wrapped* block compact — more lines, smaller type.
+                    // A single-line field doesn't wrap, so shrinking buys a
+                    // few more visible characters before it scrolls and
+                    // costs legibility on every value; the collapsed row's
+                    // summary is what a long value is actually read from,
+                    // and that truncates with an ellipsis at full size.
+                    TextField("Next step", text: $task.nextStep)
+                        .font(.body.weight(.medium))
+                        .submitLabel(.done)
+                        .onSubmit { focusedField = nil }
                         .focused($focusedField, equals: .nextStep)
                         .onAppear {
                             guard focusNextStepWhenFieldAppears else { return }
@@ -2766,18 +2780,6 @@ struct TaskReviewCard: View {
                             // path a manual tap does instead of bypassing it.
                             focusedField = .nextStep
                         }
-                    // Right next to where you're actually typing — easier to
-                    // find in the moment than the accessory Done button
-                    // riding above the keyboard itself.
-                    if focusedField == .nextStep {
-                        Button {
-                            focusedField = nil
-                        } label: {
-                            Image(systemName: "keyboard.chevron.compact.down")
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
                 }
             }
         }
