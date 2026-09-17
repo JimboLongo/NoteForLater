@@ -603,180 +603,36 @@ struct NightlyReviewView: View {
         if next == .inbox {
             startAttributeReviewSession()
         }
-        if next == .inbox, let todayViewModel, let tomorrowViewModel {
-            // REVERSAL/redesign: `.block`/`.meal` taps used to stage into
-            // `stagedTodayToggleIDs`/`stagedMealSelectionIDs` and only
-            // write here, on commit. They write immediately now, exactly
-            // like `.habit`/`.recurringTask` already did — a three-state
-            // cycle needs to know which of the three states a row is
-            // *actually* in right now to decide what the next tap
-            // produces, which a staged pending-flip can't represent for
-            // more than two (see `cycleBlockCompletion`/
-            // `mealCircleTapped`, both called directly from `todayStep`).
-            // Nothing left to replay here.
+        if next == .inbox, todayViewModel != nil, let tomorrowViewModel {
+            // Body lifted verbatim into `ScheduleReviewViewModel
+            // .commitTodayStep` / `.finishTodayStepCommit` — see those for
+            // what it does and why it had to move (it was unreachable from
+            // any test in here, and sabotaging the whole batch failed
+            // nothing).
             //
-            // §7.2: this whole batch runs "on Next from the Today step,"
-            // i.e. right here on the today→inbox transition, not deferred
-            // all the way to the tomorrow handoff below. Freeze exactly
-            // what `reviewItems` represented at this exact synchronous
-            // moment before anything else (Inbox routing, in particular)
-            // can touch it — see `TaskItem.isNightlyReviewed`'s own doc
-            // comment for why a live re-derive isn't safe across the
-            // async gap below.
-            let reviewedBlocks = reviewableBlocks
-            let frozenCutoff = reviewCutoff
-            let frozenAllBlocks = allBlocks
-            for block in reviewedBlocks {
-                block.task?.isNightlyReviewed = true
-            }
-            // Captured now, before `purgeCompletedBlocks` clears each
-            // purged block's own `task` reference to nil below — a
-            // recurring task survives its block being purged (only a
-            // non-recurring one is deleted outright), so it's the one
-            // case that needs its stamp explicitly reset afterward.
-            let recurringCompletedTasks = reviewedBlocks.filter(\.isCompleted).compactMap(\.task).filter(\.isRecurring)
-            let incompleteTasks = reviewedBlocks.filter { !$0.isCompleted }.compactMap(\.task)
-
-            // A recurring task's own missed block just sits there now
-            // (nothing deletes it — see `resolveMissedPastBlocks`'s own
-            // doc comment), but still needs something to actually push
-            // the occurrence forward — that's this call, not
-            // `resolveMissedPastBlocks`, which explicitly excludes a
-            // recurring task's own block (`task?.isRecurring != true`)
-            // since its next placement is this mechanism's job, not
-            // `guaranteePlacement`'s. Also covers AM/Midday/PM recurring
-            // tasks, which never have a
-            // block for the state above to capture in the first place (see
-            // `ScheduleReviewViewModel.pushMissedRecurringOccurrences`'s own
-            // doc comment). Skips any task that's already being pushed (an
-            // earlier miss that hasn't resolved yet) — that record's own
-            // `currentDate` already points at today, so there's nothing new
-            // to record.
-            let freshlyPushedRecurringOccurrences = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
-                reviewedBlocks: reviewedBlocks, tasks: allTasks, context: modelContext, cutoff: frozenCutoff
+            // The `Task {}` stays unstructured here, exactly as before.
+            // That is a latent risk rather than a new one: nothing awaits
+            // it, so dismissing the review cannot know it finished. Noted
+            // on the open list rather than changed under cover of a move.
+            let handoff = ScheduleReviewViewModel.commitTodayStep(
+                reviewableBlocks: reviewableBlocks,
+                reviewCutoff: reviewCutoff,
+                allBlocks: allBlocks,
+                allTasks: allTasks,
+                reviewDate: reviewDate,
+                immediatelyPushedRecurringOccurrenceIDs: &immediatelyPushedRecurringOccurrenceIDs,
+                modelContext: modelContext,
+                markUnresolvedHabitOccurrencesAsMissed: markUnresolvedHabitOccurrencesAsMissed
             )
-            // Immediate-tap-created pushes (see `pushIfMissed`, fired
-            // whenever cycling a habit-style row this step landed on
-            // `.missed`) aren't in `freshlyPushedRecurringOccurrences` —
-            // that only holds records the sweep call just above created
-            // itself. Fetched here by id and folded in below so the
-            // hop-forward loop treats both origins identically — without
-            // this, a tap-created push would sit at today's date, un-
-            // hopped, until the next app launch, silently undoing "pushes
-            // immediately." A push a later tap in this same session
-            // resolved (cycled back past `.missed` to `.complete`) is
-            // deleted here instead of hopped — reusing `isAlreadyResolved`,
-            // written for exactly this, rather than a second bespoke check.
-            let calendarForPushCleanup = Calendar.current
-            let tapPushedRecurringOccurrences: [(occurrence: PushedRecurringOccurrence, task: TaskItem, missedDay: Date)] = immediatelyPushedRecurringOccurrenceIDs.compactMap { id in
-                guard let occurrence = (try? modelContext.fetch(FetchDescriptor<PushedRecurringOccurrence>(predicate: #Predicate { $0.id == id })))?.first,
-                      let task = allTasks.first(where: { $0.id == occurrence.taskID })
-                else { return nil }
-                if PushedRecurringOccurrence.isAlreadyResolved(occurrence, task: task, calendar: calendarForPushCleanup, context: modelContext) {
-                    modelContext.delete(occurrence)
-                    return nil
-                }
-                guard calendarForPushCleanup.isDate(occurrence.currentDate, inSameDayAs: occurrence.originalDate) else { return nil }
-                return (occurrence, task, occurrence.originalDate)
-            }
-            immediatelyPushedRecurringOccurrenceIDs = []
-            let allFreshRecurringTaskPushes = freshlyPushedRecurringOccurrences + tapPushedRecurringOccurrences
-
-            // Any habit occurrence the Today review showed but never got
-            // checked off — timed or not — is done being reviewable the
-            // moment Today is left behind, so it's marked missed right
-            // here, synchronously, before any of the async cleanup below.
-            // Deliberately not folded into `resolveMissedPastBlocks`
-            // itself (used here too, just below): a passed-but-undone
-            // habit should still get a fresh shot later *today* during an
-            // ordinary intra-day Regenerate, not be written off — only
-            // Nightly Review's own end-of-day handoff means "no more
-            // chances left." (Correcting a stale claim this comment used
-            // to make: `resolveMissedPastBlocks` does *not* currently
-            // have another caller from any Regenerate flow — grepped while
-            // verifying `reviewCutoff`'s widened-cutoff change was safe,
-            // confirmed exactly one call site, right below. The design
-            // reasoning above still holds regardless — habits and blocks
-            // are swept by two genuinely different mechanisms on purpose —
-            // it just isn't *currently* enforced by a second caller the
-            // way this used to say.)
-            markUnresolvedHabitOccurrencesAsMissed()
-            // Closes `reviewDate` out for `ScheduleReviewViewModel
-            // .autoPlaceEligibleTasks`'s own live auto-place walk — once
-            // tonight's review has actually run, today's remaining free
-            // hours stop being fair game for a brand-new task to land on,
-            // same as if the day had already ended. Set synchronously,
-            // right alongside the habit sweep above, not buried in the
-            // Task below — this is the moment today is actually closed,
-            // not an incidental side effect of the async cleanup.
-            NightlyReviewCompletionState.shared.markReviewed(day: reviewDate)
             Task {
-                // Complete → swept from the calendar entirely, same as
-                // every other completed block; this is the one place that
-                // actually happens (see `purgeCompletedBlocks`) — a plain
-                // regenerate leaves a completed block faded in place
-                // instead.
-                await tomorrowViewModel.purgeCompletedBlocks()
-                tomorrowViewModel.purgeCompletedMealSelections()
-                // REVERSAL: `resolveIncompleteMealSelections` (deleted an
-                // incomplete-and-past meal outright) is gone — with meals
-                // now covered by the Today gate (see
-                // `unresolvedGateReviewItems`), nothing can reach this
-                // point still `.none`; every meal `reviewedBlocks`/
-                // `todayMealSelections` showed was already interactively
-                // resolved to `.complete` or `.missed` before Next was
-                // even enabled. Nothing left here to sweep.
-                for task in recurringCompletedTasks {
-                    task.isNightlyReviewed = false
-                }
-                // REVERSAL: nothing is deleted from the calendar for a
-                // missed block anymore (see `resolveMissedPastBlocks`'s
-                // own doc comment) — the interactive cycle
-                // (`ScheduleReviewViewModel.cycleBlockCompletion`) already
-                // guaranteed a fresh placement the moment each one was
-                // tapped to `.missed`, immediately, the same way a
-                // recurring task's own miss already pushes immediately
-                // (`pushIfMissed`). This call is the same redundant,
-                // guarded safety net `pushMissedRecurringOccurrences` is
-                // for recurring tasks — it only actually does anything for
-                // a block that never went through the interactive cycle
-                // at all (the one-time migration backfill).
-                tomorrowViewModel.resolveMissedPastBlocks(allBlocks: frozenAllBlocks)
-                for task in incompleteTasks {
-                    task.isNightlyReviewed = false
-                }
-                // Same guarantee as `guaranteePlacement` above, for a
-                // recurring miss: rather than leaving the record it just
-                // created sitting at today's date until the next app
-                // launch's catch-up walk gets to it
-                // (`NoteForLaterApp.processPushedRecurringOccurrencesIfNeeded`),
-                // hop it forward one day — onto tomorrow — right now, via
-                // the exact function that walk uses per day
-                // (`PushedRecurringOccurrence.advanceOneHop`). Only ever
-                // one hop, for records created by *this* review — a task
-                // whose miss dates further back (the review didn't run for
-                // several nights) is still left for that launch-time walk
-                // to catch all the way up, deliberately: this Task isn't
-                // the place to fast-forward stale backlog.
-                let calendar = Calendar.current
-                for pushed in allFreshRecurringTaskPushes {
-                    guard let next = calendar.date(byAdding: .day, value: 1, to: pushed.missedDay) else { continue }
-                    PushedRecurringOccurrence.advanceOneHop(pushed.occurrence, task: pushed.task, from: pushed.missedDay, to: next, calendar: calendar, context: modelContext)
-                }
-                // Unconditional — today's (and any prior day's) unfinished
-                // tasks were just freed up above, and they need an actual
-                // following day to land on. `regenerateFromNow`, not
-                // `regenerateSingleDay` (doesn't exist — see §6.3),
-                // walking forward until everything schedulable has a real
-                // slot. A locked block on a present or future day is
-                // never touched by any of this — but a locked *past*
-                // incomplete block already was, eleven lines up: §7.3
-                // deliberately strips lock protection once a block's own
-                // day is over (see `resolveMissedPastBlocks`).
-                let completedFully = await tomorrowViewModel.regenerateFromNow(shelves: allShelves, habits: allHabits, eligibleHoursWindows: eligibleHoursWindows)
-                if completedFully {
-                    ScheduleDirtyState.shared.isDirty = false
-                }
+                await ScheduleReviewViewModel.finishTodayStepCommit(
+                    handoff,
+                    tomorrowViewModel: tomorrowViewModel,
+                    allShelves: allShelves,
+                    allHabits: allHabits,
+                    eligibleHoursWindows: eligibleHoursWindows,
+                    modelContext: modelContext
+                )
             }
         }
         if next == .tomorrow, let tomorrowViewModel {
