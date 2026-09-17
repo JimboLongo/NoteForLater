@@ -71,12 +71,19 @@ enum CardRow: CaseIterable {
             return (shelf?.effectiveTracksNextStep ?? true) ? .shown : .hidden
 
         case .recurringToggle:
-            // Still hidden once the task is 2-minute. The *other* toggle is
-            // gone — duration drives 2-minute-ness now — but the mutual
-            // exclusion it protected is unchanged: a recurring task must not
-            // sit on the 2-Minute shelf (see
-            // `TaskItem.repairSpecialShelfExclusivity`), and offering
-            // Recurring here would invite exactly that.
+            // **This is the one remaining `isTwoMinute` check, and it is
+            // deliberately not shelf-settings-driven.** Every other row's
+            // 2-Minute special-casing was removed in favour of the
+            // destination shelf's own tracking toggles; this one is a
+            // different kind of rule and must not follow them.
+            //
+            // It is *mutual exclusion*, enforced in the model: a recurring
+            // task must not sit on the 2-Minute shelf (see
+            // `TaskItem.repairSpecialShelfExclusivity`/`assignShelf`).
+            // Offering Recurring here would let the card propose a
+            // combination the model refuses — and no shelf toggle should be
+            // able to do that. Field *tracking* says what a shelf cares
+            // about; this says what the data model permits.
             return isTwoMinute(shelf: shelf) ? .hidden : .shown
 
         case .shelf, .canStartBy:
@@ -86,12 +93,13 @@ enum CardRow: CaseIterable {
             return .shown
 
         case .tags:
-            // Hidden for both special kinds. A recurring task is one
-            // definition read many times rather than a thing you file,
-            // and a 2-minute task is gone before a tag would earn its
-            // keep.
-            if task.isRecurring || isTwoMinute(shelf: shelf) { return .hidden }
-            return .shown
+            // A recurring task is one definition read many times rather
+            // than a thing you file, so Tags stays hidden there by rule.
+            //
+            // The 2-Minute half of this is gone: the destination shelf's
+            // own `tracksTags` toggle decides now, like any other shelf.
+            if task.isRecurring { return .hidden }
+            return (shelf?.effectiveTracksTags ?? true) ? .shown : .hidden
 
         case .duration:
             // An untimed recurring occurrence never gets a calendar
@@ -107,20 +115,27 @@ enum CardRow: CaseIterable {
             // hide it while Specific-Time recurring tasks still need a
             // block length they'd have no way to set.
             if task.recurringAndUntimed { return .hidden }
-            // Deliberately NOT hidden for a 2-Minute task. Duration is
-            // what *puts* a task on that shelf now (≤2 min auto-selects
-            // it), so hiding the control that got you there would leave
-            // the value invisible and uneditable — and it is the only way
-            // back off the shelf. Divisible below stays hidden: at two
-            // minutes there is nothing to split.
+            // **Never `.hidden` on the shelf Duration itself selects** —
+            // see `Shelf.durationIsTheDestinationTrigger`. That invariant
+            // needs no branch here, because the non-tracking fallback is
+            // already `.greyed` rather than `.hidden`: the value stays
+            // legible even where the shelf has Duration switched off.
+            //
+            // It is pinned by
+            // `test_duration_isNeverHiddenOnTheDestinationTriggerShelf`
+            // rather than by structure, deliberately — if this fallback is
+            // ever changed to `.hidden`, that test fails and the trigger
+            // shelf has to be excepted explicitly. A branch that returns the
+            // same value on both sides would document nothing and drift
+            // silently.
             return (shelf?.effectiveTracksDuration ?? true) ? .shown : .greyed
 
         case .divisible:
             if task.recurringAndUntimed { return .hidden }
-            // Unlike Duration directly above, this one *does* stay hidden
-            // for a 2-Minute task: a two-minute task has nothing to split,
-            // and unlike Duration it isn't the control that got you here.
-            if isTwoMinute(shelf: shelf) { return .hidden }
+            // No 2-Minute check: it rides on `tracksDuration` below and on
+            // the ≥60-minute threshold, which already does the real work —
+            // a task short enough to select the 2-Minute shelf is far below
+            // it. A separate flag would be two things controlling one row.
             // Deliberately `.hidden` rather than `.greyed` where Duration
             // is `.greyed`, reproducing today's behavior exactly. The
             // asymmetry is real and pre-existing: Duration stays visible
@@ -139,12 +154,10 @@ enum CardRow: CaseIterable {
 
         case .due:
             if task.isRecurring { return .hidden }
-            if isTwoMinute(shelf: shelf) { return .hidden }
             return (shelf?.effectiveTracksDueDates ?? true) ? .shown : .greyed
 
         case .priority:
             if task.isRecurring { return .hidden }
-            if isTwoMinute(shelf: shelf) { return .hidden }
             return (shelf?.effectiveTracksPriority ?? true) ? .shown : .hidden
 
         case .eligibleSchedules:

@@ -56,6 +56,15 @@ final class Shelf {
     /// "tasks" aren't really work to measure (e.g. a Reference shelf of
     /// links, or one used as a plain checklist).
     var tracksTaskStats: Bool = true
+    /// Whether tasks on this shelf can carry tags — off hides the Tags row
+    /// on the TaskCard entirely.
+    ///
+    /// Defaults to `true` so every existing shelf keeps the behaviour it
+    /// had. No migration is needed for that: `tracksTaskStats` above was
+    /// added the same way (a new `Bool = true` on `Shelf`, commit
+    /// `1bd15d3`, no migration written) and every pre-existing shelf in the
+    /// live store reads back `true` — checked, not assumed.
+    var tracksTags: Bool = true
     /// Marks this as *the* Kitchen shelf (Pantry + Cookbook), created/
     /// removed by the "Meal Planning" toggle in Settings — a flag rather
     /// than matching on name so a rename doesn't silently break its
@@ -134,18 +143,15 @@ final class Shelf {
     /// Whether Next Step is actually tracked here — same Kitchen override.
     var effectiveTracksNextStep: Bool { !isKitchen && hasNextStep }
 
-    /// Whether Priority is actually tracked here — same Kitchen override,
-    /// plus 2-Minute Tasks: `AISchedulingService` never ranks or places
-    /// one of this shelf's tasks, so High Priority has nothing to
-    /// influence there, same reasoning already applied to a recurring
-    /// task (see `TaskItem.priorityMissing`'s own `!isRecurring`
-    /// short-circuit) — just expressed at the shelf level here since
-    /// 2-Minute-ness is a shelf property, not a task one. Unlike
-    /// Duration (see `effectiveTracksDuration`'s own doc comment), there
-    /// isn't a comparable case for ranking a 2-Minute task against others
-    /// that never compete for calendar time in the first place, so this
-    /// one stays excluded rather than kept-and-defaulted.
-    var effectiveTracksPriority: Bool { !isKitchen && !isTwoMinuteTasks && hasPriority }
+    /// Whether Priority is actually tracked here — Kitchen override only.
+    ///
+    /// This used to also force Priority off for the 2-Minute shelf, on the
+    /// reasoning that `AISchedulingService` never ranks one of its tasks so
+    /// High Priority had nothing to influence. That was a policy decision
+    /// baked into the model, and it is gone: the 2-Minute shelf now answers
+    /// this question with its own `hasPriority` toggle like any other shelf.
+    /// If Priority is unwanted there, turn it off in Shelf settings.
+    var effectiveTracksPriority: Bool { !isKitchen && hasPriority }
 
     /// Whether "Remind Me In" is actually tracked here — same Kitchen
     /// override.
@@ -154,6 +160,25 @@ final class Shelf {
     /// Whether this shelf's completions are actually counted — same
     /// Kitchen override.
     var effectiveTracksTaskStats: Bool { !isKitchen && tracksTaskStats }
+
+    /// Whether Tags are actually offered here — same Kitchen override.
+    var effectiveTracksTags: Bool { !isKitchen && tracksTags }
+
+    /// **Duration is how a task *reaches* this shelf**, so the Duration row
+    /// stays visible here even if this shelf's own Duration toggle is off.
+    ///
+    /// Setting a duration of ≤2 minutes is what auto-selects the 2-Minute
+    /// shelf as a task's destination (see
+    /// `TaskReviewCard.applyDurationDrivenShelf`). Hiding Duration on
+    /// arrival would hide the control that got the task here, leaving the
+    /// value that caused the move invisible — and raising it again is the
+    /// way back off.
+    ///
+    /// Expressed as a named property rather than an inline
+    /// `isTwoMinuteTasks` check in `CardRow`, so it reads as the stated
+    /// invariant it is rather than as the hardcoded 2-Minute special-casing
+    /// that was deliberately removed from every other row.
+    var durationIsTheDestinationTrigger: Bool { isTwoMinuteTasks }
 
     /// A task landing on this shelf — routed from the Inbox, or added
     /// directly here — keeps whatever duration it already had; only a task

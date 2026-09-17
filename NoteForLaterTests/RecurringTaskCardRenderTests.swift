@@ -523,7 +523,15 @@ final class RecurringTaskCardRenderTests: XCTestCase {
             task.recurrenceTimeMode = .midday
             task.recurrenceTimeModePicked = true
             task.recurrenceIntervalPicked = true
-            task.setStartDate(Calendar.current.startOfDay(for: .now))
+            // A *fixed* date, not `.now`. This read the clock, so the
+            // rendered "Can Start By" value changed every midnight and the
+            // baseline went red on a day nobody had touched the code —
+            // "Wed, Sep 16" became "Thu, Sep 17".
+            //
+            // Pinning `asOf` fixed the *evaluation* moment (at-risk); it
+            // does nothing for a fixture whose *data* comes from the clock.
+            // Two separate axes, and only one of them was closed.
+            task.setStartDate(Self.renderAsOf)
         }
         return task
     }
@@ -549,6 +557,47 @@ final class RecurringTaskCardRenderTests: XCTestCase {
 
     func test_fullTailRows_nonRecurring_render() throws {
         try renderCard(makeFullTailTask(recurring: false), to: "tail_nonrecurring")
+    }
+
+    /// The 2-Minute shelf, configured the way its fields are now decided:
+    /// by its own toggles rather than by hardcoded `isTwoMinute` checks.
+    ///
+    /// **This fixture exists because that change had no render coverage at
+    /// all** — no baseline used a 2-Minute shelf, so removing the hardcoding
+    /// could have altered that card arbitrarily and every fixture would
+    /// still have matched. Exactly the gap that let earlier changes through.
+    func test_twoMinuteShelf_render() throws {
+        let task = makeFullTailTask(recurring: false)
+        let shelf = task.shelf!
+        shelf.isTwoMinuteTasks = true
+        shelf.hasDueDates = false
+        shelf.hasPriority = false
+        shelf.tracksTags = false
+        TaskItem.selectDuration(2, on: task)
+        try renderCard(task, to: "two_minute_shelf")
+    }
+
+    /// Duration must never be `.hidden` on the shelf its own value selects —
+    /// see `Shelf.durationIsTheDestinationTrigger`.
+    ///
+    /// Pinned here rather than expressed as a branch in `CardRow`, because
+    /// today's non-tracking fallback is already `.greyed` and a branch
+    /// returning the same value on both sides would document nothing. If
+    /// that fallback is ever changed to `.hidden`, this fails and the
+    /// trigger shelf has to be excepted explicitly.
+    func test_duration_isNeverHiddenOnTheDestinationTriggerShelf() throws {
+        let task = makeFullTailTask(recurring: false)
+        let shelf = task.shelf!
+        shelf.isTwoMinuteTasks = true
+        TaskItem.selectDuration(2, on: task)
+
+        for tracksDuration in [true, false] {
+            shelf.tracksDuration = tracksDuration
+            XCTAssertNotEqual(
+                CardRow.duration.visibility(task: task, shelf: shelf), .hidden,
+                "Duration is the control that selects this shelf — hiding it strands the task (tracksDuration: \(tracksDuration))"
+            )
+        }
     }
 
     /// A shelf that tracks nothing, so the greyed/hidden states render.
@@ -594,6 +643,37 @@ final class RecurringTaskCardRenderTests: XCTestCase {
                 flip. Move the fixture's dates away from the boundary rather \
                 than re-recording.
                 """
+            )
+        }
+    }
+
+    /// No fixture may build a rendered date from the clock.
+    ///
+    /// Companion to `test_fixturesAreNotAtRiskAtTheRenderMoment`, which
+    /// guards the *evaluation* axis. This guards the *data* axis, which that
+    /// one cannot see: `makeFullTailTask` called
+    /// `setStartDate(startOfDay(for: .now))`, so the rendered "Can Start By"
+    /// value changed at every midnight and a baseline went red on a day
+    /// nobody had touched the code. Pinning `asOf` did not help, because the
+    /// date was baked into the fixture before evaluation ever happened.
+    ///
+    /// Asserted *positively* — the start date must be the pinned constant —
+    /// rather than as "must not be today". The first version did the latter
+    /// and was wrong twice over: a hardcoded literal that happens to equal
+    /// today is not drift, and these fixtures' due dates are literals
+    /// evaluated against `renderAsOf`, not against the real clock. A
+    /// positive check fails the moment `.now` comes back and never fires on
+    /// a date that is merely unlucky.
+    func test_fixtureStartDatesArePinned_notDerivedFromTheClock() {
+        let expected = Calendar.current.startOfDay(for: Self.renderAsOf)
+        for (name, task) in [
+            ("tail_recurring", makeFullTailTask(recurring: true)),
+            ("tail_nonrecurring", makeFullTailTask(recurring: false)),
+        ] {
+            guard let start = task.startDate else { continue }
+            XCTAssertEqual(
+                Calendar.current.startOfDay(for: start), expected,
+                "\(name)'s start date must be the pinned renderAsOf day, or the baseline drifts at midnight"
             )
         }
     }

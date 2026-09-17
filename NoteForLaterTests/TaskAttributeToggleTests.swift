@@ -198,8 +198,7 @@ final class TaskAttributeToggleTests: XCTestCase {
     /// A default, not a lock — must still be freely changeable from the
     /// task's own card afterward, same as the recurring default.
     func test_defaultTwoMinuteDuration_canBeChanged_andSticks() {
-        let shelf = Shelf(name: "2-Minute Tasks")
-        shelf.isTwoMinuteTasks = true
+        let shelf = twoMinuteShelfFixture()
         let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
         XCTAssertEqual(task.estimatedMinutes, 2)
 
@@ -245,8 +244,7 @@ final class TaskAttributeToggleTests: XCTestCase {
     /// `.effectiveTracksPriority` exclude `isTwoMinuteTasks`;
     /// `effectiveTracksDuration` deliberately does not.
     func test_twoMinuteTask_reportsNeitherDivisibleNorPriority_asMissing() {
-        let shelf = Shelf(name: "2-Minute Tasks")
-        shelf.isTwoMinuteTasks = true
+        let shelf = twoMinuteShelfFixture()
         let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
 
         let missing = task.missingAttributeNames(consideringShelf: shelf)
@@ -307,8 +305,7 @@ final class TaskAttributeToggleTests: XCTestCase {
     /// (along with Due, Divisible, Priority and Tags), so only Can Start
     /// By remains expandable.
     func test_initialExpandedRows_newTwoMinuteTask_omitsEverythingTheShelfHides() {
-        let shelf = Shelf(name: "2-Minute Tasks")
-        shelf.isTwoMinuteTasks = true
+        let shelf = twoMinuteShelfFixture()
         let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
 
         let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: shelf, segmentOptions: [], isNewlyCreated: true)
@@ -316,7 +313,12 @@ final class TaskAttributeToggleTests: XCTestCase {
         // Duration is *not* in that hidden list any more: it stays visible
         // on a 2-Minute task because it's the control that puts a task
         // there, and the only way back off.
-        XCTAssertEqual(rows, [.canStartBy, .duration], "the 2-Minute shelf hides Due, Divisible, Priority and Tags — but not Duration")
+        // `.due` is present because turning Due off on a shelf **greys**
+        // the row rather than hiding it — pre-existing, and the same
+        // treatment Duration gets. Only `.priority`, `.tags` and
+        // `.nextStep` disappear outright. Worth knowing when reading "the
+        // shelf's settings decide": they decide differently per row.
+        XCTAssertEqual(rows, [.due, .canStartBy, .duration], "Priority and Tags hide; Due greys; Duration stays")
     }
 
     /// AM/Midday/PM never places a calendar block, so Duration and
@@ -746,8 +748,7 @@ final class TaskAttributeToggleTests: XCTestCase {
     /// A 2-Minute task's duration admits no segment size, so the wheel
     /// has only "Not Divisible" to offer.
     func test_twoMinuteTask_divisibleWheelHasOnlyNotDivisible() {
-        let shelf = Shelf(name: "2-Minute Tasks")
-        shelf.isTwoMinuteTasks = true
+        let shelf = twoMinuteShelfFixture()
         let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
 
         XCTAssertEqual(task.estimatedMinutes, 2)
@@ -989,22 +990,25 @@ final class TaskAttributeToggleTests: XCTestCase {
     /// raising the duration to an hour reveals it genuinely unanswered
     /// rather than pre-filled.
     func test_twoMinuteTask_raisedToAnHour_revealsDivisibleAsNotSelected() {
-        let shelf = Shelf(name: "2-Minute Tasks")
-        shelf.isTwoMinuteTasks = true
+        let shelf = twoMinuteShelfFixture()
         let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
         XCTAssertFalse(TaskReviewCard.showsDivisibleRow(task: task))
 
         TaskItem.selectDuration(60, on: task)
 
-        // Stage 3 change: while the task is still *on* the 2-Minute
-        // shelf, Divisible stays hidden regardless of duration — the
-        // shelf hides it, not just the hour threshold. Raising the
-        // duration alone no longer reveals it; leaving the shelf does.
-        XCTAssertEqual(CardRow.divisible.visibility(task: task, shelf: shelf), .hidden)
-        XCTAssertFalse(task.missingAttributeNames(consideringShelf: shelf).contains("Divisible"))
+        // **Reverted to the pre-stage-3 rule, deliberately.** Stage 3 made
+        // the 2-Minute shelf hide Divisible outright; that hardcoding is
+        // gone, so the hour threshold governs again *on* the shelf exactly
+        // as it does off it. Raising the duration to 60 reveals the row.
+        //
+        // This is the behaviour change to look at if a 2-minute task ever
+        // shows a Divisible row: it means its duration is ≥60, which the
+        // duration-driven shelf selection makes contradictory in the first
+        // place.
+        XCTAssertEqual(CardRow.divisible.visibility(task: task, shelf: shelf), .shown)
 
         let ordinary = Shelf(name: "Errands")
-        XCTAssertEqual(CardRow.divisible.visibility(task: task, shelf: ordinary), .shown, "off the shelf, the hour threshold governs again")
+        XCTAssertEqual(CardRow.divisible.visibility(task: task, shelf: ordinary), .shown, "and the same off the shelf")
         XCTAssertEqual(TaskReviewCard.divisibleSummaryText(task: task), "Not selected")
     }
 
@@ -1155,9 +1159,21 @@ final class TaskAttributeToggleTests: XCTestCase {
 
     // MARK: - Stage 3: mutual exclusion, enforced in the model
 
+    /// A 2-Minute shelf **configured** the way its fields are now decided:
+    /// by its own toggles.
+    ///
+    /// Due, Priority and Tags used to be hidden for this shelf by hardcoded
+    /// `isTwoMinute` checks in `CardRow` (and, for Priority, a second one in
+    /// `Shelf.effectiveTracksPriority`). Those are gone — the destination
+    /// shelf answers with its own tracking flags like any other. So the
+    /// fixture that used to get the hiding for free now has to ask for it,
+    /// which is the whole point of the change.
     private func twoMinuteShelfFixture() -> Shelf {
         let shelf = Shelf(name: "2-Minute Tasks")
         shelf.isTwoMinuteTasks = true
+        shelf.hasDueDates = false
+        shelf.hasPriority = false
+        shelf.tracksTags = false
         return shelf
     }
 
@@ -1263,11 +1279,16 @@ final class TaskAttributeToggleTests: XCTestCase {
         TaskItem.selectDuration(2, on: task)
         _ = TaskReviewCard.applyDurationDrivenShelf(task: task, shelves: [shelf], preview: .none)
 
-        // Hidden by the 2-Minute shelf → cleared.
-        XCTAssertFalse(task.dueDateDecided)
-        XCTAssertNil(task.dueDate)
+        // Hidden by the destination shelf's own toggles → cleared.
         XCTAssertEqual(task.priority, .unset)
         XCTAssertEqual(task.tags, [])
+        // Due is *not* cleared: turning Due off on a shelf greys the row
+        // rather than hiding it, so it never leaves the visible set and the
+        // derived reset — which clears only what disappeared — can't reach
+        // it. Correct by the rule, and worth pinning so the greyed/hidden
+        // asymmetry is a decision rather than a surprise.
+        XCTAssertTrue(task.dueDateDecided, "Due greys rather than hides, so it survives")
+        XCTAssertNotNil(task.dueDate)
         // Still shown → untouched. This is the over-reach check.
         XCTAssertEqual(task.nextStep, "Find it", "Next Step is still shown, so it must survive")
         XCTAssertTrue(task.nextStepDecided)

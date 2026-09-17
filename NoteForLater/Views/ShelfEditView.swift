@@ -26,6 +26,7 @@ struct ShelfEditView: View {
     @State private var hasDueDates: Bool
     @State private var hasNextStep: Bool
     @State private var hasPriority: Bool
+    @State private var tracksTags: Bool
     @State private var tracksFutureReminder: Bool
     @State private var tracksTaskStats: Bool
 
@@ -75,6 +76,7 @@ struct ShelfEditView: View {
         _hasDueDates = State(initialValue: shelf.hasDueDates)
         _hasNextStep = State(initialValue: shelf.hasNextStep)
         _hasPriority = State(initialValue: shelf.hasPriority)
+        _tracksTags = State(initialValue: shelf.tracksTags)
         _tracksFutureReminder = State(initialValue: shelf.tracksFutureReminder)
         _tracksTaskStats = State(initialValue: shelf.tracksTaskStats)
         let shelfID = shelf.id
@@ -147,12 +149,13 @@ struct ShelfEditView: View {
                     Toggle("Priority", isOn: $hasPriority)
                     Toggle("Due Date", isOn: $hasDueDates)
                     Toggle("Duration", isOn: $tracksDuration)
+                    Toggle("Tags", isOn: $tracksTags)
                     Toggle("Future Reminder", isOn: $tracksFutureReminder)
                     Toggle("Count Toward Task Stats", isOn: $tracksTaskStats)
                 } header: {
                     Text("Task Card Questions")
                 } footer: {
-                    Text("The first five hide that field on the card entirely when off. Count Toward Task Stats, off, keeps completions on this shelf out of the Task Stats page.")
+                    Text("The first six hide that field on the card entirely when off. Count Toward Task Stats, off, keeps completions on this shelf out of the Task Stats page.")
                 }
 
                 if tracksDuration {
@@ -373,6 +376,7 @@ struct ShelfEditView: View {
         shelf.hasDueDates = hasDueDates
         shelf.hasNextStep = hasNextStep
         shelf.hasPriority = hasPriority
+        shelf.tracksTags = tracksTags
         shelf.tracksFutureReminder = tracksFutureReminder
         shelf.tracksTaskStats = tracksTaskStats
         // isTwoMinuteTasks/isRecurringTasks are no longer set from here —
@@ -406,6 +410,13 @@ struct ShelfEditView: View {
         if shelf.isKitchen || !hasPriority {
             for task in shelf.tasks ?? [] {
                 task.priority = .unset
+            }
+        }
+        // Same clear-on-disable as every other question above: a hidden
+        // row must not keep holding a value nobody can see or edit.
+        if shelf.isKitchen || !tracksTags {
+            for task in shelf.tasks ?? [] {
+                task.tags = []
             }
         }
         if shelf.isKitchen || !tracksFutureReminder {
