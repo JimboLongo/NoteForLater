@@ -14,7 +14,15 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     private func makeRecurringTask(title: String = "Water the garden") -> TaskItem {
         let shelf = Shelf(name: "Recurring Tasks")
         shelf.isRecurringTasks = true
-        return TaskItem.makeForDirectCapture(title: title, shelf: shelf)
+        let task = TaskItem.makeForDirectCapture(title: title, shelf: shelf)
+        // Next Step answered ("None") so it drops out of the seeding
+        // question entirely. It became the *first* row in `scrollBodyOrder`
+        // when it moved out of `cardHeader`, so an unanswered one would seed
+        // open ahead of whatever each test below is actually about. Answered
+        // here rather than letting every expectation shift by one row; that
+        // it seeds first when unanswered is pinned separately.
+        task.nextStepDecided = true
+        return task
     }
 
     // MARK: - "Repeats" row: collapsed summary + configured-ness
@@ -558,7 +566,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
 
         let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: true)
 
-        XCTAssertEqual(rows, [.repeats, .canStartBy, .timeMode, .ends], "no .duration/.divisible — a fresh recurring task defaults to Midday, which is untimed")
+        XCTAssertEqual(rows, [.nextStep, .repeats, .canStartBy, .timeMode, .ends], "no .duration/.divisible — a fresh recurring task defaults to Midday, which is untimed")
     }
 
     /// A reopened, already-saved, fully-configured task opens fully
@@ -598,7 +606,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     func test_fillingRepeatsOnNewTask_wouldCollapseOnlyRepeats() {
         let task = makeRecurringTask()
         let seeded = TaskReviewCard.initialExpandedRows(task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: true)
-        XCTAssertEqual(seeded, [.repeats, .canStartBy, .timeMode, .ends], "starting point: everything that applies is open — Duration/Divisible don't, since a fresh recurring task is Midday/untimed")
+        XCTAssertEqual(seeded, [.nextStep, .repeats, .canStartBy, .timeMode, .ends], "starting point: everything that applies is open — Duration/Divisible don't, since a fresh recurring task is Midday/untimed")
 
         TaskReviewCard.selectRecurrenceUnit(task.recurrenceUnit, on: task) // answers Repeats (Specific Date needs nothing else)
 
@@ -687,6 +695,6 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
             task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: true
         )
 
-        XCTAssertEqual(rows, [.repeats, .canStartBy, .timeMode, .ends])
+        XCTAssertEqual(rows, [.nextStep, .repeats, .canStartBy, .timeMode, .ends])
     }
 }

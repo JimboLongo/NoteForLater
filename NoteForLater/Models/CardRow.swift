@@ -212,15 +212,16 @@ enum CardRow: CaseIterable {
     /// expand-seeding order matches the render order" isn't a property
     /// that has to be tested — they are the same array.
     ///
-    /// Excludes `.nextStep`, which is drawn in `cardHeader` above the
-    /// scroll body rather than among these rows. Its *visibility* still
-    /// comes from `CardRow` like everything else; only its position
-    /// lives elsewhere.
-    ///
     /// `.greyed` rows are included — greyed means drawn-but-disabled, not
     /// absent. Only `.hidden` drops out.
     static func scrollBodyOrder(task: TaskItem, shelf: Shelf?) -> [CardRow] {
-        var rows: [CardRow] = [.recurringToggle]
+        // `.nextStep` leads: it is the only *content* question on the card
+        // — what you'd actually do next — where everything below it is
+        // structural (when, how long, where it lives). It used to sit in
+        // `cardHeader`, outside every row list, which is why the row-list
+        // audit found four locations rather than three. Keeping it first
+        // preserves the reading order that layout gave it for free.
+        var rows: [CardRow] = [.nextStep, .recurringToggle]
         if task.isRecurring {
             rows += [.repeats, .canStartBy, .timeMode, .duration, .divisible, .ends, .pushIfMissed]
         } else {
@@ -241,9 +242,9 @@ enum CardRow: CaseIterable {
     /// this type exists on the model side to avoid.
     var isExpandable: Bool {
         switch self {
-        case .repeats, .canStartBy, .timeMode, .duration, .divisible, .ends, .due, .priority:
+        case .nextStep, .repeats, .canStartBy, .timeMode, .duration, .divisible, .ends, .due, .priority:
             return true
-        case .nextStep, .recurringToggle, .tags, .shelf, .eligibleSchedules, .remindIn, .pushIfMissed:
+        case .recurringToggle, .tags, .shelf, .eligibleSchedules, .remindIn, .pushIfMissed:
             return false
         }
     }

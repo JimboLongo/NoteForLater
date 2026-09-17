@@ -327,7 +327,7 @@ final class CardRowVisibilityTests: XCTestCase {
         let task = plainTask(minutes: 120)
         XCTAssertEqual(
             CardRow.scrollBodyOrder(task: task, shelf: trackingShelf()),
-            [.recurringToggle, .due, .canStartBy, .duration, .divisible, .priority,
+            [.nextStep, .recurringToggle, .due, .canStartBy, .duration, .divisible, .priority,
              .remindIn, .tags, .shelf, .eligibleSchedules]
         )
     }
@@ -340,7 +340,7 @@ final class CardRowVisibilityTests: XCTestCase {
             // recurring task (mutual exclusion, and the spec's Tags rule).
             // No .duration or .divisible either: every recurring task is an
             // untimed list item now, so neither row applies to any of them.
-            [.recurringToggle, .repeats, .canStartBy, .timeMode,
+            [.nextStep, .recurringToggle, .repeats, .canStartBy, .timeMode,
              .ends, .pushIfMissed, .remindIn, .shelf, .eligibleSchedules]
         )
     }
@@ -373,9 +373,16 @@ final class CardRowVisibilityTests: XCTestCase {
 
     /// Never includes `.nextStep` — that row is drawn in `cardHeader`,
     /// above the scroll body.
-    func test_scrollBodyOrder_excludesTheHeaderRow() {
+    /// Was `test_scrollBodyOrder_excludesTheHeaderRow`. **Inverted
+    /// deliberately:** Next Step is no longer a header special case.
+    ///
+    /// It used to live in `cardHeader`, outside all three row lists — the
+    /// "fourth location" the row-list audit turned up. It is an ordinary
+    /// collapsible row now, and it leads, because it is the only *content*
+    /// question on the card where everything below it is structural.
+    func test_scrollBodyOrder_leadsWithNextStep() {
         for task in [plainTask(), recurringTask()] {
-            XCTAssertFalse(CardRow.scrollBodyOrder(task: task, shelf: trackingShelf()).contains(.nextStep))
+            XCTAssertEqual(CardRow.scrollBodyOrder(task: task, shelf: trackingShelf()).first, .nextStep)
         }
     }
 

@@ -2000,6 +2000,7 @@ struct TaskReviewCard: View {
     private var isStartsExpanded: Binding<Bool> { expandedBinding(for: .canStartBy) }
     private var isTimeExpanded: Binding<Bool> { expandedBinding(for: .timeMode) }
     private var isEndsExpanded: Binding<Bool> { expandedBinding(for: .ends) }
+    private var isNextStepExpanded: Binding<Bool> { expandedBinding(for: .nextStep) }
     private var isDueExpanded: Binding<Bool> { expandedBinding(for: .due) }
     private var isPriorityExpanded: Binding<Bool> { expandedBinding(for: .priority) }
     private var isDurationExpanded: Binding<Bool> { expandedBinding(for: .duration) }
@@ -2130,6 +2131,15 @@ struct TaskReviewCard: View {
     /// its own control disabled. Ungated when there's a real, splittable
     /// duration — Divisible genuinely needs an answer then, same as the
     /// recurring row.
+    /// Delegates to `missingAttributeNames`, same as every other row's
+    /// check, so it can't drift from what the badge reports. Note what that
+    /// makes true: answering **Yes** and leaving the text empty still counts
+    /// as unconfigured — `TaskItem.nextStepMissing` is
+    /// `!nextStepDecided || (nextStepAnsweredYes && nextStep.isEmpty)`.
+    static func isNextStepConfigured(task: TaskItem, shelf: Shelf?) -> Bool {
+        !task.missingAttributeNames(consideringShelf: shelf).contains("Next Step")
+    }
+
     static func isDurationConfigured(task: TaskItem, shelf: Shelf?) -> Bool {
         !task.missingAttributeNames(consideringShelf: shelf).contains("Duration")
     }
@@ -2221,6 +2231,7 @@ struct TaskReviewCard: View {
     /// out a branch per mode.
     static func isConfigured(_ row: CardRow, task: TaskItem, shelf: Shelf?, segmentOptions: [Int]) -> Bool {
         switch row {
+        case .nextStep: return isNextStepConfigured(task: task, shelf: shelf)
         case .repeats: return isRepeatsConfigured(task: task, shelf: shelf)
         case .canStartBy: return isStartsConfigured(task: task, shelf: shelf)
         case .timeMode: return isTimeConfigured(task: task, shelf: shelf, segmentOptions: segmentOptions)
@@ -2705,6 +2716,54 @@ struct TaskReviewCard: View {
     /// whatever was typed, same as `dueDateAnswer`'s "No" clears
     /// `dueDate` — there's no reason to keep stale text around for a
     /// question that's now unanswered again.
+    /// The Yes/No control plus, on Yes, the text field — the same pair that
+    /// lived in `cardHeader` before this became an ordinary row.
+    ///
+    /// Collapse timing differs from every other row and has to: Next Step is
+    /// the only question whose answer arrives in two steps. "No" finishes in
+    /// one tap and self-collapses in `nextStepAnswer`'s setter; "Yes" opens a
+    /// text field, so it collapses when that field loses focus — provided
+    /// something was actually typed. Yes-with-empty-text stays open, because
+    /// it is still reported missing (see `isNextStepConfigured`) and a row
+    /// that collapsed there would read as answered when it isn't.
+    @ViewBuilder
+    private var nextStepExpandedContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            YesNoToggle(title: "Has next step", answer: nextStepAnswer)
+            if nextStepAnswer.wrappedValue == true {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "arrow.turn.down.right")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    TextField("Next step", text: $task.nextStep, axis: .vertical)
+                        .font(task.nextStep.count > 30 ? .subheadline.weight(.medium) : .body.weight(.medium))
+                        .animation(.easeInOut(duration: 0.1), value: task.nextStep.count > 30)
+                        .focused($focusedField, equals: .nextStep)
+                    // Right next to where you're actually typing — easier to
+                    // find in the moment than the accessory Done button
+                    // riding above the keyboard itself.
+                    if focusedField == .nextStep {
+                        Button {
+                            focusedField = nil
+                        } label: {
+                            Image(systemName: "keyboard.chevron.compact.down")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .animation(.easeInOut(duration: 0.15), value: nextStepAnswer.wrappedValue)
+        .id("nextStepSection")
+        .onChange(of: focusedField) { previous, current in
+            // Blur is this field's "I'm done" moment, the same role a
+            // popover dismiss plays for the Specific-Time clock.
+            guard previous == .nextStep, current != .nextStep else { return }
+            if isNextStepConfigured { expandedRows.remove(.nextStep) }
+        }
+    }
+
     private var nextStepAnswer: Binding<Bool?> {
         Binding(
             get: { task.nextStepDecided ? task.nextStepAnsweredYes : nil },
@@ -2718,6 +2777,11 @@ struct TaskReviewCard: View {
                     task.nextStepDecided = true
                     task.nextStepAnsweredYes = false
                     task.nextStep = ""
+                    // "No" is a finished answer with nothing left to do, so
+                    // it self-collapses immediately — same as Due landing on
+                    // "None". "Yes" deliberately does not: the text field is
+                    // the rest of the answer, and it collapses on blur below.
+                    expandedRows.remove(.nextStep)
                 case .none:
                     task.nextStepDecided = false
                     task.nextStepAnsweredYes = false
@@ -2917,6 +2981,10 @@ struct TaskReviewCard: View {
         Self.isTimeConfigured(task: task, shelf: previewedShelf, segmentOptions: segmentOptions)
     }
 
+    private var isNextStepConfigured: Bool {
+        Self.isNextStepConfigured(task: task, shelf: previewedShelf)
+    }
+
     private var isDueConfigured: Bool {
         Self.isDueConfigured(task: task, shelf: previewedShelf)
     }
@@ -3100,10 +3168,6 @@ struct TaskReviewCard: View {
     }
 
 
-    /// Same idea as `dueDatesAllowed`, for the Next Step field.
-    private var nextStepAllowed: Bool {
-        previewedShelf?.effectiveTracksNextStep ?? true
-    }
 
     /// Same idea as `dueDatesAllowed`, for the Priority section.
     private var priorityAllowed: Bool {
@@ -3177,39 +3241,7 @@ struct TaskReviewCard: View {
                     .foregroundStyle(.red)
             }
 
-            if nextStepAllowed {
-                VStack(alignment: .leading, spacing: 8) {
-                    YesNoToggle(title: "Has next step", answer: nextStepAnswer)
-                    if nextStepAnswer.wrappedValue == true {
-                        HStack(alignment: .top, spacing: 6) {
-                            Image(systemName: "arrow.turn.down.right")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                            TextField("Next step", text: $task.nextStep, axis: .vertical)
-                                .font(task.nextStep.count > 30 ? .subheadline.weight(.medium) : .body.weight(.medium))
-                                .animation(.easeInOut(duration: 0.1), value: task.nextStep.count > 30)
-                                .focused($focusedField, equals: .nextStep)
-                            // Right next to where you're actually typing —
-                            // easier to find in the moment than the
-                            // accessory Done button riding above the
-                            // keyboard itself.
-                            if focusedField == .nextStep {
-                                Button {
-                                    focusedField = nil
-                                } label: {
-                                    Image(systemName: "keyboard.chevron.compact.down")
-                                        .foregroundStyle(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-                }
-                .animation(.easeInOut(duration: 0.15), value: nextStepAnswer.wrappedValue)
-                .transition(.opacity)
-            }
         }
-        .animation(.easeInOut(duration: 0.15), value: nextStepAllowed)
         .padding(16)
         .padding(.bottom, 0)
     }
@@ -3311,6 +3343,17 @@ struct TaskReviewCard: View {
         guard isDueConfigured(task: task, shelf: shelf) else { return "Not selected" }
         guard let dueDate = task.dueDate else { return "None" }
         return abbreviatedDateFormatter.string(from: dueDate)
+    }
+
+    /// Four states, matching `isNextStepConfigured`:
+    /// undecided → "Not Selected"; No → "None" (the same word Due uses for
+    /// a deliberate no-answer); Yes with text → the text; **Yes with empty
+    /// text → "Not Selected"**, because that is still reported missing and
+    /// the row must not look answered when it isn't.
+    private var nextStepSummaryText: String {
+        guard task.nextStepDecided else { return "Not Selected" }
+        guard task.nextStepAnsweredYes else { return "None" }
+        return task.nextStep.isEmpty ? "Not Selected" : task.nextStep
     }
 
     private var dueSummaryText: String {
@@ -3785,6 +3828,18 @@ struct TaskReviewCard: View {
             VStack(alignment: .leading, spacing: 10) {
             Divider()
 
+            if CardRow.nextStep.visibility(task: task, shelf: previewedShelf) != .hidden {
+                CollapsibleAnswerRow(
+                    label: "Next Step",
+                    summary: nextStepSummaryText,
+                    isNotSelected: !isNextStepConfigured,
+                    isExpanded: isNextStepExpanded,
+                    onTapHeader: { focusedField = nil }
+                ) {
+                    nextStepExpandedContent
+                }
+            }
+
             if CardRow.recurringToggle.visibility(task: task, shelf: previewedShelf) != .hidden {
                 Toggle("Recurring?", isOn: Binding(
                     get: { task.isRecurring },
@@ -4082,6 +4137,16 @@ struct TaskReviewCard: View {
         .frame(maxHeight: .infinity)
         .scrollDismissesKeyboard(.interactively)
         .onChange(of: focusedField) { _, newValue in
+            // Next Step used to live in the *fixed* header, so focusing it
+            // could never scroll it away. It is an ordinary scrolling row
+            // now, which reintroduces the problem the tag field already
+            // solved: the keyboard covers the bottom of the card, and a
+            // field near it ends up typed into blind. Same fix, same
+            // anchor — `.bottom` keeps the field just above the keyboard
+            // rather than jumping it to the top of the viewport.
+            if newValue == .nextStep {
+                withAnimation { scrollProxy.scrollTo("nextStepSection", anchor: .bottom) }
+            }
             guard newValue == .tag else { return }
             withAnimation { scrollProxy.scrollTo("tagSection", anchor: .bottom) }
         }

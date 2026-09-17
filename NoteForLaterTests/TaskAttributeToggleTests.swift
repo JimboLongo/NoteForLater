@@ -316,7 +316,7 @@ final class TaskAttributeToggleTests: XCTestCase {
         // Every row this shelf switches off is gone — Due included, now
         // that it hides rather than greys. Duration stays because this is
         // the shelf its own value selects (`durationIsTheDestinationTrigger`).
-        XCTAssertEqual(rows, [.canStartBy, .duration], "Due, Priority and Tags are off; Duration is the trigger and stays")
+        XCTAssertEqual(rows, [.nextStep, .canStartBy, .duration], "Due, Priority and Tags are off; Duration is the trigger and stays")
     }
 
     /// AM/Midday/PM never places a calendar block, so Duration and

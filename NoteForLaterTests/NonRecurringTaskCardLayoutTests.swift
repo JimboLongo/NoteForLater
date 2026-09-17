@@ -11,7 +11,15 @@ import SwiftData
 /// summary-text functions instead.
 final class NonRecurringTaskCardLayoutTests: XCTestCase {
     private func makeTask(title: String = "Buy groceries") -> TaskItem {
-        TaskItem(title: title)
+        let task = TaskItem(title: title)
+        // Next Step answered ("None") so it drops out of the seeding
+        // question entirely. It became the *first* row in `scrollBodyOrder`
+        // when it moved out of `cardHeader`, so an unanswered one would seed
+        // open ahead of whatever each test below is actually about. Answered
+        // here rather than letting every expectation shift by one row; that
+        // it seeds first when unanswered is pinned separately.
+        task.nextStepDecided = true
+        return task
     }
 
     // MARK: - "Due" row: the undecided-vs-decided-as-none distinction
@@ -295,7 +303,7 @@ final class NonRecurringTaskCardLayoutTests: XCTestCase {
 
         let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: nil, segmentOptions: [], isNewlyCreated: true)
 
-        XCTAssertEqual(rows, [.due, .canStartBy, .duration, .priority])
+        XCTAssertEqual(rows, [.nextStep, .due, .canStartBy, .duration, .priority])
     }
 
     /// A reopened, fully-configured non-recurring task opens fully
@@ -331,7 +339,7 @@ final class NonRecurringTaskCardLayoutTests: XCTestCase {
     func test_fillingPriorityOnNewTask_wouldCollapseOnlyPriority() {
         let task = makeTask()
         let seeded = TaskReviewCard.initialExpandedRows(task: task, shelf: nil, segmentOptions: [], isNewlyCreated: true)
-        XCTAssertEqual(seeded, [.due, .canStartBy, .duration, .priority])
+        XCTAssertEqual(seeded, [.nextStep, .due, .canStartBy, .duration, .priority])
 
         task.priority = .high
 
