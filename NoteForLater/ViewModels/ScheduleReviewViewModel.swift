@@ -2639,7 +2639,12 @@ final class ScheduleReviewViewModel {
     static func unresolvedGateMessage(unresolvedHabitCount: Int, unresolvedRecurringTaskCount: Int) -> String {
         var parts: [String] = []
         if unresolvedHabitCount > 0 {
-            parts.append(unresolvedHabitCount == 1 ? "1 habit" : "\(unresolvedHabitCount) habits")
+            // "from an earlier day" because only backlog blocks now — today's
+            // unmarked habits are visible on the step but don't gate. Without
+            // it you'd read "1 habit still unmarked" with three unmarked ones
+            // on screen.
+            let noun = unresolvedHabitCount == 1 ? "1 habit" : "\(unresolvedHabitCount) habits"
+            parts.append("\(noun) from an earlier day")
         }
         if unresolvedRecurringTaskCount > 0 {
             parts.append(unresolvedRecurringTaskCount == 1 ? "1 task" : "\(unresolvedRecurringTaskCount) tasks")

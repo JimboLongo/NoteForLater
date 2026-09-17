@@ -346,4 +346,40 @@ final class NightlyReviewCommitTests: XCTestCase {
         XCTAssertEqual(habit.logOrCreate(on: earlier, context: context).occurrenceStatus(0), .complete,
                        "the log wins — a drifted block flag must not destroy a completion")
     }
+
+    /// **The review day's own occurrences are not swept.** A habit due this
+    /// evening may still happen; marking it missed at 9pm because you were
+    /// planning tomorrow writes a miss you didn't earn.
+    ///
+    /// Safe because an unmarked past day already reads as `.no` without a
+    /// marker (see
+    /// `test_unmarkedPastDayCountsAsAMiss_withoutAnExplicitMissedMarker`) —
+    /// so this costs one evening of a missing icon, not distorted streaks.
+    /// And tomorrow's review sweeps it as backlog.
+    func test_sweepLeavesTheReviewDaysOwnOccurrencesAlone() throws {
+        let reviewDate = day(2026, 1, 5)
+        let habit = makeHabit(name: "Evening stretch", startDate: day(2026, 1, 1))
+        try context.save()
+
+        try sweep(habits: [habit], reviewDate: reviewDate)
+
+        XCTAssertEqual(habit.logOrCreate(on: reviewDate, context: context).occurrenceStatus(0), OccurrenceStatus.none,
+                       "still pending — it may yet happen tonight")
+        XCTAssertEqual(habit.logOrCreate(on: day(2026, 1, 4), context: context).occurrenceStatus(0), .missed,
+                       "but yesterday's is swept — that day is over")
+    }
+
+    /// The boundary follows `reviewDate`, so "Plan Today" (which reviews
+    /// *yesterday*) leaves yesterday's alone and sweeps the day before.
+    func test_sweepBoundaryFollowsReviewDate_notTheWallClock() throws {
+        let reviewDate = day(2026, 1, 4)          // as if planning today, on the 5th
+        let habit = makeHabit(name: "Stretch", startDate: day(2026, 1, 1))
+        try context.save()
+
+        try sweep(habits: [habit], reviewDate: reviewDate)
+
+        XCTAssertEqual(habit.logOrCreate(on: day(2026, 1, 4), context: context).occurrenceStatus(0), OccurrenceStatus.none,
+                       "the day being closed out is still live")
+        XCTAssertEqual(habit.logOrCreate(on: day(2026, 1, 3), context: context).occurrenceStatus(0), .missed)
+    }
 }

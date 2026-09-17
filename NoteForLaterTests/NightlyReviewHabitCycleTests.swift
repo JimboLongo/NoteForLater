@@ -357,6 +357,18 @@ final class NightlyReviewHabitCycleTests: XCTestCase {
 
     // MARK: - The gate is backlog-only
 
+    /// ⚠️ **These cover the filter, not the wiring.** Swapping the view's
+    /// gate back to `unresolvedHabitOccurrences` fails nothing (verified by
+    /// sabotage: 0 of 600) — `unresolvedHabitOccurrencesForGate` is a
+    /// private property on a SwiftUI `View`, the same unreachability that
+    /// left the commit batch and the exit-effect call uncovered.
+    ///
+    /// Lower stakes than those two: this is one function swapped for
+    /// another at a single call site, not a whole side-effect body that can
+    /// silently stop running, and the *sweep* half — the one that writes
+    /// user data — is covered at its new boundary. Named rather than closed;
+    /// closing it means the same kind of extraction, for much less.
+    ///
     /// **Today's habits must not block Next.** An evening habit at 9pm may
     /// still legitimately happen; backlog from earlier days is genuinely
     /// unaddressed. "Today" is the *review date* — the day being closed out

@@ -318,7 +318,26 @@ extension ScheduleReviewViewModel {
             guard status == .none else { continue }
             log.setOccurrence(block.habitOccurrenceIndex, to: .missed)
         }
-        for occurrence in sweepOccurrences {
+        // **Backlog only, matching the gate.**
+        //
+        // This used to sweep the review day's own occurrences too, and that
+        // was the right call *under the old gate*: nothing could reach the
+        // sweep unresolved, because Next was blocked until every occurrence
+        // had been answered. Removing that gate invalidates the premise —
+        // today's occurrences now routinely arrive here as `.none`, and
+        // sweeping them would mark the 10pm habit you're about to do as
+        // missed at 9pm. Same call, changed input, not churn.
+        //
+        // What this costs is small, and smaller than it first looks: an
+        // unmarked *past* day already reads as `.no` in
+        // `Habit.status(on:asOf:)` without any explicit marker (pinned by
+        // `test_unmarkedPastDayCountsAsAMiss_withoutAnExplicitMissedMarker`).
+        // So the sweep is **cosmetic correctness, not arithmetic
+        // correctness** — it writes the marker the Habits screen draws an
+        // icon from. Skipping today costs one evening of a missing icon,
+        // and tomorrow's review sweeps it as backlog anyway.
+        let reviewDay = Calendar.current.startOfDay(for: reviewDate)
+        for occurrence in sweepOccurrences where Calendar.current.startOfDay(for: occurrence.targetTime) < reviewDay {
             let log = habitLog(occurrence.habit, occurrence.targetTime)
             let status = log.occurrenceStatus(occurrence.index)
             guard !occurrence.isCompleted, status == .none else { continue }

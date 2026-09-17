@@ -484,8 +484,17 @@ struct NightlyReviewView: View {
     /// .unresolvedHabitOccurrences`, the exact same `.none`-only predicate
     /// the old combined gate used for its own habit half, just no longer
     /// mixed in with recurring tasks.
+    /// **Backlog only — the review day's own habits don't block Next.**
+    ///
+    /// A habit due this evening may still legitimately happen; being made
+    /// to declare it done or missed at 9pm while planning tomorrow is a
+    /// false choice. Earlier days are over, so anything still unresolved
+    /// there is genuinely unaddressed.
+    ///
+    /// Visibility is unchanged: today's occurrences still render on the step
+    /// and are still markable. This is a gating change only.
     private var unresolvedHabitOccurrencesForGate: [HabitReviewOccurrence] {
-        ScheduleReviewViewModel.unresolvedHabitOccurrences(openHabitOccurrencesForReview)
+        ScheduleReviewViewModel.backlogHabitOccurrences(openHabitOccurrencesForReview, before: reviewDate)
     }
 
     private var habitsUnresolvedGateMessage: String {
