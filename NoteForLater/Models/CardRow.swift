@@ -24,7 +24,6 @@ enum CardRow: CaseIterable {
     // Shown for every task.
     case nextStep
     case recurringToggle
-    case twoMinuteToggle
     case canStartBy
     case duration
     case divisible
@@ -72,16 +71,13 @@ enum CardRow: CaseIterable {
             return (shelf?.effectiveTracksNextStep ?? true) ? .shown : .hidden
 
         case .recurringToggle:
-            // Hidden once the task is 2-minute: the two are mutually
-            // exclusive, so offering the other toggle would invite a
-            // combination the model refuses (see
-            // `TaskItem.repairSpecialShelfExclusivity`).
+            // Still hidden once the task is 2-minute. The *other* toggle is
+            // gone — duration drives 2-minute-ness now — but the mutual
+            // exclusion it protected is unchanged: a recurring task must not
+            // sit on the 2-Minute shelf (see
+            // `TaskItem.repairSpecialShelfExclusivity`), and offering
+            // Recurring here would invite exactly that.
             return isTwoMinute(shelf: shelf) ? .hidden : .shown
-
-        case .twoMinuteToggle:
-            // Same exclusion from the other side. Recurring wins, so a
-            // recurring task doesn't get offered this at all.
-            return task.isRecurring ? .hidden : .shown
 
         case .shelf, .canStartBy:
             // Always offered. Can Start By is shown for a non-recurring
@@ -111,11 +107,19 @@ enum CardRow: CaseIterable {
             // hide it while Specific-Time recurring tasks still need a
             // block length they'd have no way to set.
             if task.recurringAndUntimed { return .hidden }
-            if isTwoMinute(shelf: shelf) { return .hidden }
+            // Deliberately NOT hidden for a 2-Minute task. Duration is
+            // what *puts* a task on that shelf now (≤2 min auto-selects
+            // it), so hiding the control that got you there would leave
+            // the value invisible and uneditable — and it is the only way
+            // back off the shelf. Divisible below stays hidden: at two
+            // minutes there is nothing to split.
             return (shelf?.effectiveTracksDuration ?? true) ? .shown : .greyed
 
         case .divisible:
             if task.recurringAndUntimed { return .hidden }
+            // Unlike Duration directly above, this one *does* stay hidden
+            // for a 2-Minute task: a two-minute task has nothing to split,
+            // and unlike Duration it isn't the control that got you here.
             if isTwoMinute(shelf: shelf) { return .hidden }
             // Deliberately `.hidden` rather than `.greyed` where Duration
             // is `.greyed`, reproducing today's behavior exactly. The
@@ -197,7 +201,7 @@ enum CardRow: CaseIterable {
     /// `.greyed` rows are included — greyed means drawn-but-disabled, not
     /// absent. Only `.hidden` drops out.
     static func scrollBodyOrder(task: TaskItem, shelf: Shelf?) -> [CardRow] {
-        var rows: [CardRow] = [.recurringToggle, .twoMinuteToggle]
+        var rows: [CardRow] = [.recurringToggle]
         if task.isRecurring {
             rows += [.repeats, .canStartBy, .timeMode, .duration, .divisible, .ends, .pushIfMissed]
         } else {
@@ -220,7 +224,7 @@ enum CardRow: CaseIterable {
         switch self {
         case .repeats, .canStartBy, .timeMode, .duration, .divisible, .ends, .due, .priority:
             return true
-        case .nextStep, .recurringToggle, .twoMinuteToggle, .tags, .shelf, .eligibleSchedules, .remindIn, .pushIfMissed:
+        case .nextStep, .recurringToggle, .tags, .shelf, .eligibleSchedules, .remindIn, .pushIfMissed:
             return false
         }
     }
@@ -273,7 +277,7 @@ enum CardRow: CaseIterable {
             // Recurrence settings are cleared by `setRecurring(false)`
             // itself, atomically with the flag — not row by row.
             break
-        case .recurringToggle, .twoMinuteToggle, .shelf, .eligibleSchedules:
+        case .recurringToggle, .shelf, .eligibleSchedules:
             break
         }
     }

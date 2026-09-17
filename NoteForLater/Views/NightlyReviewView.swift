@@ -2015,7 +2015,7 @@ struct TaskReviewCard: View {
     /// The short, curated list — not every 15-minute increment, just the
     /// sizes actually worth picking from directly. See `durationWheelOptions`
     /// below for why this alone isn't always enough.
-    static let durationOptions = [15, 30, 45, 60, 90, 120, 240, 480]
+    static let durationOptions = [2, 15, 30, 45, 60, 90, 120, 240, 480]
     /// Segment sizes valid for *this* task's current duration — only
     /// values that evenly divide it, so the packer can never be left with
     /// a remainder too small to place (see `TaskItem.validSegmentOptions`).
@@ -2033,10 +2033,11 @@ struct TaskReviewCard: View {
     /// Keeping the option list short everywhere else while still
     /// guaranteeing the current value is always selectable.
     private var durationWheelOptions: [Int] {
-        // `≤2 min` is no longer offered: a 2-minute task is expressed by
-        // the 2-Minute toggle, which hides Duration entirely. The
-        // slot-in below still renders a task that already holds an
-        // off-wheel value (2 among them), so nothing becomes unshowable.
+        // `≤2 min` is back on the list, and is the trigger that moves a
+        // task onto the 2-Minute shelf (see `applyDurationDrivenShelf`).
+        // It was briefly removed while a separate "2 Minutes or Less?"
+        // toggle expressed the same thing; duration is the single trigger
+        // again, so the wheel has to be able to say it.
         let options = Self.durationOptions
         guard task.estimatedMinutes > 0, !options.contains(task.estimatedMinutes) else {
             return options
@@ -2418,12 +2419,25 @@ struct TaskReviewCard: View {
         /// This shelf is previewed, whether tapped or implied by a toggle.
         case shelf(Shelf)
         /// Explicitly previewing *no* shelf — distinct from `.none`,
-        /// which falls back to the task's own. Reached by turning the
-        /// 2-Minute toggle off on a task that actually lives on that
-        /// shelf: falling back would resolve to the 2-Minute shelf again
-        /// and flip the toggle straight back on. The card asks for a
-        /// destination instead (see `actionButtonInfo`).
-        case cleared
+        /// which falls back to the task's own. Reached by raising a
+        /// 2-Minute shelf resident's duration above two minutes: falling
+        /// back would resolve to the 2-Minute shelf again, which no longer
+        /// matches the duration. The card asks for a destination instead
+        /// (see `actionButtonInfo`).
+        ///
+        /// **Carries its reason rather than relying on there being one
+        /// producer.** There is exactly one today, so the prompt could just
+        /// assume — but a second producer added later would silently
+        /// inherit copy claiming the task stopped being a 2-minute task.
+        /// Making the reason explicit forces that future case to say what
+        /// it is instead.
+        case cleared(Reason)
+
+        enum Reason {
+            /// Duration was raised above two minutes on a task living on
+            /// the 2-Minute shelf.
+            case noLongerTwoMinute
+        }
 
         /// What the card should actually read its shelf-gated questions
         /// from.
@@ -2450,6 +2464,16 @@ struct TaskReviewCard: View {
         /// where the task should go. Blocks commit — see
         /// `actionButtonInfo`.
         var needsShelfChoice: Bool { if case .cleared = self { return true }; return false }
+
+        /// The prompt shown above the shelf grid while a choice is owed,
+        /// phrased per reason so it reads as a question rather than an
+        /// error. `nil` whenever no choice is owed.
+        var shelfChoicePrompt: String? {
+            guard case .cleared(let reason) = self else { return nil }
+            switch reason {
+            case .noLongerTwoMinute: return "No longer a 2-minute task — where should it go?"
+            }
+        }
     }
 
     /// Seeds eligible schedules from whichever shelf is now in effect.
@@ -2526,30 +2550,73 @@ struct TaskReviewCard: View {
         }
     }
 
-    /// The 2-Minute counterpart. 2-minute-ness is shelf membership, so
-    /// this toggle *is* a shelf move — which is why turning it off needs
-    /// somewhere to go, and says so rather than guessing.
-    static func applyTwoMinuteToggle(
-        _ isOn: Bool, task: TaskItem, shelves: [Shelf], preview: ShelfPreview
+    /// Keeps the shelf preview in step with the duration. **Duration is
+    /// the single trigger for 2-minute-ness** — there is no toggle.
+    ///
+    /// Three transitions, and deliberately no fourth:
+    /// - **≤2 min, not already on the shelf** → preview the 2-Minute shelf.
+    ///   A *preview*, not a move: `onMove` still only fires at commit, so
+    ///   the action button reads "Save, Move & Submit" and raising the
+    ///   duration again undoes it with nothing written.
+    /// - **>2 min, task actually lives on the 2-Minute shelf** → `.cleared`.
+    ///   Falling back to its own shelf would resolve to 2-Minute again,
+    ///   which the duration no longer matches, so the card asks where it
+    ///   should go instead.
+    /// - **>2 min, the 2-Minute preview was ours** → back to `.none`, which
+    ///   falls back to the shelf the task was on before.
+    ///
+    /// A preview the *user* picked is never touched — only the one this
+    /// rule set. That's what makes an explicit shelf tap win over the
+    /// duration rule without needing a suppression flag: the rule simply
+    /// has nothing of its own to undo.
+    ///
+    /// Replaced `applyTwoMinuteToggle`. Two triggers writing one shelf
+    /// needed arbitration and, on the losing path, a persisted "user
+    /// overrode this" flag — stored 2-minute-ness by another name, which
+    /// is what the derived representation exists to avoid.
+    static func applyDurationDrivenShelf(
+        task: TaskItem, shelves: [Shelf], preview: ShelfPreview
     ) -> ShelfPreview {
         applyTogglePreservingOnlyVisibleRows(task: task, preview: preview) {
-            guard isOn else {
-                // Falling back to the task's own shelf would resolve to
-                // the 2-Minute shelf again and flip this straight back
-                // on, so that case has to ask for a destination. A task
-                // merely *previewing* the shelf just reverts.
-                let next: ShelfPreview = task.shelf?.isTwoMinuteTasks == true ? .cleared : .none
-                seedEligibleSchedules(task: task, from: next.resolved(for: task))
-                return next
-            }
+            durationDrivenShelf(task: task, shelves: shelves, preview: preview)
+        }
+    }
+
+    /// The transition itself, wrapped above by the derived reset so landing
+    /// on the 2-Minute shelf clears exactly the rows that shelf hides.
+    ///
+    /// **Duration is safe from that reset by construction**, which is the
+    /// point of deriving it rather than listing it: Duration stays *visible*
+    /// on a 2-Minute task (see `CardRow.duration`), so it is never in
+    /// (visible before − visible after) and cannot be cleared. A
+    /// hand-written reset list would have had to remember not to clear the
+    /// very value that triggered the move.
+    private static func durationDrivenShelf(
+        task: TaskItem, shelves: [Shelf], preview: ShelfPreview
+    ) -> ShelfPreview {
+        let isTwoMinuteDuration = task.durationPicked && task.estimatedMinutes > 0 && task.estimatedMinutes <= 2
+
+        if isTwoMinuteDuration {
+            guard task.shelf?.isTwoMinuteTasks != true else { return .none }
             guard let twoMinuteShelf = shelves.first(where: { $0.isTwoMinuteTasks }) else { return preview }
-            // Recurring loses here: the action just taken wins (see
-            // `TaskItem.repairSpecialShelfExclusivity` on why that's the
-            // sequential reading).
+            guard preview.explicitShelf?.id != twoMinuteShelf.id else { return preview }
+            // Recurring loses here, matching what the toggle did: the
+            // action just taken wins (see
+            // `TaskItem.repairSpecialShelfExclusivity`).
             task.isRecurring = false
             seedEligibleSchedules(task: task, from: twoMinuteShelf)
             return .shelf(twoMinuteShelf)
         }
+
+        if task.shelf?.isTwoMinuteTasks == true {
+            seedEligibleSchedules(task: task, from: nil)
+            return .cleared(.noLongerTwoMinute)
+        }
+        if preview.explicitShelf?.isTwoMinuteTasks == true {
+            seedEligibleSchedules(task: task, from: task.shelf)
+            return .none
+        }
+        return preview
     }
 
     init(
@@ -2967,6 +3034,13 @@ struct TaskReviewCard: View {
                 // answer. Same rule the Divisible wheel and the
                 // Specific-Time clock already follow.
                 TaskItem.selectDuration(newValue, on: task)
+                // Duration drives the shelf — see
+                // `applyDurationDrivenShelf`. Runs after the write so it
+                // reads the value just set, and only from here: this is
+                // the single point the wheel writes duration.
+                shelfPreview = Self.applyDurationDrivenShelf(
+                    task: task, shelves: shelves, preview: shelfPreview
+                )
             }
         )
     }
@@ -3723,18 +3797,6 @@ struct TaskReviewCard: View {
                 .animation(.easeInOut(duration: 0.15), value: task.isRecurring)
             }
 
-            if CardRow.twoMinuteToggle.visibility(task: task, shelf: previewedShelf) != .hidden {
-                Toggle("2 Minutes or Less?", isOn: Binding(
-                    get: { previewedShelf?.isTwoMinuteTasks == true },
-                    set: { newValue in
-                        shelfPreview = Self.applyTwoMinuteToggle(
-                            newValue, task: task, shelves: shelves, preview: shelfPreview
-                        )
-                    }
-                ))
-                .animation(.easeInOut(duration: 0.15), value: previewedShelf?.isTwoMinuteTasks)
-            }
-
             if task.isRecurring {
                 recurringSection
             } else {
@@ -4102,6 +4164,16 @@ struct TaskReviewCard: View {
     /// and `.adaptive` columns keep every icon the same evenly-spaced
     /// width whether there's one row or several.
     private var shelfRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+        if let prompt = shelfPreview.shelfChoicePrompt {
+            // Only while a choice is actually owed, and worded by reason
+            // (see `ShelfPreview.shelfChoicePrompt`) so this reads as a
+            // question rather than as the generic "Remaining Attributes:
+            // Shelf" the action button already shows.
+            Text(prompt)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 70), spacing: 16)], alignment: .center, spacing: 12) {
                 ForEach(eligibleShelvesForMove) { shelf in
                     let isCurrent = task.shelf?.id == shelf.id
@@ -4165,6 +4237,7 @@ struct TaskReviewCard: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(shelf.name)
                 }
+        }
         }
         .padding(.vertical, 4)
         .padding(.horizontal, 20)

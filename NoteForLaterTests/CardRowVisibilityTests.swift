@@ -264,10 +264,12 @@ final class CardRowVisibilityTests: XCTestCase {
         //
         // Both fixtures sit on an ordinary shelf, so the 2-Minute column is
         // covered separately by the tests below.
+        //
+        // The `.twoMinuteToggle` row is gone: duration is the single
+        // trigger for 2-minute-ness now, so there is no toggle to show.
         let expected: [(CardRow, CardRow.Visibility, CardRow.Visibility)] = [
             (.nextStep,          .shown,  .shown),
             (.recurringToggle,   .shown,  .shown),
-            (.twoMinuteToggle,   .shown,  .hidden),
             (.canStartBy,        .shown,  .shown),
             (.duration,          .shown,  .hidden),
             (.divisible,         .shown,  .hidden),
@@ -299,7 +301,7 @@ final class CardRowVisibilityTests: XCTestCase {
         let task = plainTask(minutes: 120)
         XCTAssertEqual(
             CardRow.scrollBodyOrder(task: task, shelf: trackingShelf()),
-            [.recurringToggle, .twoMinuteToggle, .due, .canStartBy, .duration, .divisible, .priority,
+            [.recurringToggle, .due, .canStartBy, .duration, .divisible, .priority,
              .remindIn, .tags, .shelf, .eligibleSchedules]
         )
     }
