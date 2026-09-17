@@ -157,8 +157,14 @@ struct TaskReviewQueueSheet: View {
                             .foregroundStyle(engagementTimer.isExpired ? .secondary : .primary)
                     }
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button(skipRemainingTitle, action: skipRemaining)
-                            .disabled(!engagementTimer.isExpired)
+                        // Hidden once nothing is left to address — a countdown with an
+                        // empty queue behind it is asking you to wait for nothing.
+                        // Display only: `InboxEngagementTimer` and the `.onReceive`
+                        // teardown are untouched, so resume-not-reset is unchanged.
+                        if !AttributeReviewSession.queueCandidates(from: initialQueue).isEmpty {
+                            Button(skipRemainingTitle, action: skipRemaining)
+                                .disabled(!engagementTimer.isExpired)
+                        }
                     }
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Mark Complete", action: markComplete)

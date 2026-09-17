@@ -179,3 +179,77 @@ final class TwoMinutePushTests: XCTestCase {
                        "not ours to clear — .missed is what marks a push")
     }
 }
+
+/// The 2-Minute step's engagement floor.
+final class TwoMinuteEngagementTimerTests: XCTestCase {
+    private typealias Timer = TwoMinuteEngagementTimer
+
+    /// Two minutes per unresolved task, capped at four. Missed counts in
+    /// full — it is a decision, not a completion, so it buys no time off.
+    func test_budgetIsTwoMinutesPerUnresolvedTask_cappedAtFour() async {
+        XCTAssertEqual(Timer.budget(missed: 0, unanswered: 0), 0)
+        XCTAssertEqual(Timer.budget(missed: 0, unanswered: 1), 120)
+        XCTAssertEqual(Timer.budget(missed: 1, unanswered: 0), 120, "missed is worth the same as unanswered")
+        XCTAssertEqual(Timer.budget(missed: 1, unanswered: 1), 240, "one of each is the full four minutes")
+        XCTAssertEqual(Timer.budget(missed: 3, unanswered: 4), 240, "capped")
+    }
+
+    /// Everything complete means **no timer at all**, not one reading 0:00 —
+    /// true from the very first frame, before any tick.
+    func test_allCompleteMeansNoTimerAtAll() async {
+        let timer = Timer()
+        XCTAssertTrue(timer.canProceed(missed: 0, unanswered: 0))
+        XCTAssertEqual(timer.remaining(missed: 0, unanswered: 0), 0)
+    }
+
+    /// The budget is live: completing a task shortens the wait immediately.
+    func test_completingOneDropsTheWaitByTwoMinutes() async {
+        let timer = Timer()
+        for _ in 0..<60 { timer.tick() }   // a minute in
+
+        XCTAssertEqual(timer.remaining(missed: 1, unanswered: 1), 180, "4:00 budget, 1:00 spent")
+        XCTAssertEqual(timer.remaining(missed: 1, unanswered: 0), 60, "one completed → 2:00 budget, 1:00 spent")
+    }
+
+    /// And switching one back from complete adds it again — the budget is
+    /// recomputed, not decremented, so it moves in both directions.
+    func test_unCompletingOneAddsTheTimeBack() async {
+        let timer = Timer()
+        for _ in 0..<60 { timer.tick() }
+        XCTAssertEqual(timer.remaining(missed: 0, unanswered: 1), 60)
+        XCTAssertEqual(timer.remaining(missed: 0, unanswered: 2), 180, "back up when one returns to unanswered")
+    }
+
+    /// **Dropping to zero mid-countdown proceeds immediately** — remaining
+    /// time is not still owed. The floor exists to sit with unresolved
+    /// work; with none left there is nothing to sit with, and making
+    /// someone wait it out would punish finishing.
+    func test_finishingEverythingMidCountdownProceedsImmediately() async {
+        let timer = Timer()
+        for _ in 0..<10 { timer.tick() }   // 3:50 still owed on a 4:00 budget
+        XCTAssertFalse(timer.canProceed(missed: 1, unanswered: 1))
+
+        XCTAssertTrue(timer.canProceed(missed: 0, unanswered: 0), "everything completed → straight through")
+    }
+
+    /// One budget per session: `elapsed` accumulates, so leaving and
+    /// returning resumes rather than restarting. Matches
+    /// `InboxEngagementTimer`, where restarting would make stepping back a
+    /// way to reset the floor.
+    func test_elapsedAccumulatesAcrossVisits() async {
+        let timer = Timer()
+        for _ in 0..<90 { timer.tick() }
+        XCTAssertEqual(timer.remaining(missed: 1, unanswered: 1), 150)
+
+        // A second visit continues from where it left off.
+        for _ in 0..<60 { timer.tick() }
+        XCTAssertEqual(timer.remaining(missed: 1, unanswered: 1), 90)
+    }
+
+    func test_waitingOutTheBudgetUnlocksIt() async {
+        let timer = Timer()
+        XCTAssertFalse(timer.canProceed(missed: 1, unanswered: 0))
+        for _ in 0..<120 { timer.tick() }
+        XCTAssertTrue(timer.canProceed(missed: 1, unanswered: 0))
+    }
+}

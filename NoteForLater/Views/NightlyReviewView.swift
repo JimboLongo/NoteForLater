@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import Combine
 
 /// The nightly wrap-up-and-plan-ahead flow: mark today's schedule
 /// complete/not complete, sort what's landed in the Inbox (one item at a
@@ -128,6 +129,9 @@ struct NightlyReviewView: View {
     /// it happens, and this only exists so changing your mind restores what
     /// was there before rather than clearing to nil.
     @State private var twoMinutePushState = TwoMinutePushState()
+    /// One budget per review session — see `TwoMinuteEngagementTimer`.
+    /// Held here, not in the step, so leaving and returning resumes.
+    @State private var twoMinuteEngagementTimer = TwoMinuteEngagementTimer()
     @State private var acknowledgedAtRiskTaskIDs: Set<UUID> = []
     @State private var atRiskTaskCardTarget: TaskItem?
     /// Drives the "X is empty — skipped" auto-skip toast (see
@@ -413,6 +417,7 @@ struct NightlyReviewView: View {
                         .disabled(
                             (step == .today && !unresolvedGateReviewItems.isEmpty)
                             || (step == .habits && !unresolvedHabitOccurrencesForGate.isEmpty)
+                            || (step == .twoMinuteTasks && !twoMinuteCanProceed)
                         )
                 }
             }
@@ -1426,6 +1431,26 @@ struct NightlyReviewView: View {
     /// Now includes tasks already completed before the step was entered
     /// (see `advance()`'s `next == .twoMinuteTasks` branch), not just
     /// still-pending ones.
+    /// Unresolved counts over the step's own frozen list — live, so the
+    /// timer shortens the moment something is completed.
+    private var twoMinuteUnresolvedCounts: (missed: Int, unanswered: Int) {
+        let tasks = twoMinuteReviewTasks
+        return (tasks.filter { $0.status == .missed }.count,
+                tasks.filter { $0.status == .none }.count)
+    }
+
+    private var twoMinuteCanProceed: Bool {
+        let counts = twoMinuteUnresolvedCounts
+        return twoMinuteEngagementTimer.canProceed(missed: counts.missed, unanswered: counts.unanswered)
+    }
+
+    /// "1:47", floored at "0:00" — same shape as
+    /// `TaskReviewQueueSheet.formattedRemaining`.
+    private static func formattedRemaining(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
     private var twoMinuteReviewTasks: [TaskItem] {
         allTasks
             .filter { twoMinuteReviewTaskIDs.contains($0.id) }
@@ -1455,6 +1480,27 @@ struct NightlyReviewView: View {
                 } footer: {
                     Text("Knock these out right now and check them off. Anything still unchecked goes to the very top of \(planRelativeDayLabel.lowercased())'s schedule — ahead of everything else, habits included.")
                 }
+
+                if !twoMinuteCanProceed {
+                    // Only while there's a wait. Everything complete means
+                    // no timer at all, not a timer reading 0:00.
+                    Section {
+                        let counts = twoMinuteUnresolvedCounts
+                        Label(
+                            "Wait \(Self.formattedRemaining(twoMinuteEngagementTimer.remaining(missed: counts.missed, unanswered: counts.unanswered))) or finish them",
+                            systemImage: "timer"
+                        )
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            // Ticks only while this step is on screen — the subscription
+            // dies with the view, which is what makes leaving and returning
+            // resume rather than reset. Same mechanism as the Inbox timer.
+            .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+                guard !twoMinuteCanProceed else { return }
+                twoMinuteEngagementTimer.tick()
             }
         }
     }
