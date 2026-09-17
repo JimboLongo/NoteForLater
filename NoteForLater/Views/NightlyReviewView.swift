@@ -123,6 +123,11 @@ struct NightlyReviewView: View {
     /// flag that can go stale). Resolved the same way extending/clearing
     /// the due date does: the task drops off `atRiskTasks`, just without
     /// touching the task itself.
+    /// Prior start dates for 2-minute tasks pushed this session — see
+    /// `TwoMinutePushState`. Session-scoped: a push is committed the moment
+    /// it happens, and this only exists so changing your mind restores what
+    /// was there before rather than clearing to nil.
+    @State private var twoMinutePushState = TwoMinutePushState()
     @State private var acknowledgedAtRiskTaskIDs: Set<UUID> = []
     @State private var atRiskTaskCardTarget: TaskItem?
     /// Drives the "X is empty — skipped" auto-skip toast (see
@@ -668,6 +673,10 @@ struct NightlyReviewView: View {
             )
         }
         if next == .twoMinuteTasks {
+            // A push from an earlier night whose day has arrived — clear it
+            // before the list is built, so the card stops showing a start
+            // date that has already come and gone.
+            TwoMinutePushState.clearExpiredPushes(on: twoMinuteShelf?.tasks ?? [], asOf: reviewDate)
             let pending = (twoMinuteShelf?.tasks ?? []).filter { !$0.isCompleted && $0.isEligibleToStart(on: reviewDate) }
             // Also pick up anything completed earlier today (or since the
             // last review closed), before this step's own snapshot: the
@@ -1468,7 +1477,10 @@ struct NightlyReviewView: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            task.cycleCompletion(in: modelContext)
+            // Routed through `TwoMinutePushState` so landing on `.missed`
+            // pushes the task a day, and leaving `.missed` puts its old
+            // start date back.
+            twoMinutePushState.cycle(task, reviewDate: reviewDate, context: modelContext)
             ScheduleDirtyState.shared.isDirty = true
         }
         .opacity(task.status == .none ? 1 : 0.5)
