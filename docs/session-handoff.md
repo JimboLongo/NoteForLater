@@ -128,6 +128,48 @@ found a production crash. A note scoped to one class is a note that
 excludes every other class. State the rule by the property that causes it
 (implicitly `@MainActor`), not by the one example where it was first seen.
 
+**Verification practice, general — a check can only bless what it is
+capable of seeing, and "I verified determinism" is a claim with a scope.**
+
+The render baselines were introduced with a determinism check: render the
+same fixture twice in a row, and again after a rebuild forced by a no-op
+source edit. Both passed. The conclusion recorded was "rendering is
+deterministic" — stated flatly, with no scope.
+
+It wasn't. `tail_recurring` later went red with **no code change at all**.
+The card called `task.atRiskBlocker()`, which defaults to `asOf: .now`, and
+the fixture carried a due date plus a toggled-on scheduling rule — so as
+that day's slack ran out it crossed into at-risk and grew a banner that
+pushed the whole card down. 50% of pixels, from a clock.
+
+Neither determinism check could ever have caught it. Repeat runs were
+minutes apart; a rebuild takes seconds. **Both sample the same moment.** The
+defect class was time-of-day dependence, and the verification had no axis
+along which that varied. The check wasn't wrong — it was narrower than the
+conclusion drawn from it.
+
+The general rule: when recording that something is verified, record *what
+the check varied*. "Deterministic across repeat runs and rebuilds" would
+have been true and would have left the gap visible. "Deterministic" closed
+the question.
+
+**And a guard test must pin an invariant that actually holds.** The first
+guard written for this was: render the same fixture in January and
+December, assert identical. It fails — correctly. A September due date
+really is past due by December; at-risk is *supposed* to vary with time, so
+varying `asOf` can never prove time-independence. The wrong test looked
+more rigorous than the right one, because it exercised more.
+
+What works instead is structural plus a boundary guard:
+- `TaskReviewCard` takes `asOf: Date = .now`; the render tests pin it. Now
+  the baseline cannot drift with wall-clock time at all — that is the fix,
+  and it isn't testable by varying `asOf` because it's a property of the
+  wiring, not of a computation.
+- `test_fixturesAreNotAtRiskAtTheRenderMoment` asserts no fixture sits near
+  the at-risk boundary at that pinned moment. That *is* an invariant that
+  holds, and it fails with a sentence naming the fixture instead of handing
+  over a 50%-different picture.
+
 **Testing practice, general — the render baselines now actually compare,
 and the story of why they didn't is worth keeping.**
 
