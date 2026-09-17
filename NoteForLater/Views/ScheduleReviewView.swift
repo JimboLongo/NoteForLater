@@ -641,8 +641,19 @@ struct ReplacementPickerSheet: View {
     /// picking one.
     private var groups: [DayGroup] {
         let calendar = Calendar.current
+        // A recurring task sorts as having no due date. Its `dueDate` is
+        // the recurrence anchor (see `TaskItem.dueDate`), so ordering by it
+        // here would rank a task by a date that means "when the pattern
+        // started", not "when this is due" — and typically an anchor in the
+        // past, sorting it to the very front as if overdue.
+        //
+        // `endOfDueDate` is the guard for every *deadline* reading, but it
+        // is private and this is an ordering, not a deadline; the
+        // distinction still has to be made by hand here. That is exactly
+        // why `TaskItem.dueDate` carries the warning it does.
+        func deadline(_ task: TaskItem) -> Date? { task.isRecurring ? nil : task.dueDate }
         func dueDateFirst(_ lhs: TaskItem, _ rhs: TaskItem) -> Bool {
-            switch (lhs.dueDate, rhs.dueDate) {
+            switch (deadline(lhs), deadline(rhs)) {
             case let (l?, r?): return l < r
             case (_?, nil): return true
             case (nil, _?): return false

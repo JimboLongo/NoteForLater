@@ -711,6 +711,73 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertNil(task.atRiskBlocker(asOf: now, calendar: calendar))
     }
 
+    // MARK: - A recurring task's dueDate is an anchor, never a deadline
+
+    /// The bug this closes: `syncDueDate` sets `dueDatePicked = true` on
+    /// every recurring task given a start date, so a recurring task looks
+    /// exactly like one with a real due date to anything checking that
+    /// flag. `isAtRisk` then measured it against its own recurrence anchor
+    /// — a date the card deliberately never shows (the Due row is hidden
+    /// for recurring tasks) and the user cannot edit.
+    ///
+    /// Exhaustive over the states that would each otherwise trigger a
+    /// different branch, in the same shape as
+    /// `test_openRecurringTaskOccurrencesForReview_onlyEverReturnsNoneStatus`:
+    /// the property must hold for all of them, not for a happy path.
+    func test_recurringTask_isNeverAtRisk_whateverItsAnchor() throws {
+        let shelf = Shelf(name: "Recurring Tasks")
+        let anchor = day(2026, 1, 5)
+        let now = calendar.date(byAdding: .hour, value: 23, to: anchor)!
+
+        func recurringTask(remaining: Int, blockPastAnchor: Bool) throws -> TaskItem {
+            let task = TaskItem(title: "R", shelf: shelf, estimatedMinutes: remaining)
+            context.insert(task)
+            task.isRecurring = true
+            task.recurrenceIntervalCount = 1
+            task.dueDate = anchor
+            task.dueDatePicked = true          // exactly what syncDueDate does
+            task.remainingMinutes = remaining
+            if blockPastAnchor {
+                let start = calendar.date(byAdding: .day, value: 3, to: anchor)!
+                let block = ScheduledBlock(date: start, startTime: start, endTime: start.addingTimeInterval(3600), task: task)
+                context.insert(block)
+            }
+            return task
+        }
+
+        let fixtures: [(String, TaskItem)] = [
+            ("unplaced work, anchor already ending", try recurringTask(remaining: 120, blockPastAnchor: false)),
+            ("a block scheduled past the anchor", try recurringTask(remaining: 0, blockPastAnchor: true)),
+            ("both at once", try recurringTask(remaining: 120, blockPastAnchor: true)),
+            ("neither", try recurringTask(remaining: 0, blockPastAnchor: false)),
+        ]
+
+        for (label, task) in fixtures {
+            XCTAssertNil(task.slack(asOf: now, calendar: calendar), "slack must not measure against an anchor — \(label)")
+            XCTAssertFalse(task.isAtRisk(asOf: now, calendar: calendar), "not at risk — \(label)")
+            XCTAssertNil(task.atRiskBlocker(asOf: now, calendar: calendar), "no blocker to name — \(label)")
+        }
+    }
+
+    /// The other half: turning recurrence *off* restores the ordinary
+    /// reading, so the guard is scoped to recurrence rather than
+    /// permanently disabling at-risk for a task that once recurred.
+    func test_sameTask_stopsBeingRecurring_isAtRiskAgain() {
+        let task = TaskItem(title: "R", shelf: Shelf(name: "S"), estimatedMinutes: 120)
+        let anchor = day(2026, 1, 5)
+        let now = calendar.date(byAdding: .hour, value: 23, to: anchor)!
+        task.isRecurring = true
+        task.dueDate = anchor
+        task.dueDatePicked = true
+        task.remainingMinutes = 120
+        XCTAssertFalse(task.isAtRisk(asOf: now, calendar: calendar))
+
+        task.isRecurring = false
+
+        XCTAssertLessThan(task.slack(asOf: now, calendar: calendar) ?? 0, 0)
+        XCTAssertTrue(task.isAtRisk(asOf: now, calendar: calendar), "an ordinary task with the same numbers IS at risk")
+    }
+
     // MARK: - §6.4 — stall detection replaces the flat 365-day task-walk cap
 
     /// `hasRemainingSchedulableWork` only checks `isEligible` + `canEverFit`

@@ -18,6 +18,27 @@ final class TaskItem {
     /// since a synced item stays tagged after it's routed to a shelf.
     var sourceGmailMessageID: String?
 
+    /// ⚠️ **On a recurring task this is the recurrence anchor, not a
+    /// deadline.** `makeRecurring`/`setStartDate` write it via `syncDueDate`
+    /// — which also sets `dueDatePicked` — and `hasRecurringOccurrence`
+    /// reads it back as `anchor`.
+    ///
+    /// **What to do:** never read this directly to mean "deadline". Go
+    /// through `endOfDueDate(calendar:)`, which returns `nil` for a
+    /// recurring task; `slack`, `isAtRisk` and `atRiskBlocker` all do.
+    /// Reading `dueDate` directly for a due-date-shaped purpose — sorting
+    /// by urgency, comparing against now — silently treats the anchor as a
+    /// deadline.
+    ///
+    /// **Why this stays invisible:** the Due row is hidden for a recurring
+    /// task (the card asks "Can Start By" instead), so a wrong reading
+    /// never appears on screen next to the date it came from. The bug that
+    /// prompted this note was found only because a render fixture happened
+    /// to cross an at-risk threshold — not because anything looked wrong.
+    ///
+    /// `scripts/check-deadline-readers.py` fails on a new direct reader.
+    /// It is a script rather than a test, and **nothing runs it for you** —
+    /// see its own header for why that is a gap rather than a choice.
     var dueDate: Date?
     /// Whether "Has due date" has actually been answered (either way) —
     /// `dueDate == nil` alone can't tell "never asked" apart from
@@ -1464,7 +1485,29 @@ final class TaskItem {
     /// to get its value — so the deadline this measures against is a
     /// whole day, not an instant. Every at-risk computation below reads
     /// this instead of `dueDate` directly, for the same reason.
+    ///
+    /// **`nil` for a recurring task, always.** For one of those `dueDate`
+    /// is the *recurrence anchor* (`hasRecurringOccurrence` reads it as
+    /// `anchor`), not a deadline — and `syncDueDate` sets `dueDatePicked`
+    /// alongside it, so a recurring task looks, to anything checking that
+    /// flag, exactly like a task with a real due date. Before this guard,
+    /// `isAtRisk` measured a recurring task against its own anchor and
+    /// flagged it at risk against a date the card deliberately never shows
+    /// and the user cannot edit.
+    ///
+    /// This is the chokepoint deliberately: `slack`, `isAtRisk` and
+    /// `atRiskBlocker` all read the deadline through here and nowhere else,
+    /// so one guard covers all three. Guarding `isAtRisk` alone would have
+    /// left `slack()` returning a meaningless number with nothing to
+    /// surface it.
+    ///
+    /// A recurring task has no "will this fit before the deadline" question
+    /// to answer: it carries no `remainingMinutes` (Duration is hidden for
+    /// it, and the derived reset clears it) and gets no `ScheduledBlock`. A
+    /// *missed occurrence* is the real recurring failure mode, and
+    /// `RecurringTaskLog`/`PushedRecurringOccurrence` already cover it.
     private func endOfDueDate(calendar: Calendar) -> Date? {
+        guard !isRecurring else { return nil }
         guard let dueDate else { return nil }
         return calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: dueDate))
     }
