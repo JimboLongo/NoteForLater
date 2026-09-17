@@ -31,6 +31,27 @@ same summary that was written from the same misreading; they are checking
 the shape of the plan, not re-deriving each site. Treat every entry as
 "this looked dead when I wrote it down" and re-confirm against the code.
 
+**The same trap, in the form that bites tests: a test's *subject* is not
+the same as its *coverage*.** Before deleting a test alongside deleted
+code, check what else it was the only cover for. Nothing goes red when you
+remove the only test protecting something that still exists — the suite
+gets smaller and stays green, and the loss is silent by construction.
+
+Hit in stage 4b. Three `advanceOneHop` tests were built around the
+Specific-Time placeholder block, which was being deleted, so they looked
+like obvious companions to it. They were also the *only* coverage of
+`advanceOneHop`'s date walk — which survives, and is live. Deleting them
+would have left it bare with a green 547-test run. Caught by grepping for
+remaining callers after the removal, finding none, and writing two
+replacements that pin the surviving half directly.
+
+**The signal to look for:** the test constructs or exercises anything that
+outlives the deletion, even incidentally. If the body touches a surviving
+function at all, assume it may be that function's only cover until you've
+checked. The check is cheap — grep the survivor's name across the test
+target after deleting — and it is the only thing standing between you and
+a silent coverage hole.
+
 Three signals that a line in a deletion list is not actually dead:
 1. **It names a mode/flag/state by value.** `== .specific` is dead if that
    value is unreachable; `== mode` where `mode` is a parameter is not the
@@ -254,9 +275,54 @@ alongside it:
 
 ---
 
-## Shipped this session
+## Shipped — most recent first
 
-Commits `7f52f64`…`43bd19b`. Grouped by area, not chronological.
+### Task card consolidation and Specific-Time removal (stages 1–4)
+
+Commits `ec584b2`…`62b2c42`, all pushed. This is the most recent work; the
+sections below it are earlier sessions.
+
+- **Stage 1 — the shipped regression.** Flattening Duration/Divisible out
+  of the "Time" row had dropped the `recurrenceTimeMode == .specific` gate,
+  so both rendered for untimed recurring tasks. Fixed via
+  `TaskReviewCard.showsDurationRow` reading `TaskItem.recurringAndUntimed`.
+  Two tests had encoded the bug and were corrected.
+- **Stage 2 — one row list.** `CardRow` (in `Models/`, not the view, because
+  `TaskItem.missingAttributeNames` reads it) is now the single applicability
+  rule. Three drifting definitions collapsed into one; `scrollBodyOrder` is
+  the single ordered list the card renders from *and* `initialExpandedRow`
+  walks, so seeding/render agreement is structural rather than tested.
+  **`.shown ⟺ missable`** is the invariant that kills this whole bug class:
+  only a `.shown` row can be reported missing.
+- **Stage 3 — the new card spec.** "2 Minutes or Less?" toggle (derived from
+  shelf membership, no stored field); mutual exclusion with Recurring
+  enforced in the model (`setRecurring`/`assignShelf`/
+  `repairSpecialShelfExclusivity`); reset-on-toggle-off **derived** as
+  (rows shown before − rows shown after) so a toggle can only clear what it
+  actually hid; `ShelfPreview` tri-state for the toggle-off snap-back;
+  "Starts" → "Can Start By"; ≤2 min off the duration wheel; Tags hidden for
+  recurring.
+- **Shelf default duration** now derives from the task wheel
+  (`[0] + TaskReviewCard.durationOptions`) — the two lists had drifted and a
+  shelf could stamp a duration the card couldn't display or edit.
+- **Stage 4a — Specific Time removed for recurring tasks.**
+  `HabitOccurrenceTimeMode.taskSelectableCases`; the setter coerces
+  `.specific` away while the getter stays honest (see that property — the
+  asymmetry is load-bearing for the migration); `migrateRecurringSpecificTimeTasksIfNeeded`.
+  Duration/Divisible hiding fell out of `recurringAndUntimed` with no new
+  rule. 24 existing tests updated in place with reasoning.
+- **Stage 4b — the deletion.** 832 lines: the recurring-task block loop, the
+  placeholder pipeline, and the whole projected-row subsystem. Three keeps,
+  each commented where they sit. All five render baselines stayed pinned,
+  which is what confirmed the code was genuinely unreachable.
+- **Render baselines now actually compare** (see the practice note above) —
+  they previously only asserted `fileExists`.
+
+---
+
+### Earlier session — commits `7f52f64`…`43bd19b`
+
+Grouped by area, not chronological.
 
 ### MealSelection lifecycle — model existed, three separate ways it leaked
 
@@ -666,6 +732,52 @@ verified inert.
 ---
 
 ## Open
+
+**Status as of the end of the stage 1–4 card/Specific-Time work.** Both
+long-running items below are unchanged by it — neither was investigated,
+and nothing in stages 1–4 touched day-view event materialization or the
+tap path. Do not read "still open" as "looked at again and still there."
+
+### Next planned work — remove the Kitchen/meal subsystem
+
+**Not started. Plan to be written fresh, not derived from this entry.**
+
+⚠️ **The entanglement list from the session where this was scoped is not in
+this repo or in the stage 1–4 transcript** — it was searched for
+specifically and is not there. Ask for it before planning; what follows is
+a survey derived from the code at the end of stage 4b, to give the plan a
+starting shape, **not** a substitute for that list and not an approved
+scope.
+
+Two separable things share the name:
+- **The Kitchen *shelf*** — `Shelf.isKitchen`, a shelf that suppresses every
+  task attribute. Its blast radius is the six `effectiveTracks*` properties
+  (`Shelf.swift:128–156`), which all read `!isKitchen`, plus ~20 view sites
+  that filter it out of shelf pickers (`InboxView`, `ShelfListView`,
+  `ImportView`, `NightlyReviewView:1448`, `DayTimelineGridView:1396`).
+- **The meal/recipe subsystem** — `MealSelection`, `Recipe`, `UPCBank`,
+  `MealSuggestionService`, `PantryDeductionService`, `RecipeImportService`,
+  `RecipeIngredientParser`, `UPCLookupService`, and the views
+  `KitchenView`, `MealsView`, `CookbookView`, `ReceiptImportView`,
+  `ReceiptOCRScannerView`, `UnmatchedUPCsEditorView`.
+
+29 files reference one or the other. Three things worth deciding early
+because they shape everything else:
+1. **Is this one removal or two?** The shelf and the meal subsystem are
+   coupled only at `MealsView:196`/`KitchenView:53` (both set `isKitchen`)
+   and `ScheduleReviewViewModel:1839` (fetches the kitchen shelf). They may
+   well be separable, which would make each half reviewable.
+2. **`MealSelection` is in the persistent `Schema`.** Removing a `@Model`
+   from a live store is not a code deletion — see the SwiftData trap at the
+   top of this file, and note `InboxItem` is *still* in the schema precisely
+   because there's no supported path to drop an entity.
+3. **`ScheduledBlock.mealSelection`** is a relationship on a model that
+   stays. Dinner blocks exist in the user's store today.
+
+**Apply the deletion-practice rules at the top of this file.** This is a
+much larger deletion than stage 4b's, across a subsystem with live data —
+re-derive every site at delete time, and check what each removed test was
+the only cover for.
 
 ### #4 — event duplication across days in day view — still genuinely unresolved
 
