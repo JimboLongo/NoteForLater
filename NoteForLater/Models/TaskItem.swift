@@ -10,6 +10,24 @@ final class TaskItem {
     var id: UUID
     var title: String
     var notes: String
+    /// ⚠️ **Clock-derived, and deliberately exempt from the render-fixture
+    /// date sweep — read this before displaying it on the task card.**
+    ///
+    /// Every `TaskItem` gets `createdAt = .now`, so any label built from it
+    /// ("added 3 days ago", "N days in inbox") changes as time passes. That
+    /// is fine today because the *task card* never renders it — only
+    /// `ShelfListView`'s row does, which has no pinned baseline.
+    ///
+    /// **If you add an added-age label to the card, you must also:**
+    /// 1. pin `createdAt` in the render fixtures (see
+    ///    `RecurringTaskCardRenderTests.renderAsOf`), and
+    /// 2. add it to `test_everyFixtureDateIsFixed_notDerivedFromTheClock`,
+    ///    which currently exempts it by name.
+    ///
+    /// Without both, a baseline will go red on a day nobody touched the
+    /// code. That has already happened twice, on two different clock axes —
+    /// `atRiskBlocker()` defaulting to `.now`, then a fixture start date
+    /// built from `.now`. This is the third axis, pre-labelled.
     var createdAt: Date
 
     /// Set when this task came from a Gmail sync rather than manual

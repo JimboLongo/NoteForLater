@@ -132,9 +132,9 @@ final class RecurringTaskCardRenderTests: XCTestCase {
     private static let renderHeight: CGFloat = 1400
     private static let renderScale: CGFloat = 2
 
-    private func render(_ card: some View) -> UIImage {
+    private func render(_ card: some View, height: CGFloat? = nil) -> UIImage {
         let hosting = UIHostingController(rootView: card)
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: Self.renderWidth, height: Self.renderHeight))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: Self.renderWidth, height: height ?? Self.renderHeight))
         window.rootViewController = hosting
         window.makeKeyAndVisible()
         hosting.view.frame = window.bounds
@@ -703,6 +703,78 @@ final class RecurringTaskCardRenderTests: XCTestCase {
                 )
             }
         }
+    }
+
+    /// **Hiding a row must change what the card draws.**
+    ///
+    /// This is the general form of the bug that prompted it. `CardRow.due`
+    /// said hidden; the body drew the Due row unconditionally. Changing the
+    /// rule had zero visible effect, and every baseline still matched —
+    /// the failure was a render that *didn't* move when it should have,
+    /// which no baseline can report. Duration was the same.
+    ///
+    /// The `.shown ⟺ missable` invariant never covered this: it ties
+    /// visibility to the *missing-check*, not to rendering. What was
+    /// missing is `.hidden ⟹ not drawn`, and this asserts exactly that.
+    ///
+    /// Every row here restates its rule in the body as a parallel
+    /// expression (`priorityAllowed`, `nextStepAllowed`, `showsDivisibleRow`
+    /// …) rather than consulting `CardRow`. All of them agree today — each
+    /// was checked by hand. This test is what notices when one stops.
+    ///
+    /// **Known limitation: `.eligibleSchedules` is not covered.** It sits
+    /// far enough down that on this fixture it falls outside the 1400pt
+    /// render viewport, so hiding it changes nothing *inside the frame* and
+    /// the assertion can't distinguish that from the body ignoring
+    /// `CardRow`. Rendering taller doesn't help — the layout stops
+    /// settling and every row then compares identical, which would make the
+    /// whole test vacuously green. Left uncovered and named rather than
+    /// papered over; its body gate was verified by reading
+    /// (`if let rules = previewedShelf?.schedulingRules, !rules.isEmpty`).
+    func test_everyHidableRow_actuallyDisappearsFromTheRender() throws {
+        // (row, mutation that makes CardRow hide it)
+        let cases: [(CardRow, String, (TaskItem, Shelf) -> Void)] = [
+            (.nextStep, "hasNextStep", { _, shelf in shelf.hasNextStep = false }),
+            (.due, "hasDueDates", { _, shelf in shelf.hasDueDates = false }),
+            (.duration, "tracksDuration", { _, shelf in shelf.tracksDuration = false }),
+            (.priority, "hasPriority", { _, shelf in shelf.hasPriority = false }),
+            (.tags, "tracksTags", { _, shelf in shelf.tracksTags = false }),
+            (.remindIn, "tracksFutureReminder", { _, shelf in shelf.tracksFutureReminder = false }),
+            (.divisible, "duration below the threshold", { task, _ in TaskItem.selectDuration(30, on: task) }),
+        ]
+
+        for (row, label, hide) in cases {
+            let shown = try pixels(ofCardFor: makeFullTailTask(recurring: false))
+
+            let task = makeFullTailTask(recurring: false)
+            let shelf = try XCTUnwrap(task.shelf)
+            XCTAssertNotEqual(
+                row.visibility(task: task, shelf: shelf), .hidden,
+                "\(row) must start visible for this to prove anything"
+            )
+            hide(task, shelf)
+            XCTAssertEqual(
+                row.visibility(task: task, shelf: shelf), .hidden,
+                "\(label) should make CardRow hide \(row)"
+            )
+
+            let hidden = try pixels(ofCardFor: task, shelf: shelf)
+            XCTAssertNotEqual(
+                shown, hidden,
+                "\(row) is hidden by CardRow but the card renders identically — the body is drawing it regardless (\(label))"
+            )
+        }
+    }
+
+    private func pixels(ofCardFor task: TaskItem, shelf: Shelf? = nil) throws -> [UInt8] {
+        let shelves = (shelf ?? task.shelf).map { [$0] } ?? []
+        let card = TaskReviewCard(
+            task: task, shelves: shelves,
+            onDiscard: {}, onSkip: {}, onMove: { _ in }, onNext: {}, onSnooze: { _ in },
+            asOf: Self.renderAsOf
+        )
+        .environment(\.modelContext, context)
+        return try Self.pixels(of: render(card)).bytes
     }
 
     /// Guards the repo against the cost of these baselines.    /// Guards the repo against the cost of these baselines.
