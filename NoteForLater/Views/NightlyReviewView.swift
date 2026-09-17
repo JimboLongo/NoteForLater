@@ -1941,6 +1941,8 @@ struct TaskReviewCard: View {
     /// the settled state (scrim gone, square at rest). See `showToast`.
     @State private var toastVisible = false
     @State private var isShowingSnoozeWheel = false
+    /// See this type's `init(asOf:)` parameter.
+    private let asOf: Date
     @State private var snoozeDays = 1
     /// Which rows are currently expanded — a brand-new, never-saved task
     /// (`isNewlyCreated`) seeds *every* row at once, the card working like
@@ -2564,8 +2566,22 @@ struct TaskReviewCard: View {
         // `TaskReviewQueueSheet`'s call site (no newly-created-task
         // concept at all — every queued task already exists) needs no
         // change.
-        isNewlyCreated: Bool = false
+        isNewlyCreated: Bool = false,
+        /// The moment "at risk" is evaluated against. Defaults to real
+        /// wall-clock time; injected by the render-baseline tests so a
+        /// fixture's appearance can't depend on when the suite happens to
+        /// run.
+        ///
+        /// This is not hypothetical. `tail_recurring`'s baseline went red
+        /// with no code change because the card crossed an at-risk
+        /// threshold partway through a day — and the determinism check that
+        /// blessed these baselines only compared repeat runs minutes apart
+        /// and across a rebuild, which cannot see a dependence on time of
+        /// day. `TaskItem.atRiskBlocker` already took `asOf` for exactly
+        /// this reason; the card just never passed one.
+        asOf: Date = .now
     ) {
+        self.asOf = asOf
         self.task = task
         self.shelves = shelves
         self.onDiscard = onDiscard
@@ -3081,7 +3097,7 @@ struct TaskReviewCard: View {
             // that's out of math (or already scheduled past its own
             // deadline) gets named here, not silently left to be
             // noticed only once it's actually missed.
-            if let blocker = task.atRiskBlocker() {
+            if let blocker = task.atRiskBlocker(asOf: asOf) {
                 Label("At risk — \(blocker)", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.red)

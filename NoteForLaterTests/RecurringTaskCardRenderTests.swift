@@ -114,6 +114,20 @@ final class RecurringTaskCardRenderTests: XCTestCase {
     /// re-record adds another full copy to history forever. Scale 2 is 4x
     /// smaller than scale 3 and still resolves a one-character label change
     /// unambiguously.
+    /// The moment every render fixture is evaluated against.
+    ///
+    /// Baselines must not depend on when the suite runs. `tail_recurring`
+    /// went red with no code change because the card crossed an at-risk
+    /// threshold partway through a day — the fixture has a due date and a
+    /// toggled-on scheduling rule, so `isAtRisk` flipped as the day's slack
+    /// ran out. Pinned here so that class of failure can't recur.
+    ///
+    /// Deliberately far from any fixture's own dates, so nothing lands on a
+    /// boundary.
+    static let renderAsOf = Calendar.current.date(
+        from: DateComponents(year: 2026, month: 6, day: 1, hour: 9)
+    )!
+
     private static let renderWidth: CGFloat = 402
     private static let renderHeight: CGFloat = 1400
     private static let renderScale: CGFloat = 2
@@ -452,7 +466,8 @@ final class RecurringTaskCardRenderTests: XCTestCase {
             onSkip: {},
             onMove: { _ in },
             onNext: {},
-            onSnooze: { _ in }
+            onSnooze: { _ in },
+            asOf: Self.renderAsOf
         )
         .environment(\.modelContext, context)
 
@@ -469,7 +484,8 @@ final class RecurringTaskCardRenderTests: XCTestCase {
             onSkip: {},
             onMove: { _ in },
             onNext: {},
-            onSnooze: { _ in }
+            onSnooze: { _ in },
+            asOf: Self.renderAsOf
         )
         .environment(\.modelContext, context)
 
@@ -516,7 +532,8 @@ final class RecurringTaskCardRenderTests: XCTestCase {
         let card = TaskReviewCard(
             task: task,
             shelves: task.shelf.map { [$0] } ?? [],
-            onDiscard: {}, onSkip: {}, onMove: { _ in }, onNext: {}, onSnooze: { _ in }
+            onDiscard: {}, onSkip: {}, onMove: { _ in }, onNext: {}, onSnooze: { _ in },
+            asOf: Self.renderAsOf
         )
         .environment(\.modelContext, context)
         try assertMatchesBaseline(card, named: name)
@@ -543,6 +560,42 @@ final class RecurringTaskCardRenderTests: XCTestCase {
         shelf.hasPriority = false
         shelf.hasNextStep = false
         try renderCard(task, to: "tail_nontracking")
+    }
+
+    /// Keeps every fixture clear of the at-risk boundary at `renderAsOf`.
+    ///
+    /// **This is the guard; the `asOf` injection is the fix.** Once the card
+    /// evaluates against a pinned moment, a baseline can no longer drift
+    /// with wall-clock time — that is structural, and nothing can test it by
+    /// varying `asOf`, because at-risk is *supposed* to differ at different
+    /// moments. (I wrote that test first: it rendered the same fixture in
+    /// January and December and asserted they matched. They don't, and
+    /// shouldn't — a September due date really is past due by December.)
+    ///
+    /// What can still go wrong is a fixture sitting so close to the at-risk
+    /// boundary that an unrelated edit — a date nudged, a duration changed,
+    /// a rule toggled — silently flips it and shows up as an inscrutable
+    /// 50%-of-pixels diff. That is exactly how `tail_recurring` failed. This
+    /// names the condition directly, so the next time it happens the failure
+    /// says which fixture and why instead of handing over a picture.
+    func test_fixturesAreNotAtRiskAtTheRenderMoment() throws {
+        let fixtures: [(name: String, task: TaskItem)] = [
+            ("tail_recurring", makeFullTailTask(recurring: true)),
+            ("tail_nonrecurring", makeFullTailTask(recurring: false)),
+            ("pattern_row_render", makeWorstCaseRelativeTask()),
+            ("non_recurring_rows_render", makeWorstCaseNonRecurringTask()),
+        ]
+        for (name, task) in fixtures {
+            XCTAssertNil(
+                task.atRiskBlocker(asOf: Self.renderAsOf),
+                """
+                Fixture "\(name)" is at risk at renderAsOf, so its baseline \
+                carries an at-risk banner that a small unrelated change could \
+                flip. Move the fixture's dates away from the boundary rather \
+                than re-recording.
+                """
+            )
+        }
     }
 
     /// Guards the repo against the cost of these baselines.
