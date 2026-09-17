@@ -820,6 +820,43 @@ verified inert.
 
 ## Open
 
+### The Nightly Review commit's async half is unstructured — nothing awaits it
+
+Leaving Review Schedule runs a commit batch, now extracted as
+`ScheduleReviewViewModel.commitTodayStep` (synchronous) and
+`.finishTodayStepCommit` (async). The view still launches the async half in
+a bare `Task {}`, exactly as the original did.
+
+**Why that's a risk.** The `Task` is unstructured: not tied to the view's
+lifetime, and nothing awaits it, so nothing — including the app — knows
+when it finished.
+
+- `finishAndDismiss()` does `try? modelContext.save()` and then dismisses.
+  Tap Done straight after the commit fires and that save runs while
+  `purgeCompletedBlocks`, `resolveMissedPastBlocks` and `regenerateFromNow`
+  are still working. Their own saves mean writes aren't *lost*, but the
+  ordering is unguaranteed and the dismiss-time save can capture a
+  half-finished state.
+- **`regenerateFromNow` is the exposure**: it walks multiple days with a
+  network call per day, and it is the *last* statement in the `Task`. Being
+  backgrounded and suspended mid-walk leaves some days regenerated and some
+  not.
+
+**How likely.** Three steps sit between the commit and Done in normal use,
+so hitting it needs deliberate speed-running or unlucky backgrounding.
+Low-frequency, not impossible.
+
+**The fix, now possible where it wasn't.** `finishTodayStepCommit` is an
+`async` function a caller can hold onto. Either store the `Task` handle and
+`await` it in `finishAndDismiss()` before saving, or make the async half
+structured by driving it from a `.task` modifier keyed to the step. Either
+way the Done button stops racing it. Before the extraction there was no
+seam to do this at — the work was inline in a private `View` method.
+
+Not fixed under cover of the extraction, deliberately: the extraction was a
+verbatim move and changing lifetime semantics inside it would have made the
+diff unreviewable.
+
 **Status as of the end of the stage 1–4 card/Specific-Time work.** Both
 long-running items below are unchanged by it — neither was investigated,
 and nothing in stages 1–4 touched day-view event materialization or the
