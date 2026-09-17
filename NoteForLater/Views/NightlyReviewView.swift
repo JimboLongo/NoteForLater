@@ -824,7 +824,11 @@ struct NightlyReviewView: View {
                     reviewDate = ChooseDayPlanning.reviewDate(forPlanning: .today, now: .now, calendar: Calendar.current)
                 } label: {
                     HStack {
-                        Text("Today")
+                        Text(ChooseDayPlanning.planDayButtonLabel(
+                            planDate: ChooseDayPlanning.planDate(forPlanning: .today, now: .now, calendar: Calendar.current),
+                            now: .now,
+                            calendar: Calendar.current
+                        ))
                             .foregroundStyle(.white)
                         Spacer()
                         if Calendar.current.isDateInYesterday(reviewDate) {
@@ -837,7 +841,11 @@ struct NightlyReviewView: View {
                     reviewDate = ChooseDayPlanning.reviewDate(forPlanning: .tomorrow, now: .now, calendar: Calendar.current)
                 } label: {
                     HStack {
-                        Text("Tomorrow")
+                        Text(ChooseDayPlanning.planDayButtonLabel(
+                            planDate: ChooseDayPlanning.planDate(forPlanning: .tomorrow, now: .now, calendar: Calendar.current),
+                            now: .now,
+                            calendar: Calendar.current
+                        ))
                             .foregroundStyle(.white)
                         Spacer()
                         if Calendar.current.isDateInToday(reviewDate) {

@@ -37,6 +37,15 @@ enum ChooseDayPlanning {
         }
     }
 
+    /// The day a given choice actually *plans* — `reviewDate` + 1, the same
+    /// relationship `NightlyReviewView.planDate` uses. "Plan Today" reviews
+    /// yesterday and plans today; "Plan Tomorrow" reviews today and plans
+    /// tomorrow.
+    static func planDate(forPlanning choice: PlanningChoice, now: Date, calendar: Calendar) -> Date {
+        let reviewDate = reviewDate(forPlanning: choice, now: now, calendar: calendar)
+        return calendar.date(byAdding: .day, value: 1, to: reviewDate) ?? reviewDate
+    }
+
     /// Which choice the one-time default nudge should apply at `now`.
     static func defaultPlanningChoice(now: Date, calendar: Calendar) -> PlanningChoice {
         calendar.component(.hour, from: now) < planTodayDefaultCutoffHour ? .today : .tomorrow
@@ -110,5 +119,38 @@ enum ChooseDayPlanning {
     /// silently dropping the concept.
     static func isPlanTodayOptionDisabled(hasAnythingToReviewBeforeToday: Bool) -> Bool {
         false
+    }
+
+    /// "Fri, Sept 20th (Tomorrow)" — the full date *and* the relative label.
+    ///
+    /// The buttons used to say only "Today"/"Tomorrow", which is the one
+    /// thing you already know. Which actual date that means is the thing
+    /// worth showing, and it is the question Choose Day exists to answer —
+    /// especially for "Plan Today", which reviews *yesterday*.
+    static func planDayButtonLabel(planDate: Date, now: Date, calendar: Calendar) -> String {
+        "\(fullDateLabel(planDate, calendar: calendar)) (\(planRelativeDayLabel(planDate: planDate, now: now, calendar: calendar)))"
+    }
+
+    /// "Fri, Sept 20th". Ordinal-suffixed day, so it reads the way the date
+    /// is said out loud rather than as "Sept 20".
+    static func fullDateLabel(_ date: Date, calendar: Calendar) -> String {
+        let weekdayMonth = DateFormatter()
+        weekdayMonth.calendar = calendar
+        weekdayMonth.locale = .autoupdatingCurrent
+        weekdayMonth.setLocalizedDateFormatFromTemplate("EEE MMM")
+        let day = calendar.component(.day, from: date)
+        return "\(weekdayMonth.string(from: date)) \(day)\(ordinalSuffix(for: day))"
+    }
+
+    /// 1st / 2nd / 3rd / 4th — with the 11th–13th exception, which is the
+    /// part a naive last-digit rule gets wrong.
+    static func ordinalSuffix(for day: Int) -> String {
+        if (11...13).contains(day % 100) { return "th" }
+        switch day % 10 {
+        case 1: return "st"
+        case 2: return "nd"
+        case 3: return "rd"
+        default: return "th"
+        }
     }
 }

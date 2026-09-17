@@ -140,4 +140,47 @@ final class ChooseDayPlanningTests: XCTestCase {
         XCTAssertTrue(label.hasSuffix("(in 3 days)"), "got: \(label)")
         XCTAssertFalse(label.contains("-"), "must never render a negative day count")
     }
+
+    // MARK: - The button label: full date plus relative word
+
+    /// "Plan Today" reviews *yesterday* and plans today — which is exactly
+    /// why the date needs showing. The relative word alone is the one thing
+    /// you already know.
+    func test_planDayButtonLabel_namesTheDateAndTheRelativeDay() {
+        let calendar = Calendar(identifier: .gregorian)
+        let now = calendar.date(from: DateComponents(year: 2026, month: 9, day: 19, hour: 20))!
+
+        let tomorrow = ChooseDayPlanning.planDate(forPlanning: .tomorrow, now: now, calendar: calendar)
+        let today = ChooseDayPlanning.planDate(forPlanning: .today, now: now, calendar: calendar)
+
+        XCTAssertEqual(calendar.component(.day, from: tomorrow), 20)
+        XCTAssertEqual(calendar.component(.day, from: today), 19)
+        XCTAssertTrue(
+            ChooseDayPlanning.planDayButtonLabel(planDate: tomorrow, now: now, calendar: calendar).hasSuffix("20th (Tomorrow)"),
+            "got: \(ChooseDayPlanning.planDayButtonLabel(planDate: tomorrow, now: now, calendar: calendar))"
+        )
+        XCTAssertTrue(
+            ChooseDayPlanning.planDayButtonLabel(planDate: today, now: now, calendar: calendar).hasSuffix("19th (Today)")
+        )
+    }
+
+    /// The 11th–13th exception is the part a last-digit rule gets wrong.
+    func test_ordinalSuffix_handlesTheTeens() {
+        XCTAssertEqual([1, 2, 3, 4].map(ChooseDayPlanning.ordinalSuffix(for:)), ["st", "nd", "rd", "th"])
+        XCTAssertEqual([11, 12, 13].map(ChooseDayPlanning.ordinalSuffix(for:)), ["th", "th", "th"],
+                       "not st/nd/rd — the exception a naive rule misses")
+        XCTAssertEqual([21, 22, 23, 31].map(ChooseDayPlanning.ordinalSuffix(for:)), ["st", "nd", "rd", "st"])
+    }
+
+    /// `planDate` is `reviewDate` + 1 for both choices — the relationship
+    /// the view already assumed, now stated once where both can read it.
+    func test_planDateIsAlwaysTheDayAfterReviewDate() {
+        let calendar = Calendar(identifier: .gregorian)
+        let now = calendar.date(from: DateComponents(year: 2026, month: 9, day: 19, hour: 20))!
+        for choice in [ChooseDayPlanning.PlanningChoice.today, .tomorrow] {
+            let review = ChooseDayPlanning.reviewDate(forPlanning: choice, now: now, calendar: calendar)
+            let plan = ChooseDayPlanning.planDate(forPlanning: choice, now: now, calendar: calendar)
+            XCTAssertEqual(plan, calendar.date(byAdding: .day, value: 1, to: review))
+        }
+    }
 }
