@@ -2000,6 +2000,23 @@ struct TaskReviewCard: View {
     private var isStartsExpanded: Binding<Bool> { expandedBinding(for: .canStartBy) }
     private var isTimeExpanded: Binding<Bool> { expandedBinding(for: .timeMode) }
     private var isEndsExpanded: Binding<Bool> { expandedBinding(for: .ends) }
+    /// Set only by tapping **Yes** on Next Step, consumed by the text
+    /// field's own `.onAppear`.
+    ///
+    /// Why a flag rather than setting `focusedField` in the answer's setter:
+    /// at that moment the field does not exist yet — it is conditional on
+    /// the answer being `true`, so SwiftUI creates it on the *next* render
+    /// pass and focus set in the same frame is dropped. Letting the field
+    /// claim focus when it appears is the version that sticks, without a
+    /// delay to guess at.
+    ///
+    /// It also gets the *scoping* right, which a `DispatchQueue.main.async`
+    /// from the setter would too but an unconditional `.onAppear` would not:
+    /// the field also appears when an already-answered row is expanded to
+    /// read, and when a new task opens with the row already open. Neither
+    /// should grab the keyboard. Only a Yes tap sets this.
+    @State private var focusNextStepWhenFieldAppears = false
+
     private var isNextStepExpanded: Binding<Bool> { expandedBinding(for: .nextStep) }
     private var isDueExpanded: Binding<Bool> { expandedBinding(for: .due) }
     private var isPriorityExpanded: Binding<Bool> { expandedBinding(for: .priority) }
@@ -2739,6 +2756,16 @@ struct TaskReviewCard: View {
                         .font(task.nextStep.count > 30 ? .subheadline.weight(.medium) : .body.weight(.medium))
                         .animation(.easeInOut(duration: 0.1), value: task.nextStep.count > 30)
                         .focused($focusedField, equals: .nextStep)
+                        .onAppear {
+                            guard focusNextStepWhenFieldAppears else { return }
+                            focusNextStepWhenFieldAppears = false
+                            // Setting `focusedField` here — rather than
+                            // scrolling directly — keeps the existing
+                            // scroll-into-view working: the scroll body
+                            // watches `focusedField`, so this takes the same
+                            // path a manual tap does instead of bypassing it.
+                            focusedField = .nextStep
+                        }
                     // Right next to where you're actually typing — easier to
                     // find in the moment than the accessory Done button
                     // riding above the keyboard itself.
@@ -2773,6 +2800,10 @@ struct TaskReviewCard: View {
                 case .some(true):
                     task.nextStepDecided = true
                     task.nextStepAnsweredYes = true
+                    // The field is created by this same state change, so it
+                    // focuses itself on appear — see
+                    // `focusNextStepWhenFieldAppears`.
+                    focusNextStepWhenFieldAppears = true
                 case .some(false):
                     task.nextStepDecided = true
                     task.nextStepAnsweredYes = false
