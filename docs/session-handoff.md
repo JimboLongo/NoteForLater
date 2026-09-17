@@ -128,6 +128,51 @@ found a production crash. A note scoped to one class is a note that
 excludes every other class. State the rule by the property that causes it
 (implicitly `@MainActor`), not by the one example where it was first seen.
 
+**Testing practice, general — a rule and its rendering can agree on every
+case and still be two separate expressions that drift. The failure shows up
+as a render that *didn't* move, which nothing goes red for.**
+
+`CardRow` exists so "does this row apply" is answered once. It was working:
+the `.shown ⟺ missable` invariant held throughout, every missing-check
+routed through it, and the visibility matrix was fully covered.
+
+**What was missing is the other half: `.hidden ⟹ not drawn`.** The card body
+drew the Due row unconditionally and gated Duration only on
+`recurringAndUntimed`. Neither consulted `CardRow` at all. So changing
+`CardRow.due` from `.greyed` to `.hidden` had *zero* visible effect — the
+shelf's own Due toggle still did nothing to whether the row appeared.
+
+**Why nothing caught it.** Every baseline passed, because the render was
+unchanged — and an unchanged render is what passing looks like. A
+regression that *removes* an effect is invisible to a net built to notice
+changes. It surfaced only because the change was expected to move three
+fixtures and moved none, which is a signal you only get if you state the
+expectation first (see the render-diff entry below).
+
+**The general guard, now in place:** for every hidable row, making
+`CardRow` hide it must change what the card draws
+(`test_everyHidableRow_actuallyDisappearsFromTheRender`). It found nothing
+else wrong — every other row restates its rule in the body as a parallel
+expression (`priorityAllowed`, `nextStepAllowed`, `showsDivisibleRow`,
+`futureReminderAllowed`, an inline `schedulingRules` check) and all of them
+agree today. The guard is what notices when one stops.
+
+⚠️ **`.eligibleSchedules` is not covered by it.** On the test fixture it
+falls outside the 1400pt render viewport, so hiding it changes nothing
+*inside the frame* and the assertion can't tell that apart from the body
+ignoring `CardRow`. Rendering taller does not fix it: layout stops settling
+and then every row compares identical, which makes the whole test
+vacuously green — a worse outcome than the gap. Left uncovered and named.
+
+**The structural fix, if it is ever worth it:** render the scroll body from
+`CardRow.scrollBodyOrder` with a `ForEach` per `CardRow.Section`, so a row
+cannot be drawn without appearing in the list and the two expressions
+become one. `CardRow.section` already exists to model the two stacks'
+spacing difference, so the pieces are there. **Deliberately not done** — the
+card body has had three restructuring passes already, and this would be a
+fourth to convert a *caught* problem into a *prevented* one. Scoped as
+larger than the problem it prevents.
+
 **Verification practice, general — a check can only bless what it is
 capable of seeing, and "I verified determinism" is a claim with a scope.**
 
