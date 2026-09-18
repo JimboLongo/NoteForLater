@@ -1330,6 +1330,117 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertEqual(survivingBlocks.count, 1, "a manually placed ineligible block must survive the very next autoPlaceEligibleTasks pass")
     }
 
+
+    /// **A rule must not trim another shelf's blocks.**
+    ///
+    /// Reproduces the reporter's real configuration, which three earlier
+    /// fixtures failed to: **two shelves sharing one `NamedSchedule`.**
+    /// "Work - Afternoons" (12:00–17:00, Mon–Fri) was attached to both a
+    /// Personal rule and a Work rule. `applicableRules` is built from every
+    /// shelf's rules, and `trimmable` matched on the time window alone — so
+    /// the Work rule picked up the Personal block, found its task (correctly)
+    /// not eligible for a Work rule, and deleted it through the ineligible
+    /// branch. The Personal rule re-placed it on the next pass, and the whole
+    /// cycle repeated **on every navigation**, indefinitely.
+    ///
+    /// Captured on device before the fix: the same two blocks deleted and
+    /// recreated across six consecutive navigations, always landing back at
+    /// the window start rather than where they had been placed.
+    ///
+    /// Sharing a schedule between shelves is ordinary configuration, not a
+    /// corner case — which is why this went unnoticed in every synthetic
+    /// single-shelf fixture.
+    func test_aRuleDoesNotTrimAnotherShelfsBlocks() async throws {
+        // One schedule, two shelves — the whole point of the fixture.
+        let schedule = NamedSchedule(name: "Work - Afternoons", daysOfWeek: [1, 2, 3, 4, 5, 6, 7], startHour: 12, startMinute: 0, endHour: 17, endMinute: 0)
+        context.insert(schedule)
+
+        let personal = Shelf(name: "Personal")
+        context.insert(personal)
+        let personalRule = SchedulingRule(shelf: personal, fillStrategy: .maxTaskCount, maxTotalMinutes: 120, maxTaskCount: 2, maxMinutesPerTask: 15)
+        personalRule.namedSchedule = schedule
+        context.insert(personalRule)
+        personal.schedulingRules = [personalRule]
+
+        let work = Shelf(name: "Work")
+        context.insert(work)
+        let workRule = SchedulingRule(shelf: work, fillStrategy: .fillToFit)
+        workRule.namedSchedule = schedule
+        context.insert(workRule)
+        work.schedulingRules = [workRule]
+
+        // A Personal task, eligible only for the Personal rule — exactly as
+        // it would be, since eligibility is opt-in per rule.
+        let task = TaskItem(title: "Poop", shelf: personal, estimatedMinutes: 15)
+        task.setEligible(true, for: personalRule)
+        context.insert(task)
+        personal.tasks = [task]
+        XCTAssertFalse(task.isEligible(for: workRule), "a Personal task is never eligible for a Work rule — that is the premise, not the bug")
+
+        let futureDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+        let start = calendar.date(byAdding: .hour, value: 13, to: futureDay)!
+        let block = ScheduledBlock(date: futureDay, startTime: start, endTime: calendar.date(byAdding: .minute, value: 15, to: start)!, task: task)
+        context.insert(block)
+        task.scheduledBlocks = [block]
+        task.isScheduled = true
+
+        let calendarService = FakeCalendarService()
+        calendarService.freeSlotsProvider = { [self.businessHoursSlot(on: $0)] }
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: futureDay)
+
+        await viewModel.autoPlaceEligibleTasks(shelves: [personal, work], habits: [], eligibleHoursWindows: [])
+
+        let surviving = try context.fetch(FetchDescriptor<ScheduledBlock>()).filter { $0.id == block.id }
+        XCTAssertEqual(
+            surviving.count, 1,
+            """
+            The Work rule deleted a Personal block sitting in the schedule \
+            they share. A rule must not trim placements it could never have \
+            made itself.
+            """
+        )
+    }
+
+    /// **A missed block must survive the trim sweep too.**
+    ///
+    /// Sibling of the `manuallyPlaced` case above, found the same way —
+    /// `trimOverflowingRuleBlocks` shared `regenerateFromNow`'s
+    /// `!$0.isCompleted` gate, and since `ScheduledBlock.isCompleted` is
+    /// `status == .complete`, a `.missed` block read as trimmable and was
+    /// deleted out of its rule's window. Found by auditing for that gate
+    /// after the regenerate bug rather than from a second bug report.
+    ///
+    /// The task is deliberately *ineligible* for the rule, which is the
+    /// branch that removes a group outright before any cap is applied — the
+    /// most aggressive path through the trim, so a block surviving it
+    /// survives the rest.
+    func test_missedBlock_survivesTheOverflowingRuleTrim() async throws {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        // Not eligible for `rule`, so the trim's own "remove outright"
+        // branch is what this exercises.
+        let task = TaskItem(title: "Missed And Ineligible", shelf: shelf, estimatedMinutes: 30)
+        context.insert(task)
+        shelf.tasks = [task]
+
+        let futureDay = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+        let start = calendar.date(byAdding: .hour, value: 10, to: futureDay)!
+        let block = ScheduledBlock(date: futureDay, startTime: start, endTime: calendar.date(byAdding: .minute, value: 30, to: start)!, task: task)
+        block.status = .missed
+        context.insert(block)
+        task.scheduledBlocks = [block]
+        task.isScheduled = true
+
+        let calendarService = FakeCalendarService()
+        calendarService.freeSlotsProvider = { [self.businessHoursSlot(on: $0)] }
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: calendarService, schedulingService: service, targetDate: futureDay)
+
+        await viewModel.autoPlaceEligibleTasks(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+
+        let surviving = try context.fetch(FetchDescriptor<ScheduledBlock>()).filter { $0.id == block.id }
+        XCTAssertEqual(surviving.count, 1, "a missed block is a record of a decision — the trim must not delete it")
+        XCTAssertEqual(surviving.first?.status, .missed, "and it must still be missed")
+    }
+
     /// `trimOverflowingRuleBlocksAcrossFutureDays` loaded its pre-trim
     /// `allBlocksNow` snapshot back into `blocks` after deleting the excess
     /// groups — reinserting the very objects `removeBlock` had just nil'd
@@ -1621,6 +1732,9 @@ final class SchedulingEngineTests: XCTestCase {
     }
 
     // MARK: - ScheduleReviewViewModel.guaranteePlacement
+
+
+
 
     /// The Nightly Review hook's own entry point: an incomplete task is
     /// rebuilt on its next eligible day at the same time-of-day it was

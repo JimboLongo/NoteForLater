@@ -77,10 +77,47 @@ final class ScheduledBlock {
     /// missed) or double-trigger one (re-cycling the same stale block
     /// Missed → None → Missed again within a session, after the first
     /// replacement already set `isScheduled` back to `true` on its own).
-    /// This block is never deleted (see the three-state redesign's own
-    /// reversal), so there's no later moment this needs to be reset —
-    /// once true, this specific missed instance is permanently resolved.
+    /// **REVERSAL — this used to be permanent.** Its previous comment said
+    /// "this block is never deleted, so there's no later moment this needs
+    /// to be reset — once true, this specific missed instance is permanently
+    /// resolved." The block indeed survives, but cycling it back off
+    /// `.missed` must now undo the whole push, so this is cleared again by
+    /// `ScheduleReviewViewModel.undoGuaranteedPlacement`. It means "a
+    /// replacement is currently outstanding for this miss", not "this miss
+    /// was resolved once, forever".
     var hasGuaranteedReplacement: Bool = false
+
+    // MARK: - Undo state for a guaranteed replacement
+    //
+    // Marking a block `.missed` does five things, only one of which is the
+    // replacement block itself — it also decrements nothing but *increments*
+    // `pushedCount`, frees `isScheduled`, and restores unworked minutes to
+    // the task's ledger. Cycling back off `.missed` has to reverse all five,
+    // so the three below capture what cannot be recomputed afterwards.
+    //
+    // **Stored on the block rather than held in view state**, unlike
+    // `TwoMinutePushState`'s in-memory dictionary. That one can live in a
+    // view because its push is a single `startDate` write with no persistent
+    // object behind it; this push creates a real `ScheduledBlock` that
+    // survives relaunch, so its bookkeeping has to as well — otherwise a
+    // relaunch strands a replacement nothing can identify or reverse.
+    //
+    // **All three are optional, and `nil` is a real case**: a block that was
+    // already `hasGuaranteedReplacement == true` before these fields existed
+    // has a replacement with no recorded prior state. The store had zero such
+    // blocks when this landed, but one created between then and the build
+    // reaching the device would hit it, so the undo path treats `nil` as
+    // "restore what I can, invent nothing" rather than writing a guess.
+
+    /// The replacement `guaranteePlacement` created for this miss. Also what
+    /// `regenerateFromNow` protects: without that, the regenerate deletes the
+    /// replacement (unapproved, future, unlocked) and re-walks the task onto
+    /// the missed day itself — the bug this pairs with.
+    var guaranteedReplacementBlockID: UUID?
+    /// `task.remainingMinutes` before `restoreRemainingMinutes` topped it up.
+    var remainingMinutesBeforeMiss: Int?
+    /// `task.isScheduled` before the miss freed it.
+    var wasScheduledBeforeMiss: Bool?
     /// Locked from the calendar grid's lock icon — excluded from the
     /// ripple-reflow when another block is dragged past it (see
     /// `ScheduleReviewViewModel.moveEntry`'s `unlockedOrder`) and preserved

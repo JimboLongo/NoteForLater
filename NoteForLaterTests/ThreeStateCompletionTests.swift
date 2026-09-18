@@ -145,18 +145,31 @@ final class ThreeStateCompletionTests: XCTestCase {
 
     // MARK: - Missed triggers push/placement; Incomplete does not (fail-then-pass)
 
-    /// Fail-then-pass target: cycling a block to `.missed` must guarantee
-    /// a fresh placement (`task.isScheduled` back to `true`, a second
-    /// block created) — cycling it back to `.none` (Incomplete) must not.
-    /// Temporarily replacing the real assertions with their opposite
-    /// (commented below) and confirming that variant fails first is how
-    /// this was verified to actually exercise the distinction rather than
-    /// passing vacuously — see the inline note.
-    func test_cycleBlockCompletion_missedGuaranteesPlacement_incompleteDoesNot() async {
+    /// Cycling a block to `.missed` guarantees a fresh placement; cycling
+    /// back off `.missed` **undoes it entirely**.
+    ///
+    /// **REVERSAL, and the reason this test changed rather than gained a
+    /// sibling.** It previously asserted `afterIncomplete == 2` with the
+    /// message "cycling to incomplete must not place *or remove* anything"
+    /// — deliberately locking in that the replacement survived the undo.
+    /// That was wrong in use: cycling Missed → Incomplete left a real block
+    /// on a future day for work the user had just said wasn't missed after
+    /// all, plus an inflated `pushedCount` and a `remainingMinutes` ledger
+    /// topped up for a miss that no longer existed. The old expectation is
+    /// inverted here rather than duplicated, because both cannot be true.
+    ///
+    /// **Also adds the assertion whose absence let the real bug through:
+    /// which day the replacement lands on.** Nothing checked it, and the
+    /// placement was in fact correct all along — `regenerateFromNow` was
+    /// deleting it and re-placing the task on the missed day itself. Pinning
+    /// the day here is what makes that distinguishable from a placement bug.
+    func test_cycleBlockCompletion_missedGuaranteesPlacement_andCyclingOffUndoesIt() async {
         let task = makeEligibleTask()
-        let block = makeBlock(for: task, on: day(2026, 1, 5))
+        let missedDay = day(2026, 1, 5)
+        let block = makeBlock(for: task, on: missedDay)
         task.isScheduled = true
-        let viewModel = makeViewModel(targetDate: day(2026, 1, 5))
+        task.remainingMinutes = 0          // the block's 30 minutes were packed out of the ledger
+        let viewModel = makeViewModel(targetDate: missedDay)
 
         // Complete -> Missed: must guarantee a fresh placement.
         _ = viewModel.cycleBlockCompletion(block)
@@ -167,22 +180,244 @@ final class ThreeStateCompletionTests: XCTestCase {
         _ = viewModel.cycleBlockCompletion(block)
         XCTAssertEqual(block.status, .missed)
         XCTAssertTrue(task.isScheduled, "a missed block must guarantee a fresh placement, re-marking the task scheduled")
-        let afterMissed = (try? context.fetch(FetchDescriptor<ScheduledBlock>()))?.count ?? 0
-        XCTAssertEqual(afterMissed, 2, "missed must place a fresh block alongside the original")
+        XCTAssertEqual(task.pushedCount, 1)
+        XCTAssertEqual(task.remainingMinutes, 30, "the unworked 30 minutes go back to the ledger")
 
-        // Missed -> Incomplete (.none): must NOT place anything further.
-        // Both reset here — `hasGuaranteedReplacement` too, not just
-        // `isScheduled` — so this step isolates whether landing on
-        // `.none` itself triggers a placement, rather than being
-        // incidentally shielded by the guard flag the *previous* (legit)
-        // missed-placement already set.
-        task.isScheduled = false
-        block.hasGuaranteedReplacement = false
+        let all = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        XCTAssertEqual(all.count, 2, "missed must place a fresh block alongside the original")
+
+        // **The day assertion.** Not "somewhere" — the next eligible day,
+        // never the day it was missed on.
+        let replacement = try? XCTUnwrap(all.first { $0.id != block.id })
+        let replacementDay = calendar.startOfDay(for: try! XCTUnwrap(replacement).date)
+        XCTAssertEqual(
+            replacementDay, day(2026, 1, 6),
+            "the replacement belongs on the task's next eligible day, not the day it was missed"
+        )
+        XCTAssertNotEqual(replacementDay, missedDay, "landing on the missed day is the bug this pins")
+        XCTAssertEqual(block.guaranteedReplacementBlockID, try! XCTUnwrap(replacement).id, "the original must know which block to undo")
+
+        // Missed -> Incomplete (.none): must undo the push completely.
         _ = viewModel.cycleBlockCompletion(block)
         XCTAssertEqual(block.status, .none)
-        XCTAssertFalse(task.isScheduled, "incomplete must do nothing — no push, no placement")
-        let afterIncomplete = (try? context.fetch(FetchDescriptor<ScheduledBlock>()))?.count ?? 0
-        XCTAssertEqual(afterIncomplete, 2, "cycling to incomplete must not place or remove anything")
+
+        let afterUndo = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        XCTAssertEqual(afterUndo.count, 1, "the replacement must be deleted, not left stranded")
+        XCTAssertTrue(afterUndo.contains { $0.id == block.id }, "and the original must survive")
+        XCTAssertEqual(task.pushedCount, 0, "pushedCount must come back down")
+        XCTAssertEqual(task.remainingMinutes, 0, "the ledger must return to what it was before the miss")
+        XCTAssertTrue(task.isScheduled, "isScheduled must return to its pre-miss value")
+        XCTAssertFalse(block.hasGuaranteedReplacement, "no replacement is outstanding any more")
+        XCTAssertNil(block.guaranteedReplacementBlockID)
+        XCTAssertNil(block.remainingMinutesBeforeMiss)
+        XCTAssertNil(block.wasScheduledBeforeMiss)
+    }
+
+    /// Cycling all the way round to `.complete` also undoes it — the cycle
+    /// reaches `.none` first, so the undo must not be pinned to one exit.
+    func test_cyclingFromMissedRoundToComplete_leavesNoReplacement() async {
+        let task = makeEligibleTask()
+        let block = makeBlock(for: task, on: day(2026, 1, 5))
+        let viewModel = makeViewModel(targetDate: day(2026, 1, 5))
+
+        _ = viewModel.cycleBlockCompletion(block)   // complete
+        _ = viewModel.cycleBlockCompletion(block)   // missed
+        _ = viewModel.cycleBlockCompletion(block)   // none  -> undo fires here
+        _ = viewModel.cycleBlockCompletion(block)   // complete
+
+        let remaining = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertEqual(task.pushedCount, 0)
+    }
+
+    /// Re-missing after an undo pushes again, rather than being blocked by a
+    /// stale flag. The old comment on `hasGuaranteedReplacement` called it
+    /// permanent; it is not any more, and this is what that buys.
+    func test_missedAgainAfterUndo_pushesAgain() async {
+        let task = makeEligibleTask()
+        let block = makeBlock(for: task, on: day(2026, 1, 5))
+        let viewModel = makeViewModel(targetDate: day(2026, 1, 5))
+
+        _ = viewModel.cycleBlockCompletion(block)   // complete
+        _ = viewModel.cycleBlockCompletion(block)   // missed
+        _ = viewModel.cycleBlockCompletion(block)   // none (undo)
+        _ = viewModel.cycleBlockCompletion(block)   // complete
+        _ = viewModel.cycleBlockCompletion(block)   // missed again
+
+        let remaining = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        XCTAssertEqual(remaining.count, 2, "a second miss must place a second replacement")
+        XCTAssertEqual(task.pushedCount, 1, "and count once, not twice")
+    }
+
+    /// **The pre-existing-data case.** A block already carrying
+    /// `hasGuaranteedReplacement` from before these fields existed has a
+    /// replacement it cannot identify and no captured prior state. The undo
+    /// must clear the flag and leave the ledger alone rather than writing a
+    /// guess — the store held zero such blocks when this landed, but one
+    /// created before the build reached the device would take this path.
+    func test_undoWithNoCapturedState_clearsTheFlagWithoutInventingValues() async {
+        let task = makeEligibleTask()
+        let block = makeBlock(for: task, on: day(2026, 1, 5))
+        task.remainingMinutes = 17
+        task.pushedCount = 3
+        task.isScheduled = true
+        // The pre-migration shape: flag set, nothing captured.
+        block.status = .missed
+        block.hasGuaranteedReplacement = true
+        XCTAssertNil(block.guaranteedReplacementBlockID)
+        let viewModel = makeViewModel(targetDate: day(2026, 1, 5))
+
+        _ = viewModel.cycleBlockCompletion(block)   // -> none, undo path
+
+        XCTAssertFalse(block.hasGuaranteedReplacement, "the flag must clear even with nothing captured")
+        XCTAssertEqual(task.remainingMinutes, 17, "no captured value means leave the ledger alone")
+        XCTAssertTrue(task.isScheduled, "likewise isScheduled")
+        XCTAssertEqual(task.pushedCount, 2, "pushedCount is recomputable by decrement, so it still reverses")
+    }
+
+    /// **The regression this pairs with: the regenerate must not throw the
+    /// guaranteed placement away.**
+    ///
+    /// `cycleBlockCompletion` sets `ScheduleDirtyState.isDirty`, which makes
+    /// the next `syncSchedule()` run a full `regenerateFromNow`. That sweep
+    /// deletes every unapproved, unlocked, incomplete, non-manual block at or
+    /// after its cutoff — which matched the replacement exactly — freed the
+    /// task, and re-walked it from today, landing it back on the day it had
+    /// just been missed on. Reproduced exactly this way before the fix:
+    /// 2 blocks (09-18 missed, 09-19 replacement) became 2 blocks
+    /// (09-18 missed, 09-18 12:00).
+    ///
+    /// **Correction to an earlier claim in this file's history:** the commit
+    /// path is *not* spared because `NightlyReviewCommit` sets
+    /// `isDirty = false`. It calls `regenerateFromNow` explicitly
+    /// (`NightlyReviewCommit.swift`), and clears the flag afterwards. What
+    /// actually spares it is cutoff arithmetic: its view model targets
+    /// *tomorrow*, so `cutoff` is tomorrow and today's missed blocks all fall
+    /// before it. A missed block on a future day would be swept there too.
+    /// That is an accident, not a design — see docs/session-handoff.md.
+    func test_regenerateFromNow_doesNotDestroyAGuaranteedReplacement() async {
+        let today = calendar.startOfDay(for: .now)
+        let task = makeEligibleTask()
+        let block = makeBlock(for: task, on: today)
+        task.isScheduled = true
+
+        let fake = FakeCalendarService()
+        let cal = calendar
+        fake.freeSlotsProvider = { date in
+            let start = cal.startOfDay(for: date)
+            return [TimeSlot(start: start, end: cal.date(byAdding: .hour, value: 23, to: start)!)]
+        }
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: fake, schedulingService: service, targetDate: today)
+
+        _ = viewModel.cycleBlockCompletion(block)   // complete
+        _ = viewModel.cycleBlockCompletion(block)   // missed
+        let replacementID = try? XCTUnwrap(block.guaranteedReplacementBlockID)
+
+        let shelves = (try? context.fetch(FetchDescriptor<Shelf>())) ?? []
+        _ = await viewModel.regenerateFromNow(shelves: shelves, habits: [], eligibleHoursWindows: [])
+
+        let all = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        XCTAssertTrue(
+            all.contains { $0.id == replacementID },
+            "the regenerate deleted the guaranteed replacement — the task then gets re-walked onto the missed day"
+        )
+        for placed in all where placed.id != block.id {
+            XCTAssertNotEqual(
+                calendar.startOfDay(for: placed.date), today,
+                "no replacement for a block missed today may land on today"
+            )
+        }
+    }
+
+    /// **A missed block must survive a regenerate.** It is a record of a
+    /// decision, not an unresolved slot — the rule `resolveMissedPastBlocks`
+    /// already states and this sweep was quietly breaking.
+    ///
+    /// The block is placed *later today*, deliberately: `cutoff` is roughly
+    /// now, and only a block at or after it is eligible for the sweep. An
+    /// earlier-today block survives regardless of the gate, so a fixture
+    /// using one would pass against the broken code and prove nothing.
+    func test_regenerateFromNow_neverDeletesAMissedBlock() async {
+        let today = calendar.startOfDay(for: .now)
+        let task = makeEligibleTask()
+        let laterHour = min(23, calendar.component(.hour, from: .now) + 3)
+        let block = makeBlock(for: task, on: today, hour: laterHour)
+        task.isScheduled = true
+        let originalID = block.id
+
+        let fake = FakeCalendarService()
+        let cal = calendar
+        fake.freeSlotsProvider = { date in
+            let start = cal.startOfDay(for: date)
+            return [TimeSlot(start: start, end: cal.date(byAdding: .hour, value: 23, to: start)!)]
+        }
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: fake, schedulingService: service, targetDate: today)
+
+        _ = viewModel.cycleBlockCompletion(block)   // complete
+        _ = viewModel.cycleBlockCompletion(block)   // missed
+
+        let shelves = (try? context.fetch(FetchDescriptor<Shelf>())) ?? []
+        _ = await viewModel.regenerateFromNow(shelves: shelves, habits: [], eligibleHoursWindows: [])
+
+        let all = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        let survivor = all.first { $0.id == originalID }
+        XCTAssertNotNil(
+            survivor,
+            """
+            The missed block was deleted and the task re-placed as a fresh \
+            .none block — the user's decision silently discarded. `isCompleted` \
+            is `status == .complete`, so `!isCompleted` sweeps up `.missed`.
+            """
+        )
+        XCTAssertEqual(survivor?.status, .missed, "and it must still be missed, not reset")
+    }
+
+    /// A missed block with no guaranteed replacement must survive too — the
+    /// `status == .none` rule has to stand on its own, not lean on the
+    /// replacement exemption. A meal block is the real case: it cycles to
+    /// `.missed` and never gets a `guaranteePlacement` at all.
+    func test_regenerateFromNow_neverDeletesAMissedBlockWithNoReplacement() async {
+        let today = calendar.startOfDay(for: .now)
+        let laterHour = min(23, calendar.component(.hour, from: .now) + 3)
+        let start = calendar.date(byAdding: .hour, value: laterHour, to: today)!
+        let mealBlock = ScheduledBlock(date: today, startTime: start, endTime: start.addingTimeInterval(1800), task: nil)
+        mealBlock.status = .missed
+        context.insert(mealBlock)
+        XCTAssertFalse(mealBlock.hasGuaranteedReplacement)
+
+        let viewModel = makeViewModel(targetDate: today)
+        let shelves = (try? context.fetch(FetchDescriptor<Shelf>())) ?? []
+        _ = await viewModel.regenerateFromNow(shelves: shelves, habits: [], eligibleHoursWindows: [])
+
+        let all = (try? context.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        XCTAssertTrue(
+            all.contains { $0.id == mealBlock.id },
+            "protecting only guaranteed replacements would miss this one entirely"
+        )
+    }
+
+    /// **The day list must not show another day's block.** `insertWithRipple`
+    /// assigned the whole store to `blocks`, and `timelineRows` does no day
+    /// filtering, so a replacement placed on a later day rendered on today's
+    /// grid — stacked on the block it replaced, since the time of day is
+    /// preserved.
+    func test_guaranteedReplacementDoesNotLeakIntoTodaysBlockList() async {
+        let today = calendar.startOfDay(for: .now)
+        let task = makeEligibleTask()
+        let block = makeBlock(for: task, on: today)
+        let viewModel = makeViewModel(targetDate: today)
+        viewModel.loadExistingBlocks([block])
+
+        _ = viewModel.cycleBlockCompletion(block)   // complete
+        _ = viewModel.cycleBlockCompletion(block)   // missed
+
+        for shown in viewModel.blocks {
+            XCTAssertTrue(
+                calendar.isDate(shown.date, inSameDayAs: today),
+                "viewModel.blocks drives the day grid — it must hold only today's blocks"
+            )
+        }
+        XCTAssertEqual(viewModel.blocks.count, 1, "just the missed original; the replacement belongs to another day")
     }
 
     /// The same distinction, verified fail-then-pass directly against

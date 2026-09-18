@@ -574,8 +574,33 @@ final class ScheduleReviewViewModel {
                 windowStart < windowEnd
             else { continue }
 
+            // `status == .none`, not `!isCompleted` — same correction as
+            // `performRegenerateFromNow`'s clearing pass, for the same
+            // reason: `isCompleted` is `status == .complete`, so `.missed`
+            // read as trimmable and a deliberately-missed block inside a
+            // rule's window was deleted. Found by auditing for the gate after
+            // the regenerate bug, not from a second report.
+            // **Scoped to this rule's own shelf.** `applicableRules` is built
+            // from *every* shelf's rules, and this filter previously matched
+            // on the time window alone — so a rule belonging to one shelf
+            // would pick up another shelf's blocks, find their tasks
+            // (correctly) not eligible for it, and delete them through the
+            // ineligible branch below. The owning shelf's own rule then
+            // re-placed them on the next pass, and the cycle repeated on
+            // every single navigation.
+            //
+            // Two shelves sharing one `NamedSchedule` is all it takes, which
+            // is ordinary configuration rather than a corner case: "Work -
+            // Afternoons" (12:00–17:00) attached to both a Personal rule and
+            // a Work rule made every Personal block in that window
+            // collateral damage of the Work rule's trim.
+            //
+            // A rule has no business deleting placements it could never have
+            // made. Within a shelf the per-rule eligibility test below is
+            // exactly right; across shelves it is meaningless.
             let trimmable = dayBlocks.filter {
-                $0.task != nil && !$0.isLocked && !$0.isCompleted && !$0.manuallyPlaced && $0.approvalStatus != .approved
+                $0.task != nil && $0.task?.shelf?.id == rule.shelf?.id
+                    && !$0.isLocked && $0.status == .none && !$0.manuallyPlaced && $0.approvalStatus != .approved
                     && $0.startTime >= windowStart && $0.startTime < windowEnd
             }
             guard !trimmable.isEmpty else { continue }
@@ -728,8 +753,36 @@ final class ScheduleReviewViewModel {
         // gets the identical treatment — the empty-slot picker is itself
         // a deliberate user choice, same as locking, even when it lands
         // on a slot the task isn't rule-eligible for.
+        // **Guaranteed replacements are protected**, the same way a locked
+        // or manually-placed block is. Without this the regenerate deleted
+        // the block `guaranteePlacement` had just put on the task's next
+        // eligible day, freed the task, and re-walked it from `cutoff` —
+        // landing it back on the very day it was missed, moments after being
+        // marked missed. The placement logic was always right; its result was
+        // being thrown away by the regenerate that `cycleBlockCompletion`'s
+        // own `isDirty = true` triggers.
+        let guaranteedReplacementIDs = Set(allBlocks.compactMap(\.guaranteedReplacementBlockID))
         var survivingBlocks = allBlocks
-        for block in allBlocks where block.approvalStatus != .approved && !block.isLocked && !block.isCompleted && !block.manuallyPlaced && block.startTime >= cutoff {
+        // **`status == .none`, not `!isCompleted`.** `ScheduledBlock.isCompleted`
+        // is `status == .complete`, so `.missed` read `false` here and a
+        // deliberately-missed block was swept up and re-placed as a fresh
+        // `.none` one — losing the decision the user had just made. That gate
+        // predates three-state completion, where "not complete" really did
+        // mean "unresolved, free to re-place"; it is the same lossy-`isCompleted`
+        // read that made `.missed` invisible on the calendar circle, in a
+        // different file.
+        //
+        // It also states the rule `resolveMissedPastBlocks` already claims:
+        // "nothing is deleted from the calendar now — `.missed` is a real,
+        // permanent record, not a state to sweep away." Only an untouched
+        // block is free to be cleared and re-walked.
+        //
+        // This subsumes the guaranteed-replacement case rather than
+        // special-casing it — a missed habit or meal block never gets a
+        // replacement and was being swept just the same. The id-based
+        // exemption below still earns its keep: the replacement itself is
+        // `.none`.
+        for block in allBlocks where block.approvalStatus != .approved && !block.isLocked && block.status == .none && !block.manuallyPlaced && !guaranteedReplacementIDs.contains(block.id) && block.startTime >= cutoff {
             block.task?.isScheduled = false
             removeBlock(block)
             survivingBlocks.removeAll { $0.id == block.id }
@@ -1816,6 +1869,12 @@ final class ScheduleReviewViewModel {
             // nothing to do with this flag.
             ScheduleDirtyState.shared.isDirty = true
             if next == .missed, !block.hasGuaranteedReplacement {
+                // **Captured before anything is mutated** — these are the
+                // values the undo restores, and two of them are about to be
+                // overwritten. See `ScheduledBlock`'s own comment for why
+                // they live on the block rather than in view state.
+                block.remainingMinutesBeforeMiss = task.remainingMinutes
+                block.wasScheduledBeforeMiss = task.isScheduled
                 task.isScheduled = false
                 task.pushedCount += 1
                 // The old block stays (nothing deletes it anymore — see
@@ -1826,8 +1885,16 @@ final class ScheduleReviewViewModel {
                 // carried alongside it (`removeBlock`'s own doc comment)
                 // — the missing half of that if this were skipped here.
                 restoreRemainingMinutes(for: block)
-                guaranteePlacement(for: task, missedDate: block.date, missedStartTime: block.startTime, durationMinutes: block.durationMinutes)
+                block.guaranteedReplacementBlockID = guaranteePlacement(
+                    for: task, missedDate: block.date, missedStartTime: block.startTime, durationMinutes: block.durationMinutes
+                )?.id
                 block.hasGuaranteedReplacement = true
+            } else if next != .missed, block.hasGuaranteedReplacement {
+                // Leaving `.missed` in either direction — the cycle reaches
+                // `.none` first and `.complete` on the tap after, and both
+                // mean "this is no longer missed", so both must reverse the
+                // push rather than only the one that happens to come next.
+                undoGuaranteedPlacement(for: block, task: task)
             }
         }
 
@@ -3068,7 +3135,15 @@ final class ScheduleReviewViewModel {
     /// push, not a hot path, so the full reload's cost is a non-issue.
     func insertWithRipple(_ block: ScheduledBlock) {
         RippleSchedulingService.insertWithRipple(block, context: modelContext)
-        blocks = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
+        // **Scoped to `targetDate`, like every other assignment to `blocks`.**
+        // This assigned the whole store, and `timelineRows` does no day
+        // filtering of its own — so a replacement placed on a *later* day
+        // rendered on today's grid, stacked exactly on the block it replaced
+        // (`guaranteePlacement` keeps the missed block's time of day).
+        // Leaving the day and coming back reloaded through the filtered path
+        // and it vanished, which is what made it look like a repaint problem
+        // rather than the wrong list.
+        loadExistingBlocks((try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? [])
     }
 
     /// Guarantees an incomplete, non-recurring task actually lands
@@ -3086,21 +3161,59 @@ final class ScheduleReviewViewModel {
     /// deleted block's own values, captured by the caller before
     /// `clearIncompletePastBlocks` removes it — there is nothing left to
     /// read them from by the time this runs.
-    func guaranteePlacement(for task: TaskItem, missedDate: Date, missedStartTime: Date, durationMinutes: Int) {
+    @discardableResult
+    func guaranteePlacement(for task: TaskItem, missedDate: Date, missedStartTime: Date, durationMinutes: Int) -> ScheduledBlock? {
         let calendar = Calendar.current
         guard let nextDay = task.nextEligibleDay(after: missedDate, calendar: calendar) else {
             DiagFileLog.write("RIPPLE GAVE UP taskID=\(task.id) title=\(task.title) reason=No eligible day found for a missed Nightly Review task.")
             modelContext.insert(PushRecursionWarning(taskID: task.id, taskTitle: task.title, message: "No eligible day left to reschedule it on."))
             try? modelContext.save()
-            return
+            return nil
         }
         let timeOfDay = calendar.dateComponents([.hour, .minute], from: missedStartTime)
-        guard let start = calendar.date(bySettingHour: timeOfDay.hour ?? 9, minute: timeOfDay.minute ?? 0, second: 0, of: nextDay) else { return }
+        guard let start = calendar.date(bySettingHour: timeOfDay.hour ?? 9, minute: timeOfDay.minute ?? 0, second: 0, of: nextDay) else { return nil }
         let end = start.addingTimeInterval(TimeInterval(durationMinutes * 60))
         let block = ScheduledBlock(date: nextDay, startTime: start, endTime: end, task: task, isEstimatedDuration: task.estimatedMinutes <= 0)
         modelContext.insert(block)
         task.isScheduled = true
         insertWithRipple(block)
+        return block
+    }
+
+    /// Reverses everything `cycleBlockCompletion`'s `.missed` branch did.
+    ///
+    /// Order matters: the replacement is removed **without** its usual
+    /// minutes restoration, because the captured `remainingMinutesBeforeMiss`
+    /// is then written directly. Letting `removeBlock` restore first and
+    /// overwriting after would work today but leaves two sources competing
+    /// for one field, which is the shape that drained `remainingMinutes` to
+    /// zero before (see `removeBlock`'s own doc comment).
+    ///
+    /// A `nil` capture is a real case, not a defect — see `ScheduledBlock`'s
+    /// comment. The replacement is still deleted if its id is known, and the
+    /// flag still clears; only the two restores are skipped, because there is
+    /// no honest value to write and a guess here corrupts a task's ledger
+    /// silently.
+    func undoGuaranteedPlacement(for block: ScheduledBlock, task: TaskItem) {
+        if let replacementID = block.guaranteedReplacementBlockID,
+           let replacement = blocks.first(where: { $0.id == replacementID })
+            ?? (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>()))?.first(where: { $0.id == replacementID }) {
+            removeBlock(replacement, restoringRemainingMinutes: false)
+        }
+        task.pushedCount = max(0, task.pushedCount - 1)
+        if let priorMinutes = block.remainingMinutesBeforeMiss {
+            task.remainingMinutes = priorMinutes
+        }
+        if let wasScheduled = block.wasScheduledBeforeMiss {
+            task.isScheduled = wasScheduled
+        }
+        block.hasGuaranteedReplacement = false
+        block.guaranteedReplacementBlockID = nil
+        block.remainingMinutesBeforeMiss = nil
+        block.wasScheduledBeforeMiss = nil
+        // Same day-scoping as `insertWithRipple` — this copied its unfiltered
+        // shape when it was written.
+        loadExistingBlocks((try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? [])
     }
 
     /// §5.1/§8: same `taskOrdering` the auto-scheduler itself sorts
