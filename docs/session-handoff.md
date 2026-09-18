@@ -173,6 +173,60 @@ card body has had three restructuring passes already, and this would be a
 fourth to convert a *caught* problem into a *prevented* one. Scoped as
 larger than the problem it prevents.
 
+**Testing practice, general — a render baseline cannot observe whether a
+live view *invalidates*. It renders one body pass on demand, so "the
+picture is unchanged" says nothing about whether the real screen would ever
+have redrawn to produce it.**
+
+Same family as `.hidden ⟹ not drawn` above: a check that passes because it
+is structurally blind to the property in question, not because the property
+holds.
+
+Stage 4b was verified as "pure deletion, all five render baselines pinned
+and unchanged" — and that check was sound for what it covered. What it
+could not see: `TaskItem.cycleRecurringOccurrence` mirrors its status onto
+the occurrence's `ScheduledBlock`, and that mirror was the *only* thing
+invalidating `NightlyReviewView` after a recurring-task tap, because
+`@Query allBlocks` observes `ScheduledBlock` while nothing observes
+`RecurringTaskLog`. Stage 4 removed the last recurring-task block, the
+mirror stopped firing, and the row stopped redrawing. Measured on device:
+**zero body passes across four consecutive taps**, the row catching up only
+5+ seconds later when something unrelated invalidated the view. The write
+was always correct and always took ~2ms; only the display was stale.
+
+**The general signal: a data write that a view depends on for refresh, but
+that the view does not observe directly.** Ask of every write behind a tap,
+"which `@Query`d entity does this touch?" If the answer is "none, but it
+incidentally writes a mirror/relationship that is queried," the refresh is
+a side effect of the data model and a future deletion can take it away with
+every test still green.
+
+**Where the audit landed** (every Nightly Review tap, against the nine
+`@Query`s):
+- **Recurring task** — `RecurringTaskLog` + `TaskCompletionRecord`, both
+  keyed by a plain `taskID: UUID` with no relationship. Nothing observed.
+  Fixed with `recurringOccurrenceRefreshTick`, matching
+  `DayTimelineGridView.habitOccurrenceRefreshTick`. A deliberate
+  invalidation rather than a restored mirror, so the next deletion cannot
+  silently remove it.
+- **Habit** — same shape, currently saved by an accident of typing.
+  `HabitLog.habit` is a real `Habit?` relationship, so writing a log
+  touches a queried entity and `@Query allHabits` fires. `RecurringTaskLog`
+  is the sibling type kept deliberately parallel to it, and its key is a
+  plain UUID — so the two differ on precisely the field that decides
+  whether the screen refreshes. Re-keying `HabitLog` to `habitID: UUID`
+  would break habits identically and silently. Note also that
+  `Habit.cycleOccurrence`'s own block mirror is **not** a second line of
+  defence: the store holds **zero** habit `ScheduledBlock`s, so the
+  relationship is the only live mechanism.
+- **2-Minute task** — invalidated by a query its rows are not read from.
+  Rows come from `allShelves` → `shelf.tasks`; the write is to
+  `TaskItem.status`, observed by `allTasks`, which this step does not
+  otherwise use. Works today, same class of dependency.
+- **Block / meal** — genuinely direct. The row renders `block.status` /
+  `selection.status`, and the view queries exactly those entities. These
+  are the two that are correct by construction rather than by luck.
+
 **Verification practice, general — a check can only bless what it is
 capable of seeing, and "I verified determinism" is a claim with a scope.**
 
