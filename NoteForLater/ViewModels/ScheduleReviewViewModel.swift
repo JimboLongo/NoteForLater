@@ -2612,6 +2612,28 @@ final class ScheduleReviewViewModel {
         RecurringTaskLog.log(taskID: task.id, on: day, context: context, calendar: calendar)?.status ?? .none
     }
 
+    /// **What a calendar block should render as** — the one answer the day
+    /// calendar's circle and its row fade both use, rather than each deriving
+    /// it separately.
+    ///
+    /// A recurring task's block is only a mirror (`RecurringTaskLog` is the
+    /// source of truth), so it reads through; every other block owns its own
+    /// `status`. Deliberately **not** `block.isCompleted`, whose getter is
+    /// `status == .complete` and therefore collapses `.missed` into `.none`.
+    ///
+    /// `static` and free of any view so it can be tested directly. That
+    /// matters here specifically: the bug this replaces lived in the *call
+    /// site* — the circle was perfectly capable of drawing three states and
+    /// simply was not asked to — so a test that renders the circle with
+    /// hand-written arguments passes while the screen stays broken. This is
+    /// the half a test can actually hold.
+    static func blockDisplayStatus(_ block: ScheduledBlock, context: ModelContext, calendar: Calendar = .current) -> OccurrenceStatus {
+        if let task = block.task, task.isRecurring {
+            return recurringTaskOccurrenceStatus(task: task, on: block.date, context: context, calendar: calendar)
+        }
+        return block.status
+    }
+
     /// The Next gate's predicate for the AM/Midday/PM half of recurring
     /// tasks — mirrors `unresolvedHabitOccurrences` exactly.
     static func unresolvedRecurringTaskOccurrences(_ occurrences: [RecurringTaskReviewOccurrence]) -> [RecurringTaskReviewOccurrence] {

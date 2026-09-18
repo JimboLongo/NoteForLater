@@ -29,6 +29,7 @@
 		058A3BF0C8B790FE9C6966CF /* NightlyReviewHabitsStepTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BC481722B7D049BC0E12E2E /* NightlyReviewHabitsStepTests.swift */; };
 		67CF12D4B083E695CC2F9E2E /* RecurringTaskCardLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68C1C01C8168B734E7A2733E /* RecurringTaskCardLayoutTests.swift */; };
 		0AA5C56B0523A0333E08A388 /* RecurringTaskCardRenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD3913BF8DE0C4E6FFFCDC18 /* RecurringTaskCardRenderTests.swift */; };
+		1A2B3C4D5E6F708192A3B4C5 /* BlockStatusCircleRenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F708192A3B4C6 /* BlockStatusCircleRenderTests.swift */; };
 		6C242409EACEEAEB7FC7CB00 /* NonRecurringTaskCardLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F2DDB6BE6E0EDF60D32C6BE /* NonRecurringTaskCardLayoutTests.swift */; };
 		633B97E030D17CC1E3DB5A7E /* RepeatsRedesignTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7E02FDC214318F2C6298230 /* RepeatsRedesignTests.swift */; };
 		7BBC6424ACB94D88F11ADC9C /* CancelDeleteNeverSavedTaskTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5A4D5B0AB4C4D15ACF2B596 /* CancelDeleteNeverSavedTaskTests.swift */; };
@@ -89,6 +90,7 @@
 		9BC481722B7D049BC0E12E2E /* NightlyReviewHabitsStepTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NightlyReviewHabitsStepTests.swift; sourceTree = "<group>"; };
 		68C1C01C8168B734E7A2733E /* RecurringTaskCardLayoutTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecurringTaskCardLayoutTests.swift; sourceTree = "<group>"; };
 		BD3913BF8DE0C4E6FFFCDC18 /* RecurringTaskCardRenderTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecurringTaskCardRenderTests.swift; sourceTree = "<group>"; };
+		1A2B3C4D5E6F708192A3B4C6 /* BlockStatusCircleRenderTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BlockStatusCircleRenderTests.swift; sourceTree = "<group>"; };
 		6F2DDB6BE6E0EDF60D32C6BE /* NonRecurringTaskCardLayoutTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NonRecurringTaskCardLayoutTests.swift; sourceTree = "<group>"; };
 		E7E02FDC214318F2C6298230 /* RepeatsRedesignTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RepeatsRedesignTests.swift; sourceTree = "<group>"; };
 		A5A4D5B0AB4C4D15ACF2B596 /* CancelDeleteNeverSavedTaskTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CancelDeleteNeverSavedTaskTests.swift; sourceTree = "<group>"; };
@@ -176,6 +178,7 @@
 				9BC481722B7D049BC0E12E2E /* NightlyReviewHabitsStepTests.swift */,
 				68C1C01C8168B734E7A2733E /* RecurringTaskCardLayoutTests.swift */,
 				BD3913BF8DE0C4E6FFFCDC18 /* RecurringTaskCardRenderTests.swift */,
+				1A2B3C4D5E6F708192A3B4C6 /* BlockStatusCircleRenderTests.swift */,
 				6F2DDB6BE6E0EDF60D32C6BE /* NonRecurringTaskCardLayoutTests.swift */,
 				E7E02FDC214318F2C6298230 /* RepeatsRedesignTests.swift */,
 				A5A4D5B0AB4C4D15ACF2B596 /* CancelDeleteNeverSavedTaskTests.swift */,
@@ -338,6 +341,7 @@
 				058A3BF0C8B790FE9C6966CF /* NightlyReviewHabitsStepTests.swift in Sources */,
 				67CF12D4B083E695CC2F9E2E /* RecurringTaskCardLayoutTests.swift in Sources */,
 				0AA5C56B0523A0333E08A388 /* RecurringTaskCardRenderTests.swift in Sources */,
+				1A2B3C4D5E6F708192A3B4C5 /* BlockStatusCircleRenderTests.swift in Sources */,
 				6C242409EACEEAEB7FC7CB00 /* NonRecurringTaskCardLayoutTests.swift in Sources */,
 				633B97E030D17CC1E3DB5A7E /* RepeatsRedesignTests.swift in Sources */,
 				7BBC6424ACB94D88F11ADC9C /* CancelDeleteNeverSavedTaskTests.swift in Sources */,

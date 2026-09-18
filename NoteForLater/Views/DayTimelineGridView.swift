@@ -997,6 +997,48 @@ struct DayTimelineGridView: View {
     }
 }
 
+/// The three-state circle on a calendar block: empty outline when
+/// untouched, green fill + white checkmark when complete, red fill + white
+/// X when missed. Same scheme as `DayTimelineGridView.occurrenceRow` and
+/// `OverdueBlocksReviewList.habitSelectionCircle`, sized for a block.
+///
+/// **`internal`, and its own type, so a test can actually render it.** It
+/// was a `private func` on `private struct DayTimelineSegment`, which is
+/// unreachable from the test target — so the one property that matters here
+/// (that the three states are visually *distinguishable*) had no way to be
+/// asserted, and `.missed` silently rendered identical to `.none` for every
+/// non-recurring block. See `BlockStatusCircleRenderTests`.
+///
+/// Carries no gesture: the tap lives at the call site, which needs
+/// `.highPriorityGesture` against the row's own drag recognizer.
+struct BlockStatusCircle: View {
+    /// **One status, not two `Bool`s.** The pair it replaced had a
+    /// defaultable `isMissed`, which a call site could omit without any
+    /// signal — and did, for every non-recurring block. There is no
+    /// omittable half here.
+    let status: OccurrenceStatus
+
+    var body: some View {
+        let fillColor: Color = status == .complete ? .green : (status == .missed ? .red.opacity(0.55) : .clear)
+        let strokeColor: Color = status == .none ? .secondary.opacity(0.7) : fillColor
+        return ZStack {
+            Circle()
+                .fill(fillColor)
+                .overlay(Circle().strokeBorder(strokeColor, lineWidth: 1.5))
+            if status == .complete {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white)
+            } else if status == .missed {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+        }
+        .frame(width: 15, height: 15)
+    }
+}
+
 /// The actual hour-gridline-and-blocks timeline for one contiguous hour
 /// range — either the whole day, or one half of it split at noon by a
 /// Midday habit occurrence (see `DayTimelineGridView`). Every drag/swipe/
@@ -2269,15 +2311,22 @@ private struct DayTimelineSegment: View {
             }
         case .proposed(let block):
             // `block.isCompleted` alone can't tell "missed" apart from
-            // "untouched" for a recurring task (both read `false` on the
-            // mirror) — read the live status once, purely for the fade
-            // below; `completeCircle(for:)` does its own equivalent read
-            // for the circle itself, since it's built from a different
+            // "untouched" (its getter is `status == .complete`, so both
+            // read `false`) — read the live status once, purely for the
+            // fade below; `completeCircle(for:)` does its own equivalent
+            // read for the circle itself, since it's built from a different
             // closure and there's no clean way to thread one read into
             // both without restructuring this whole case.
-            let isRecurringMissed = block.task.map { task in
-                task.isRecurring && ScheduleReviewViewModel.recurringTaskOccurrenceStatus(task: task, on: block.date, context: modelContext) == .missed
-            } ?? false
+            //
+            // **Was `isRecurringMissed`, gated on `task.isRecurring`.** An
+            // ordinary task block cycles three states exactly like a
+            // recurring one (`toggleComplete` falls straight through to
+            // `cycleBlockCompletion` for any non-habit block), but the fade
+            // and the circle both ignored `.missed` unless the task
+            // recurred — so a missed ordinary block rendered *identical* to
+            // an untouched one. The model was right; two renderers were
+            // reading a narrower question than the one being asked.
+            let isMissedBlock = blockStatus(block) == .missed
             Group {
                 // "(Est Duration)" flags a guessed duration (the task
                 // itself never had one set — see
@@ -2329,7 +2378,7 @@ private struct DayTimelineSegment: View {
             // Locking no longer fades it (only the lock icon itself turns
             // green to show the state). The icon overlay below is outside
             // this `.opacity`, so it stays fully legible regardless.
-            .opacity(block.isCompleted || isRecurringMissed ? 0.5 : 1)
+            .opacity(block.isCompleted || isMissedBlock ? 0.5 : 1)
             .overlay(alignment: .topTrailing) {
                 HStack(spacing: 8) {
                     // Same circle style as `OverdueBlocksReviewList`'s
@@ -2385,63 +2434,52 @@ private struct DayTimelineSegment: View {
             .background(Color.secondary.opacity(0.2), in: Capsule())
     }
 
-    /// Branches for a recurring task's own block — the one row shape
-    /// most likely to get missed in this consolidation, since it
-    /// otherwise shares this exact same plain-toggle circle with every
-    /// ordinary (non-recurring) task block. `block.isCompleted` is kept
-    /// as a mirror by `TaskItem.cycleRecurringOccurrence`, true only for
-    /// `.complete` — accurate for the checkmark, but it can't tell
-    /// `.missed` apart from `.none` (both read `false`), so the live
-    /// status is read directly from `RecurringTaskLog` here rather than
-    /// trusting the mirror alone. A non-recurring task's block (and a
-    /// habit's — `block.habit != nil`, untouched by this whole
-    /// consolidation) keeps the exact plain two-state toggle it always
-    /// had: `viewModel.toggleComplete(block)`, unchanged.
+    /// The one place this view answers "what state is this block in".
+    ///
+    /// A recurring task's block is only a *mirror* — `RecurringTaskLog` is
+    /// the source of truth (see `TaskItem.cycleRecurringOccurrence`) — so it
+    /// reads through, while every other block owns its own `status`.
+    /// Extracted because the circle and the row fade each used to ask this
+    /// separately and each asked it slightly differently; that divergence is
+    /// exactly how `.missed` ended up invisible on an ordinary task block.
+    private func blockStatus(_ block: ScheduledBlock) -> OccurrenceStatus {
+        ScheduleReviewViewModel.blockDisplayStatus(block, context: modelContext)
+    }
+
+    /// **One circle call for every block, not one per branch.** The two
+    /// branches previously differed in more than the tap action: the
+    /// recurring one passed `isMissed`, the ordinary one let it default to
+    /// `false`, and since `ScheduledBlock.isCompleted` is `status ==
+    /// .complete`, `.missed` drew as an empty outline — pixel-identical to
+    /// untouched. The cycle underneath was always three-state; only this was
+    /// two. Now the status is read once and rendered once, and only the
+    /// closure differs.
     private func completeCircle(for block: ScheduledBlock) -> some View {
-        if let task = block.task, task.isRecurring {
-            let status = ScheduleReviewViewModel.recurringTaskOccurrenceStatus(task: task, on: block.date, context: modelContext)
-            return completeCircle(isCompleted: status == .complete, isMissed: status == .missed) {
+        completeCircle(status: blockStatus(block)) {
+            if let task = block.task, task.isRecurring {
                 onCycleRecurringTaskOccurrence(task)
+            } else {
+                // Routed through the view model rather than toggling
+                // `isCompleted` directly — a habit-backed block needs its
+                // Habit Tracker log kept in sync too (see
+                // `ScheduleReviewViewModel.toggleComplete`, which falls
+                // through to the three-state `cycleBlockCompletion` for
+                // everything else).
+                viewModel.toggleComplete(block)
             }
-        }
-        return completeCircle(isCompleted: block.isCompleted) {
-            // Routed through the view model rather than toggling
-            // `isCompleted` directly — a habit-backed block needs its
-            // Habit Tracker log kept in sync too (see
-            // `ScheduleReviewViewModel.toggleComplete`).
-            viewModel.toggleComplete(block)
         }
     }
 
-    /// Empty outline when incomplete, green fill + white checkmark when
-    /// complete, red fill + white X when missed — same look
-    /// `DayTimelineGridView.occurrenceRow` already uses for an untimed
-    /// habit/recurring-task occurrence, reused here rather than a second
-    /// scheme, just sized for the card. Generic over `isCompleted`/
-    /// `isMissed`/`onToggle` (rather than taking a `ScheduledBlock`
-    /// directly) so a `.projectedRecurringTask` row — which has no block
-    /// to read or write — gets the exact same look and tap behavior as a
-    /// real one. `isMissed` defaults to `false` so every existing caller
-    /// (a habit block, a non-recurring task block) renders exactly as it
-    /// always has — only a recurring task's own circle ever passes it.
-    private func completeCircle(isCompleted: Bool, isMissed: Bool = false, onToggle: @escaping () -> Void) -> some View {
-        let fillColor: Color = isCompleted ? .green : (isMissed ? .red.opacity(0.55) : .clear)
-        let strokeColor: Color = isCompleted || isMissed ? fillColor : .secondary.opacity(0.7)
-        return ZStack {
-            Circle()
-                .fill(fillColor)
-                .overlay(Circle().strokeBorder(strokeColor, lineWidth: 1.5))
-            if isCompleted {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.white)
-            } else if isMissed {
-                Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-        }
-        .frame(width: 15, height: 15)
+    /// Takes an `OccurrenceStatus`, not a pair of `Bool`s.
+    ///
+    /// **That signature change is the actual fix.** The old one was
+    /// `(isCompleted: Bool, isMissed: Bool = false)`, and a defaultable
+    /// second flag is something a call site can silently fail to pass —
+    /// which is exactly what happened. A single non-optional status has no
+    /// omittable half, so the bug is unrepresentable rather than merely
+    /// corrected.
+    private func completeCircle(status: OccurrenceStatus, onToggle: @escaping () -> Void) -> some View {
+        BlockStatusCircle(status: status)
         .padding(5)
         .contentShape(Rectangle())
         // `rowView` attaches `dragGesture(for:isLocked:)` — a real
