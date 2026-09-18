@@ -3170,8 +3170,33 @@ final class ScheduleReviewViewModel {
             try? modelContext.save()
             return nil
         }
-        let timeOfDay = calendar.dateComponents([.hour, .minute], from: missedStartTime)
-        guard let start = calendar.date(bySettingHour: timeOfDay.hour ?? 9, minute: timeOfDay.minute ?? 0, second: 0, of: nextDay) else { return nil }
+        // **Window start, not the missed block's time-of-day.**
+        //
+        // REVERSAL. This used to rebuild the block at whatever hour it was
+        // missed at, and that is not merely a preference difference — it
+        // could place a block **outside every window the task is eligible
+        // for**. `nextEligibleDay` returns a day on which *some* rule
+        // applies; reusing the missed hour ignores which. Miss a 9am block
+        // placed by a Mornings rule, land on a day that only has an
+        // Afternoons rule, and the replacement sits at 9am under no rule at
+        // all — where the trim then treats it as a leftover. That is the
+        // correctness argument; "a deferred task should get the front of the
+        // next day" is the product one.
+        //
+        // The rule that made `nextDay` eligible is the one whose window is
+        // used, so the two can never disagree. Falls back to the missed
+        // time-of-day only if no applicable rule can be resolved, which
+        // `nextEligibleDay` having succeeded makes unreachable in practice.
+        let weekday = calendar.component(.weekday, from: nextDay)
+        let applicableRule = (task.shelf?.schedulingRules ?? [])
+            .filter { $0.isEnabled && task.isEffectivelyEligible(for: $0) && $0.effectiveDaysOfWeek.contains(weekday) }
+            .min { lhs, rhs in
+                (lhs.effectiveStartHour, lhs.effectiveStartMinute) < (rhs.effectiveStartHour, rhs.effectiveStartMinute)
+            }
+        let fallback = calendar.dateComponents([.hour, .minute], from: missedStartTime)
+        let startHour = applicableRule?.effectiveStartHour ?? fallback.hour ?? 9
+        let startMinute = applicableRule?.effectiveStartMinute ?? fallback.minute ?? 0
+        guard let start = calendar.date(bySettingHour: startHour, minute: startMinute, second: 0, of: nextDay) else { return nil }
         let end = start.addingTimeInterval(TimeInterval(durationMinutes * 60))
         let block = ScheduledBlock(date: nextDay, startTime: start, endTime: end, task: task, isEstimatedDuration: task.estimatedMinutes <= 0)
         modelContext.insert(block)

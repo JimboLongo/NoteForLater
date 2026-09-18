@@ -1330,6 +1330,73 @@ final class SchedulingEngineTests: XCTestCase {
         XCTAssertEqual(survivingBlocks.count, 1, "a manually placed ineligible block must survive the very next autoPlaceEligibleTasks pass")
     }
 
+    // MARK: - Ripple: deadline and priority protection (cascade)
+
+    /// **The cascade case, and the one the precomputed-obstacle design
+    /// cannot express.**
+    ///
+    /// `insertWithRipple` computes `obstacles` once, before the loop —
+    /// locked / habit / completed. That set cascades correctly, because a
+    /// displaced block re-checks it when picking its new start. Deadline
+    /// protection cannot work that way: whether a block may move depends on
+    /// *where it would land*, which is only known per-iteration.
+    ///
+    /// **Deadline protection only bites at a day boundary.**
+    /// `TaskItem.endOfDueDate` is `startOfDay(dueDate) + 1 day`, so any move
+    /// within the same day keeps a block before its deadline no matter how
+    /// far it slides. The only displacement that can breach one is the
+    /// overflow branch — `pushToNextEligibleDay`, which moves the block to
+    /// another day entirely. That is where the check belongs, and this
+    /// fixture drives the chain into exactly that branch.
+    ///
+    /// Chain: the incoming deferred block takes 23:00, displacing A into
+    /// B's slot, which displaces B past midnight. B is due today, so moving
+    /// it to tomorrow puts it past its deadline — it must stay put.
+    func test_ripple_doesNotDisplaceADeadlineBlockPastItsDueDate() async throws {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let day = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+
+        func block(_ title: String, startHour: Int, startMinute: Int, minutes: Int, dueToday: Bool = false) -> ScheduledBlock {
+            let task = TaskItem(title: title, shelf: shelf, estimatedMinutes: minutes)
+            task.setEligible(true, for: rule)
+            if dueToday { task.dueDate = day }
+            context.insert(task)
+            let start = calendar.date(bySettingHour: startHour, minute: startMinute, second: 0, of: day)!
+            let b = ScheduledBlock(date: day, startTime: start, endTime: start.addingTimeInterval(TimeInterval(minutes * 60)), task: task)
+            context.insert(b)
+            task.scheduledBlocks = [b]
+            task.isScheduled = true
+            return b
+        }
+
+        let a = block("A", startHour: 23, startMinute: 0, minutes: 30)
+        let b = block("B due today", startHour: 23, startMinute: 30, minutes: 30, dueToday: true)
+        let bTask = try XCTUnwrap(b.task)
+        XCTAssertEqual(calendar.startOfDay(for: try XCTUnwrap(bTask.dueDate)), day, "B is due on the day it currently sits")
+
+        // The deferred block arrives at 23:00, the same slot A holds.
+        let deferredTask = TaskItem(title: "Deferred", shelf: shelf, estimatedMinutes: 30)
+        deferredTask.setEligible(true, for: rule)
+        context.insert(deferredTask)
+        let incomingStart = calendar.date(bySettingHour: 23, minute: 0, second: 0, of: day)!
+        let incoming = ScheduledBlock(date: day, startTime: incomingStart, endTime: incomingStart.addingTimeInterval(1800), task: deferredTask)
+        context.insert(incoming)
+
+        RippleSchedulingService.insertWithRipple(incoming, context: context)
+
+        // A may move freely — it has no deadline.
+        XCTAssertEqual(calendar.startOfDay(for: a.date), day, "A has no deadline and stays on the day, wherever it lands")
+
+        XCTAssertEqual(
+            calendar.startOfDay(for: b.date), day,
+            """
+            B was displaced past midnight onto another day, which puts it \
+            past its own due date. A block up against its deadline must not \
+            be moved off its day to make room for a deferred task — the \
+            deferred task goes after it instead.
+            """
+        )
+    }
 
     /// **A rule must not trim another shelf's blocks.**
     ///
@@ -1733,28 +1800,140 @@ final class SchedulingEngineTests: XCTestCase {
 
     // MARK: - ScheduleReviewViewModel.guaranteePlacement
 
-
-
-
     /// The Nightly Review hook's own entry point: an incomplete task is
-    /// rebuilt on its next eligible day at the same time-of-day it was
-    /// missed at, and marked `isScheduled` so the general regenerate
-    /// walk's own `!$0.isScheduled` filter leaves it alone afterward.
-    func test_guaranteePlacement_rebuildsBlockOnNextEligibleDayAndMarksScheduled() async throws {
-        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
-        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 15, isDivisible: false, minimumSegmentMinutes: 0)
+    /// rebuilt on its next eligible day **at the start of that day's own
+    /// eligible window**, and marked `isScheduled` so the general regenerate
+    /// walk's `!$0.isScheduled` filter leaves it alone afterward.
+    ///
+    /// **REVERSAL.** This asserted `timeOfDay.hour == 14` — "the rebuilt
+    /// block keeps the missed block's own time-of-day" — and was the single
+    /// test pinning that behavior (confirmed by sabotage: removing the
+    /// preservation failed exactly this one). Rewritten rather than deleted,
+    /// because the expectation is inverted, not removed.
+    ///
+    /// The old behavior was not merely a different preference. Reusing the
+    /// missed hour ignores *which* rule made the next day eligible, so it
+    /// could place a block outside every window its task is eligible for —
+    /// see `test_guaranteePlacement_neverLandsOutsideAnEligibleWindow`,
+    /// which is the correctness half of this change.
+    func test_guaranteePlacement_rebuildsBlockAtTheStartOfTheNextEligibleWindow() async throws {
+        let shelf = Shelf(name: "Test Shelf")
+        context.insert(shelf)
+        let schedule = NamedSchedule(name: "Afternoons", daysOfWeek: [1, 2, 3, 4, 5, 6, 7], startHour: 12, startMinute: 0, endHour: 17, endMinute: 0)
+        context.insert(schedule)
+        let rule = SchedulingRule(shelf: shelf, fillStrategy: .fillToFit)
+        rule.namedSchedule = schedule
+        context.insert(rule)
+        shelf.schedulingRules = [rule]
+        let task = TaskItem(title: "Test Task", shelf: shelf, estimatedMinutes: 15)
+        task.setEligible(true, for: rule)
+        context.insert(task)
+
         let missedDay = day(2026, 1, 5)
-        let missedStart = calendar.date(bySettingHour: 14, minute: 0, second: 0, of: missedDay)!
+        let missedStart = calendar.date(bySettingHour: 13, minute: 30, second: 0, of: missedDay)!
 
         let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: missedDay)
         viewModel.guaranteePlacement(for: task, missedDate: missedDay, missedStartTime: missedStart, durationMinutes: 15)
 
         XCTAssertTrue(task.isScheduled, "a guaranteed placement must mark the task scheduled so the general walk doesn't also try to place it")
-        let newBlock = (task.scheduledBlocks ?? []).first
-        XCTAssertNotNil(newBlock, "guaranteePlacement must actually create a block, not just flag the task")
-        XCTAssertFalse(calendar.isDate(newBlock?.date ?? missedDay, inSameDayAs: missedDay), "the rebuilt block must land on a day after the one it was missed on")
-        let timeOfDay = calendar.dateComponents([.hour, .minute], from: newBlock?.startTime ?? missedStart)
-        XCTAssertEqual(timeOfDay.hour, 14, "the rebuilt block keeps the missed block's own time-of-day")
+        let newBlock = try XCTUnwrap((task.scheduledBlocks ?? []).first, "guaranteePlacement must actually create a block, not just flag the task")
+        XCTAssertFalse(calendar.isDate(newBlock.date, inSameDayAs: missedDay), "the rebuilt block must land on a day after the one it was missed on")
+
+        let timeOfDay = calendar.dateComponents([.hour, .minute], from: newBlock.startTime)
+        XCTAssertEqual(timeOfDay.hour, 12, "the rebuilt block takes the start of the eligible window, not the 13:30 it was missed at")
+        XCTAssertEqual(timeOfDay.minute, 0)
+    }
+
+    /// **The correctness property, and the lead test for this change.**
+    ///
+    /// A replacement must never land outside every window its task is
+    /// eligible for. The old time-of-day behavior could do exactly that:
+    /// `nextEligibleDay` returns a day on which *some* rule applies, and
+    /// reusing the missed hour ignores which one.
+    ///
+    /// Two rules, disjoint days and disjoint hours — Mornings on Monday,
+    /// Afternoons on Tuesday. A block missed on Monday morning has no
+    /// business reappearing at 9am on a Tuesday that only has an afternoon
+    /// window.
+    func test_guaranteePlacement_neverLandsOutsideAnEligibleWindow() async throws {
+        let shelf = Shelf(name: "Test Shelf")
+        context.insert(shelf)
+        let mornings = NamedSchedule(name: "Mornings", daysOfWeek: [2], startHour: 9, startMinute: 0, endHour: 12, endMinute: 0)
+        let afternoons = NamedSchedule(name: "Afternoons", daysOfWeek: [3], startHour: 13, startMinute: 0, endHour: 17, endMinute: 0)
+        context.insert(mornings)
+        context.insert(afternoons)
+        let morningRule = SchedulingRule(shelf: shelf, fillStrategy: .fillToFit)
+        morningRule.namedSchedule = mornings
+        let afternoonRule = SchedulingRule(shelf: shelf, fillStrategy: .fillToFit)
+        afternoonRule.namedSchedule = afternoons
+        context.insert(morningRule)
+        context.insert(afternoonRule)
+        shelf.schedulingRules = [morningRule, afternoonRule]
+
+        let task = TaskItem(title: "Morning Task", shelf: shelf, estimatedMinutes: 30)
+        task.setEligible(true, for: morningRule)
+        task.setEligible(true, for: afternoonRule)
+        context.insert(task)
+
+        // A Monday, missed at 9am under the Mornings rule.
+        var monday = calendar.startOfDay(for: day(2026, 1, 5))
+        while calendar.component(.weekday, from: monday) != 2 {
+            monday = calendar.date(byAdding: .day, value: 1, to: monday)!
+        }
+        let missedStart = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: monday)!
+
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: monday)
+        viewModel.guaranteePlacement(for: task, missedDate: monday, missedStartTime: missedStart, durationMinutes: 30)
+
+        let newBlock = try XCTUnwrap((task.scheduledBlocks ?? []).first)
+        let weekday = calendar.component(.weekday, from: newBlock.date)
+        let landed = calendar.dateComponents([.hour, .minute], from: newBlock.startTime)
+
+        let fitsSomeWindow = shelf.schedulingRules!.contains { rule in
+            guard rule.effectiveDaysOfWeek.contains(weekday) else { return false }
+            let minutes = (landed.hour ?? 0) * 60 + (landed.minute ?? 0)
+            let start = rule.effectiveStartHour * 60 + rule.effectiveStartMinute
+            let end = rule.effectiveEndHour * 60 + rule.effectiveEndMinute
+            return minutes >= start && minutes < end
+        }
+        XCTAssertTrue(
+            fitsSomeWindow,
+            """
+            Landed at \(landed.hour ?? -1):\(String(format: "%02d", landed.minute ?? 0)) on weekday \(weekday), \
+            which no enabled rule's window covers. Keeping the missed hour \
+            strands the block under no rule at all, where the trim then \
+            treats it as a leftover.
+            """
+        )
+    }
+
+    /// A high-priority block is not shoved aside by a deferred task — the
+    /// deferred one goes after it. Unlike the deadline case this *is* a
+    /// static property of the block, so it joins the precomputed obstacle
+    /// set alongside locked/habit/completed.
+    func test_ripple_doesNotDisplaceAHighPriorityBlock() async throws {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let dayOf = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 3, to: .now)!)
+
+        let important = TaskItem(title: "Important", shelf: shelf, estimatedMinutes: 30)
+        important.priority = .high
+        important.setEligible(true, for: rule)
+        context.insert(important)
+        let start = calendar.date(bySettingHour: 12, minute: 0, second: 0, of: dayOf)!
+        let importantBlock = ScheduledBlock(date: dayOf, startTime: start, endTime: start.addingTimeInterval(1800), task: important)
+        context.insert(importantBlock)
+        important.scheduledBlocks = [importantBlock]
+
+        let deferred = TaskItem(title: "Deferred", shelf: shelf, estimatedMinutes: 30)
+        deferred.setEligible(true, for: rule)
+        context.insert(deferred)
+        let incoming = ScheduledBlock(date: dayOf, startTime: start, endTime: start.addingTimeInterval(1800), task: deferred)
+        context.insert(incoming)
+
+        RippleSchedulingService.insertWithRipple(incoming, context: context)
+
+        XCTAssertEqual(importantBlock.startTime, start, "a high-priority block holds its slot")
+        XCTAssertGreaterThanOrEqual(incoming.startTime, importantBlock.endTime, "the deferred task goes after it, not in front")
     }
 
     // MARK: - Unplaced reasons — one coarse explanation per task per walk

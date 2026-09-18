@@ -1524,7 +1524,17 @@ final class TaskItem {
     /// it, and the derived reset clears it) and gets no `ScheduledBlock`. A
     /// *missed occurrence* is the real recurring failure mode, and
     /// `RecurringTaskLog`/`PushedRecurringOccurrence` already cover it.
-    private func endOfDueDate(calendar: Calendar) -> Date? {
+    /// `internal`, not `private` — `RippleSchedulingService` needs to ask
+    /// whether a *proposed* move would land past this, which neither
+    /// `slack(asOf:)` nor `atRiskBlocker()` can answer. `slack` measures
+    /// **unplaced** work, so a fully-placed block reads healthy wherever it
+    /// sits; `atRiskBlocker` asks about a block's *current* position, not a
+    /// hypothetical one.
+    ///
+    /// Day-granular by construction (start of the day after `dueDate`), and
+    /// that is load-bearing: no move *within* a day can ever breach a
+    /// deadline, so only a relocation to another day needs checking.
+    func endOfDueDate(calendar: Calendar) -> Date? {
         guard !isRecurring else { return nil }
         guard let dueDate else { return nil }
         return calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: dueDate))
