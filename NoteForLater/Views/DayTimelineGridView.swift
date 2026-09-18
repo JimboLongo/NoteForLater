@@ -844,32 +844,40 @@ struct DayTimelineGridView: View {
                     VStack(spacing: 6) {
                         ForEach(visible) { task in
                             Button {
-                                task.setCompleted(!task.isCompleted, in: modelContext)
+                                // `TaskItem.cycleCompletion` — the same
+                                // shared `cycledExcludingExcused` cycle
+                                // Nightly Review's own 2-Minute row uses
+                                // (there, wrapped by `TwoMinutePushState`).
+                                // Was a plain `setCompleted(!isCompleted)`
+                                // two-state toggle, which is why `.missed`
+                                // could be reached in Nightly Review and
+                                // then not be expressible here.
+                                //
+                                // **Deliberately not wrapped in
+                                // `TwoMinutePushState`** — see
+                                // `twoMinuteStatusCircle` for why the push
+                                // is Nightly-Review-only.
+                                task.cycleCompletion(in: modelContext)
                             } label: {
                                 HStack(spacing: 10) {
-                                    // Same checkmark-circle look
-                                    // `DayTimelineSegment.completeCircle`
-                                    // uses for a calendar block.
-                                    ZStack {
-                                        Circle()
-                                            .fill(task.isCompleted ? Color.green : Color.clear)
-                                            .overlay(Circle().strokeBorder(task.isCompleted ? Color.green : Color.secondary.opacity(0.7), lineWidth: 1.5))
-                                        if task.isCompleted {
-                                            Image(systemName: "checkmark")
-                                                .font(.system(size: 8, weight: .bold))
-                                                .foregroundStyle(.white)
-                                        }
-                                    }
-                                    .frame(width: 15, height: 15)
+                                    twoMinuteStatusCircle(status: task.status)
                                     Text(task.title)
+                                        // Strikethrough stays tied to
+                                        // completion specifically, not
+                                        // missed — same rule as
+                                        // `occurrenceRow` and
+                                        // `OverdueBlocksReviewList.habitRow`:
+                                        // crossed-out reads as "done", which
+                                        // missed is not. The circle alone
+                                        // carries that distinction.
                                         .foregroundStyle(.primary)
-                                        .strikethrough(task.isCompleted)
+                                        .strikethrough(task.status == .complete)
                                     Spacer()
                                 }
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            .opacity(task.isCompleted ? 0.5 : 1)
+                            .opacity(task.status == .none ? 1 : 0.5)
                         }
                     }
                 }
@@ -880,6 +888,53 @@ struct DayTimelineGridView: View {
                 .padding(.bottom, 10)
             }
         }
+    }
+
+    /// Three-state circle for a 2-Minute task row — same green-check /
+    /// red-X / empty-outline scheme as `DayTimelineSegment.completeCircle`
+    /// and `OverdueBlocksReviewList.habitSelectionCircle`, at this list's
+    /// own smaller 15pt size.
+    ///
+    /// **Why `.missed` here does NOT push the task to tomorrow**, unlike
+    /// Nightly Review's 2-Minute step (see `TwoMinutePushState`):
+    ///
+    /// The push works by setting `startDate` to tomorrow, and this list
+    /// filters on `isEligibleToStart(on: targetDate)` — the very same
+    /// mechanism. So a push here would make the row **vanish on the tap that
+    /// marked it**, with no trace of what happened and no way back: cycling
+    /// past `.missed` is how you undo a push, and you cannot cycle a row
+    /// that is no longer drawn.
+    ///
+    /// Nightly Review does not have that problem because its list is
+    /// *frozen* on step entry (`twoMinuteReviewTaskIDs`), so a pushed task
+    /// stays on screen, struck through, for the rest of the session — which
+    /// is exactly what makes the push safe to apply there.
+    ///
+    /// So the two surfaces mean different things by a missed 2-minute task,
+    /// and that is the honest split rather than an inconsistency to iron
+    /// out: `.missed` is a *status* ("not doing this now"), while the push
+    /// is a Nightly-Review scheduling action serving that step's engagement
+    /// timer. `TwoMinutePushState` already models the push as a wrapper
+    /// around `cycleCompletion` rather than part of it, so declining to wrap
+    /// it here uses an existing seam instead of cutting a new one.
+    private func twoMinuteStatusCircle(status: OccurrenceStatus) -> some View {
+        let fillColor: Color = status == .complete ? .green : (status == .missed ? .red.opacity(0.55) : .clear)
+        let strokeColor: Color = status == .none ? .secondary.opacity(0.7) : fillColor
+        return ZStack {
+            Circle()
+                .fill(fillColor)
+                .overlay(Circle().strokeBorder(strokeColor, lineWidth: 1.5))
+            if status == .complete {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white)
+            } else if status == .missed {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+        }
+        .frame(width: 15, height: 15)
     }
 
     /// Every state routes through `Habit.cycleOccurrence` — the same
