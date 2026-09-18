@@ -2948,12 +2948,32 @@ struct TaskReviewCard: View {
         previewedShelf?.effectiveTracksDueDates ?? true
     }
 
-    /// Same idea as `dueDatesAllowed`, for Duration and Divisible —
-    /// shelf-level only (greyed, not hidden, since the preview could
-    /// still be cancelled). Both flavors of the "Time" row (recurring and
-    /// non-recurring) share this same gate.
+    /// Whether the Duration wheel is *interactive*.
+    ///
+    /// **Derived from `CardRow`, not from a second shelf lookup.** This read
+    /// `previewedShelf?.effectiveTracksDuration` directly, which is the same
+    /// question `CardRow.duration` answers — and the two disagreed on exactly
+    /// one shelf: the 2-Minute shelf, where `CardRow` returns `.shown` via
+    /// `durationIsTheDestinationTrigger` while `tracksDuration` is off. The
+    /// row rendered and the wheel was dead.
+    ///
+    /// That broke the moment Duration became the 2-Minute trigger
+    /// (`de27686`): selecting "≤2 min" moves the preview onto the 2-Minute
+    /// shelf, so the wheel disabled itself under the user's finger — and
+    /// "≤2 min" is the *first* option on the wheel, so an unanswered task
+    /// died on the first notch of its first scroll.
+    ///
+    /// `CardRow.duration`'s own comment already states the rule this now
+    /// obeys: "`.shown`, not `.greyed`: it has to stay *editable*, because
+    /// raising the duration is the way off this shelf." The rule was right;
+    /// only the rendering disagreed.
+    ///
+    /// `== .shown` rather than `!= .hidden` on purpose: `.greyed` means
+    /// visible-but-not-answerable, which is precisely a disabled control.
+    /// Nothing produces `.greyed` today, so this is the definition that
+    /// stays correct if something ever does.
     private var durationAllowed: Bool {
-        previewedShelf?.effectiveTracksDuration ?? true
+        CardRow.duration.visibility(task: task, shelf: previewedShelf) == .shown
     }
 
     /// Instance wrappers around the `static` configured-checks above,
@@ -2992,8 +3012,24 @@ struct TaskReviewCard: View {
         Self.isDivisibleConfigured(task: task, shelf: previewedShelf)
     }
 
+    /// Same `CardRow`-derived treatment as `durationAllowed` above.
+    /// `CardRow.divisible` already encodes every condition this composed by
+    /// hand (`recurringAndUntimed`, the shelf's `tracksDuration`, the
+    /// 60-minute floor, and a segment size that evenly divides), so
+    /// re-assembling them here was a second copy of the rule that could
+    /// drift from the first — which is exactly what happened to Duration.
     private var showsDivisibleRow: Bool {
-        durationAllowed && Self.showsDivisibleRow(task: task)
+        CardRow.divisible.visibility(task: task, shelf: previewedShelf) != .hidden
+    }
+
+    /// Divisible's own interactivity gate. Previously shared
+    /// `durationAllowed`, which now means something narrower — and the two
+    /// rows have genuinely different rules (Divisible hides on a
+    /// non-tracking shelf where Duration is only disabled), so sharing one
+    /// flag between them is what let Duration's fix silently change
+    /// Divisible.
+    private var divisibleAllowed: Bool {
+        CardRow.divisible.visibility(task: task, shelf: previewedShelf) == .shown
     }
 
     private var showsDurationRow: Bool {
@@ -3138,10 +3174,10 @@ struct TaskReviewCard: View {
             .clipped()
         }
         .padding(.top, 4)
-        .disabled(!durationAllowed)
-        .opacity(durationAllowed ? 1 : 0.4)
+        .disabled(!divisibleAllowed)
+        .opacity(divisibleAllowed ? 1 : 0.4)
         .animation(.easeInOut(duration: 0.15), value: task.divisiblePicked)
-        .animation(.easeInOut(duration: 0.15), value: durationAllowed)
+        .animation(.easeInOut(duration: 0.15), value: divisibleAllowed)
     }
 
     /// Same pairing discipline as `durationWheelSelection`, routed

@@ -566,15 +566,88 @@ final class RecurringTaskCardRenderTests: XCTestCase {
     /// all** — no baseline used a 2-Minute shelf, so removing the hardcoding
     /// could have altered that card arbitrarily and every fixture would
     /// still have matched. Exactly the gap that let earlier changes through.
+    /// **`tracksDuration = false` is not incidental — it is what the real
+    /// 2-Minute shelf actually stores**, and leaving it at the `true`
+    /// default made this fixture model a configuration that exists nowhere.
+    /// The wheel rendered enabled and full-opacity in the baseline while the
+    /// real card rendered it faded and dead, so the fixture named after this
+    /// shelf could not fail on the one bug specific to it.
     func test_twoMinuteShelf_render() throws {
         let task = makeFullTailTask(recurring: false)
         let shelf = task.shelf!
         shelf.isTwoMinuteTasks = true
+        shelf.tracksDuration = false
         shelf.hasDueDates = false
         shelf.hasPriority = false
         shelf.tracksTags = false
         TaskItem.selectDuration(2, on: task)
         try renderCard(task, to: "two_minute_shelf")
+    }
+
+    /// **Why no render baseline could have caught the dead Duration wheel,
+    /// stated as an assertion rather than left as a belief.**
+    ///
+    /// I expected the corrected `two_minute_shelf` fixture to catch it: the
+    /// wheel was `.disabled` *and* `.opacity(0.4)`, and a fade is visible.
+    /// Sabotaging `durationAllowed` back to the broken definition left every
+    /// baseline green anyway. The reason is this: a reopened task seeds at
+    /// most one expanded row (`initialExpandedRow` — the first *unconfigured*
+    /// one), every fixture answers Duration, so the Duration row is collapsed
+    /// in all six baselines and the wheel is not in the view tree at all.
+    ///
+    /// So the limit is sharper than "a dead control renders like a live one":
+    /// **the control is not rendered.** Any bug living inside an expandable
+    /// row's body is invisible to this suite for every fixture that answers
+    /// that row — which is most of them, because the fixtures are deliberately
+    /// fully-populated worst cases.
+    ///
+    /// This fails if a fixture ever does seed Duration open, which is the
+    /// moment the statement above stops being true and the coverage claim
+    /// needs rewriting.
+    func test_noFixtureRendersTheDurationWheel_soItsEnabledStateIsUncovered() throws {
+        let task = makeFullTailTask(recurring: false)
+        let shelf = task.shelf!
+        shelf.isTwoMinuteTasks = true
+        shelf.tracksDuration = false
+        TaskItem.selectDuration(2, on: task)
+
+        let expanded = TaskReviewCard.initialExpandedRows(
+            task: task,
+            shelf: shelf,
+            segmentOptions: TaskItem.validSegmentOptions(for: task.estimatedMinutes),
+            isNewlyCreated: false
+        )
+        XCTAssertFalse(
+            expanded.contains(.duration),
+            """
+            Duration now seeds open, so the wheel IS rendered and this suite \
+            can cover its enabled state. Update the coverage note above.
+            """
+        )
+    }
+
+    /// **The two sources of truth genuinely disagree on this shelf, and that
+    /// is the whole hazard.** `CardRow.duration` says `.shown` (Duration is
+    /// the control that selects this shelf, so it must stay editable);
+    /// `effectiveTracksDuration` says false. Anything that derives the
+    /// wheel's *enabled* state from the second rather than the first renders
+    /// a visible, dead control — which is exactly what happened once
+    /// selecting "≤2 min" started moving the preview here.
+    ///
+    /// Pinned as a disagreement rather than as "Duration is shown", because
+    /// the shown-ness alone was already asserted and did not catch it.
+    func test_durationStaysShownOnTheTriggerShelf_evenThoughTheShelfDoesNotTrackIt() throws {
+        let task = makeFullTailTask(recurring: false)
+        let shelf = task.shelf!
+        shelf.isTwoMinuteTasks = true
+        shelf.tracksDuration = false
+        TaskItem.selectDuration(2, on: task)
+
+        XCTAssertFalse(shelf.effectiveTracksDuration, "the real 2-Minute shelf stores tracksDuration = false")
+        XCTAssertEqual(
+            CardRow.duration.visibility(task: task, shelf: shelf), .shown,
+            "Duration must stay editable here — raising it is the only way off this shelf"
+        )
     }
 
     /// Duration must never be `.hidden` on the shelf its own value selects —
