@@ -208,13 +208,28 @@ struct DayTimelineGridView: View {
     @State private var morningHasCollapsedGap = false
     @State private var afternoonHasCollapsedGap = false
     @State private var singleHasCollapsedGap = false
-    /// Bumped by `toggleHabitOccurrence` right after it mutates a
-    /// `HabitLog` — a plain `@State` write always forces this view's
-    /// `body` to re-run, which is what actually guarantees the tapped
-    /// row's checkmark/fade/strikethrough shows up the instant you tap it
-    /// rather than waiting on SwiftData's own change notification for a
-    /// freshly-inserted (today's first occurrence toggled) or otherwise
-    /// not-directly-`@Query`'d `HabitLog` to propagate.
+    /// Bumped by `toggleHabitOccurrence` and `cycleRecurringTaskOccurrence`
+    /// right after each mutates a `HabitLog`/`RecurringTaskLog` — neither is
+    /// queried by this view or its parent, so nothing else guarantees the
+    /// tapped row's circle updates on the tap that caused it.
+    ///
+    /// ⚠️ **It must be READ in `body` (see the read just below `body`'s
+    /// opening) or it does nothing at all.** The original version of this
+    /// comment asserted that "a plain `@State` write always forces this
+    /// view's `body` to re-run" and the tick was never read anywhere. That
+    /// premise is wrong: SwiftUI records a dependency when a view actually
+    /// reads the value, so an unread tick is an inert write.
+    ///
+    /// **This was measured, not reasoned about.** With the tick bumped in
+    /// both handlers, habit taps re-rendered (`bodies=1`) and recurring-task
+    /// taps did not (`bodies=0`, three taps out of three). The tick cannot
+    /// explain that difference — but the query path can, and does: a
+    /// `HabitLog` write reaches `Habit` through the `HabitLog.habit`
+    /// relationship, which the parent's `@Query allHabits` observes, while
+    /// `RecurringTaskLog` keys by a plain `taskID: UUID` and is observed by
+    /// nothing. So habits were being saved by the relationship (exactly as
+    /// documented in the Nightly Review audit in docs/session-handoff.md),
+    /// and recurring tasks had no mechanism at all.
     @State private var habitOccurrenceRefreshTick = 0
     @Environment(\.modelContext) private var modelContext
 
@@ -575,6 +590,12 @@ struct DayTimelineGridView: View {
 
     @ViewBuilder
     var body: some View {
+        // **The read that makes the tick work.** Without it SwiftUI records
+        // no dependency on `habitOccurrenceRefreshTick`, every bump is inert,
+        // and a recurring-task tap redraws nothing — see that property's own
+        // comment for the measurement. Reading it here, before the occurrence
+        // lists are built, covers every row those lists feed.
+        let _ = habitOccurrenceRefreshTick
         // Computed once here — feeds both `occurrenceLists` (all three
         // modes) and `displayRows` below, rather than each of the four
         // re-running `ScheduleReviewViewModel.carriedForwardRecurringTaskIDs`'s
@@ -860,7 +881,6 @@ struct DayTimelineGridView: View {
             }
         }
     }
-
 
     /// Every state routes through `Habit.cycleOccurrence` — the same
     /// four-state cycle (`.none` → `.complete` → `.missed` → `.excused` →

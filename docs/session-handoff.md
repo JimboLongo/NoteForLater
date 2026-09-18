@@ -219,7 +219,10 @@ every test still green.
   `Habit.cycleOccurrence`'s own block mirror is **not** a second line of
   defence: the store holds **zero** habit `ScheduledBlock`s, so the
   relationship is the only live mechanism.
-  **Now covered** by `habitOccurrenceRefreshTick`, plus a ⚠️ on
+  **Also confirmed live on the day calendar**, where the same relationship
+  was the only thing making habit taps redraw while recurring-task taps
+  redrew nothing at all — see the ✅ box further down.
+  **Now covered** by `recurringOccurrenceRefreshTick`, plus a ⚠️ on
   `HabitLog.habit` itself so the warning sits where the tidy-up would be
   made. The tick is a deliberate no-op today — its entire value is
   conditional on a change nobody has made yet, which is the point: it
@@ -1005,14 +1008,47 @@ duplicate *appears* in day view, not just a static dump at load time.
 
 ### Split `DayTimelineGridView` / `NightlyReviewView` — genuinely structural, deliberately deferred
 
+> ## ✅ SOLVED — the recurring-task tap lag was real, and was not a perf problem
+>
+> **Cause: `habitOccurrenceRefreshTick` was written but never read.** An
+> unread `@State` is an inert write — SwiftUI records a dependency when a
+> view *reads* the value — so every bump invalidated nothing, and a
+> recurring-task tap redrew nothing. The row sat unchanged until something
+> unrelated forced a body pass. Fixed by reading it in `body`.
+>
+> Measured before: `bodies=0` on three taps out of three. After:
+> `bodies=1` on six out of six, commit at 32–50ms.
+>
+> **Why the investigation below missed it, which is the part worth
+> keeping.** It measured *within* a body pass — fetch counts, fetch
+> timing, write timing — and a body pass did occur near each tap, so the
+> path looked clean. But a body pass happening *near* a tap is not the
+> same as one *caused by* it, and nothing in that round distinguished the
+> two. The probe that settles it is a per-tap body counter reset at
+> handler entry: `bodies=N` attributable to that tap alone. The write path
+> really was innocent; the conclusion "not reproduced" was wrong.
+>
+> **And the tick's presence was not evidence it worked.** Checking that a
+> refresh tick exists is not checking that it is read — the same class of
+> mistake as a check that is blind to the property in question. Grep for
+> the read, not the declaration.
+>
+> The three habit-related invalidation findings (the `HabitLog.habit`
+> relationship carrying habits by accident, and the audit of every tap
+> handler) are recorded in the "a render baseline cannot observe whether a
+> live view invalidates" entry above. The structural-split case below
+> stands on its own merits and is unaffected.
+
 **Perf investigation: instrumented on-device, not reproduced — record
-this as a failed reproduction, not an open hypothesis.** The reported
-symptom was a ~3 second lag tapping a recurring task occurrence on the day
-calendar (habit occurrences on the same screen felt instant). The leading
-hypothesis — recurring tasks doing a per-task, uncached `RecurringTaskLog`
-fetch inside `openRecurringTaskOccurrences`, amplified by the same
-over-invalidation problem this entry describes — was **contradicted, not
-confirmed**, by real measurement:
+this as a failed reproduction, not an open hypothesis.** *(Superseded by
+the box above — kept because its measurements are still accurate and its
+reasoning about what they did and did not cover is the lesson.)* The
+reported symptom was a ~3 second lag tapping a recurring task occurrence on
+the day calendar (habit occurrences on the same screen felt instant). The
+leading hypothesis — recurring tasks doing a per-task, uncached
+`RecurringTaskLog` fetch inside `openRecurringTaskOccurrences`, amplified by
+the same over-invalidation problem this entry describes — was
+**contradicted, not confirmed**, by real measurement:
 
 - Recurring-task tap: **1 body pass**, **7 `RecurringTaskLog` fetches**,
   **22–29ms** total (tap-handler entry through the body pass computing the
