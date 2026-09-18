@@ -543,6 +543,23 @@ struct HabitStats {
 @Model
 final class HabitLog {
     var id: UUID
+    /// ⚠️ **Load-bearing for UI refresh, not just for traversal — do not
+    /// "tidy" this to a plain `habitID: UUID`.**
+    ///
+    /// `RecurringTaskLog` is this type's sibling, deliberately kept parallel,
+    /// and it *does* key by a plain `taskID: UUID`. The two differing for no
+    /// visible reason makes matching them look like obvious cleanup. It is
+    /// not: being a real relationship is what makes a log write reach `Habit`,
+    /// which is what lets `@Query allHabits` observe it, which is the only
+    /// reason habit rows redraw when tapped.
+    ///
+    /// `RecurringTaskLog` has no such relationship, and that is exactly why
+    /// recurring-task rows silently stopped redrawing once the last
+    /// `ScheduledBlock` mirror was deleted — the write was always correct, the
+    /// screen just never updated. `NightlyReviewView.habitOccurrenceRefreshTick`
+    /// now covers the habit side explicitly, so this change would no longer be
+    /// silent there; nothing has audited every *other* habit surface for the
+    /// same dependency.
     var habit: Habit?
     var date: Date
     var completedOccurrences: [Int] = []

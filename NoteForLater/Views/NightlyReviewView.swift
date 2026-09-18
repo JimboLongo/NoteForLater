@@ -158,6 +158,26 @@ struct NightlyReviewView: View {
     /// relying on a side effect of a data write is exactly what broke here,
     /// and a future deletion could take it away again just as silently.
     @State private var recurringOccurrenceRefreshTick = 0
+    /// The habit counterpart, added for a different reason: **habits are not
+    /// broken — they work by accident, and this makes the invalidation
+    /// deliberate.**
+    ///
+    /// `Habit.cycleOccurrence` writes a `HabitLog`, which this view does not
+    /// query. It refreshes anyway because `HabitLog.habit` is a real
+    /// `Habit?` relationship, so the write reaches an entity
+    /// `@Query allHabits` *does* observe. That is the whole mechanism.
+    ///
+    /// `RecurringTaskLog` is the sibling type, deliberately kept parallel to
+    /// `HabitLog`, and its key is a plain `taskID: UUID`. The two differ on
+    /// precisely the field that decides whether this screen redraws — so
+    /// tidying them to match, which is the obvious cleanup because they
+    /// otherwise differ for no visible reason, would break habit rows exactly
+    /// the way recurring-task rows broke, with every test still green.
+    ///
+    /// Nor is `Habit.cycleOccurrence`'s own `ScheduledBlock` mirror a second
+    /// line of defence: the store holds **zero** habit blocks, so that branch
+    /// never runs and the relationship is the only live mechanism.
+    @State private var habitOccurrenceRefreshTick = 0
 
     private let calendarService: CalendarServiceProtocol = GoogleCalendarService()
     private let schedulingService: AISchedulingServiceProtocol = MockAISchedulingService()
@@ -1253,7 +1273,12 @@ struct NightlyReviewView: View {
     /// freezing that call too would remove the filter's protection, not
     /// just its display twitchiness.
     private var openHabitOccurrencesForReview: [HabitReviewOccurrence] {
-        ScheduleReviewViewModel.refreshedHabitReviewOccurrences(frozen: frozenTodayHabitOccurrences, context: modelContext)
+        // Read for the same reason as in
+        // `openRecurringTaskOccurrencesForReview` — this is the list whose
+        // freshness the tick exists to guarantee, and an unread tick reads as
+        // dead state to the next person refactoring here.
+        _ = habitOccurrenceRefreshTick
+        return ScheduleReviewViewModel.refreshedHabitReviewOccurrences(frozen: frozenTodayHabitOccurrences, context: modelContext)
     }
 
     /// This view's own display-facing wrapper around
@@ -1284,6 +1309,11 @@ struct NightlyReviewView: View {
         let calendar = Calendar.current
         let day = calendar.startOfDay(for: occurrence.targetTime)
         occurrence.habit.cycleOccurrence(occurrence.index, on: day, context: modelContext, calendar: calendar)
+        // Belt to the relationship's braces — see
+        // `habitOccurrenceRefreshTick`. Redundant today and deliberately so:
+        // it is what keeps this row redrawing if `HabitLog.habit` ever stops
+        // being a relationship.
+        habitOccurrenceRefreshTick += 1
         HabitStatsRefreshCoordinator.shared.habitLogsChanged()
     }
 

@@ -219,6 +219,14 @@ every test still green.
   `Habit.cycleOccurrence`'s own block mirror is **not** a second line of
   defence: the store holds **zero** habit `ScheduledBlock`s, so the
   relationship is the only live mechanism.
+  **Now covered** by `habitOccurrenceRefreshTick`, plus a ⚠️ on
+  `HabitLog.habit` itself so the warning sits where the tidy-up would be
+  made. The tick is a deliberate no-op today — its entire value is
+  conditional on a change nobody has made yet, which is the point: it
+  converts a silent future break into no break at all. Scoped to Nightly
+  Review; **no other habit surface has been audited for the same
+  dependency**, and `HabitsView`/`HabitDetailView` are the obvious next
+  places to look if this is ever picked up.
 - **2-Minute task** — invalidated by a query its rows are not read from.
   Rows come from `allShelves` → `shelf.tasks`; the write is to
   `TaskItem.status`, observed by `allTasks`, which this step does not
