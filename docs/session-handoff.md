@@ -173,6 +173,108 @@ card body has had three restructuring passes already, and this would be a
 fourth to convert a *caught* problem into a *prevented* one. Scoped as
 larger than the problem it prevents.
 
+**Testing practice, general — the gap that hides a bug for a month is not
+a missing assertion, it is a missing *fixture shape*. A suite whose
+fixtures all share one configuration cannot fail on a bug that needs a
+different one, no matter how many assertions it carries.**
+
+`trimOverflowingRuleBlocks` builds `applicableRules` from **every shelf's**
+rules and matched blocks on the time window alone. Two shelves sharing one
+`NamedSchedule` is all it takes: "Work - Afternoons" (12:00–17:00)
+attached to both a Personal rule and a Work rule meant the Work rule
+picked up Personal blocks, found their tasks (correctly) not eligible for
+it, and deleted them. The Personal rule re-placed them on the next pass.
+**Every navigation deleted and recreated the user's blocks, for about a
+month, with nothing red.**
+
+Sabotaging the fix against the pre-existing suite produced **zero
+failures** — and every scheduling fixture in that suite builds a *single*
+shelf. There was no assertion to add, because there was no fixture the
+assertion could have been written against.
+
+**The tell, and it cost three rounds to recognise.** Three separate
+reproduction attempts came back green: an all-day `fillToFit` rule, then
+the reporter's real rule strategy and window, then the additive
+`autoPlaceEligibleTasks` path. Each time the fixture got closer and each
+time it passed. *A reproduction that keeps failing to reproduce is
+evidence about the fixture, not about the bug.* The thing that actually
+settled it was reading the user's own store — five rules across two
+shelves, two of them pointing at the same `NamedSchedule` — which no
+amount of reasoning from the code would have produced, because the code
+was fine for every configuration I had imagined.
+
+**What to do with this:** when a report will not reproduce, stop varying
+the fixture and go and read the real data. And when a fixture family is
+uniform in some dimension (one shelf, one rule, one schedule, one day),
+that uniformity is itself an untested axis — write it down rather than
+discovering it from a screenshot.
+
+**Also recorded here: time-of-day preservation could place a block outside
+every window its task is eligible for.** `guaranteePlacement` rebuilt a
+missed block at the hour it was missed at, on `nextEligibleDay` — but that
+function returns a day on which *some* rule applies, and the missed hour
+ignores which. Miss a 9am block placed by a Mornings rule, land on a day
+with only an Afternoons rule, and the replacement sits at 9am under no rule
+at all — where the trim above then treats it as a leftover, feeding the
+same churn. Fixed by placing at the start of the window that made the day
+eligible.
+
+The store showed **zero** blocks stranded that way, and that number is
+weaker than it looks: the churn was masking it by constantly re-placing
+blocks into valid windows. Zero-found is not zero-reachable, and a
+Mornings/Afternoons split is exactly the shape that produces it.
+
+**Model practice, general — `isCompleted` is a lossy read of a three-state
+field, and every `!isCompleted` written before the three-state redesign
+silently means "including missed".**
+
+`ScheduledBlock.isCompleted` / `TaskItem.isCompleted` are
+`{ status == .complete }`. That was total when blocks were two-state. Now
+`.missed` reads `false` through them, so every pre-existing `!isCompleted`
+quietly widened from "unresolved" to "unresolved **or** deliberately
+missed" — and `.missed` is precisely the state that must not be swept,
+re-placed, or re-rendered as untouched.
+
+Three separate bugs, all this shape, found in one session:
+1. **The calendar circle.** `completeCircle(isCompleted: block.isCompleted)`
+   drew `.missed` as an empty outline, pixel-identical to untouched. Fixed
+   by giving the circle an `OccurrenceStatus` instead of two `Bool`s, one
+   of them defaultable — the omission is now unrepresentable rather than
+   merely corrected.
+2. **`performRegenerateFromNow`'s clearing pass.** Deleted the missed block
+   and re-placed the task as a fresh `.none` one, discarding the user's
+   decision. **Uncovered: sabotaging it against the pre-existing 608-test
+   suite produced zero failures.** That is why it shipped.
+3. **`trimOverflowingRuleBlocks`.** Same gate, same consequence, inside a
+   rule's window. Found by auditing for the gate after #2 rather than from
+   a second bug report — which is the point of auditing for a *shape*
+   instead of fixing the instance in front of you.
+
+The rule everywhere: **`status == .none` is "free to clear and re-walk"**;
+`!isCompleted` is not, and never was after three-state landed.
+
+`clearBlocksBeforeToday` was checked and is **deliberately excluded** — it
+deletes every block before today regardless of status, which is its stated
+job ("yesterday is gone"), not this gate leaking. Worth knowing that missed
+history therefore does not survive midnight: completion survives in
+`TaskCompletionRecord`, and `.missed` has no equivalent durable record.
+That is a design question, not a bug, and it is untouched.
+
+**And a latent one sitting behind an accident.** The Nightly Review commit
+path runs the same `regenerateFromNow` (`NightlyReviewCommit` calls it
+explicitly; its `isDirty = false` comes *after*, and clears the flag rather
+than preventing the walk). It escaped bug #2 only because its view model
+targets *tomorrow*, so `cutoff` is tomorrow and today's missed blocks all
+fall before it. **A missed block on a future day would be swept there
+too.** Verified by probe: a block before the cutoff survives, one at or
+after it is deleted. Do not read "the commit path is fine" as a property of
+that path — it is cutoff arithmetic, and it would stop holding the moment
+the commit ran against a day other than tomorrow.
+
+I asserted the opposite of this mid-session ("the commit path never showed
+it because `isDirty = false`, so no regenerate follows") before reading
+`NightlyReviewCommit`. It is corrected in the test that carries it.
+
 **Testing practice, general — a render baseline cannot observe whether a
 live view *invalidates*. It renders one body pass on demand, so "the
 picture is unchanged" says nothing about whether the real screen would ever
