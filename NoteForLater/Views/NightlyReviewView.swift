@@ -140,6 +140,24 @@ struct NightlyReviewView: View {
     /// this file; that's a different view struct entirely.
     @State private var skipToastMessage: String?
     @State private var skipToastVisible = false
+    /// **Forces a body pass after a write this view's `@Query`s cannot see.**
+    ///
+    /// `TaskItem.cycleRecurringOccurrence` writes `RecurringTaskLog` and
+    /// `TaskCompletionRecord`, and this view queries neither. It also mirrors
+    /// onto the occurrence's `ScheduledBlock` — and that mirror, incidentally,
+    /// was the only thing that ever invalidated this view, because
+    /// `@Query allBlocks` observes it. Stage 4 removed the last recurring-task
+    /// block, so the mirror stopped firing and a tap stopped redrawing its own
+    /// row: measured at **zero body passes across four consecutive taps**, the
+    /// row only catching up 5+ seconds later when something unrelated
+    /// invalidated the view.
+    ///
+    /// Same mechanism `DayTimelineGridView.habitOccurrenceRefreshTick` already
+    /// uses for the identical problem on that screen, named the same way on
+    /// purpose. A deliberate invalidation rather than a re-added block mirror:
+    /// relying on a side effect of a data write is exactly what broke here,
+    /// and a future deletion could take it away again just as silently.
+    @State private var recurringOccurrenceRefreshTick = 0
 
     private let calendarService: CalendarServiceProtocol = GoogleCalendarService()
     private let schedulingService: AISchedulingServiceProtocol = MockAISchedulingService()
@@ -1244,7 +1262,12 @@ struct NightlyReviewView: View {
     /// name deliberately (it's this view's wrapper, not the operational
     /// list itself).
     private var openRecurringTaskOccurrencesForReview: [ScheduleReviewViewModel.RecurringTaskReviewOccurrence] {
-        ScheduleReviewViewModel.refreshedRecurringTaskReviewOccurrences(frozen: frozenTodayRecurringTaskOccurrences, context: modelContext)
+        // Read so the dependency is explicit rather than resting on "mutating
+        // `@State` invalidates the owning view." It does — but this list is
+        // the thing whose freshness the tick exists to guarantee, and an
+        // unread tick is one refactor away from looking like dead state.
+        _ = recurringOccurrenceRefreshTick
+        return ScheduleReviewViewModel.refreshedRecurringTaskReviewOccurrences(frozen: frozenTodayRecurringTaskOccurrences, context: modelContext)
     }
 
     /// Routes through the exact same four-state cycle
@@ -1307,6 +1330,10 @@ struct NightlyReviewView: View {
     private func pushIfMissed(task: TaskItem, day: Date) {
         let calendar = Calendar.current
         let next = task.cycleRecurringOccurrence(on: day, context: modelContext, calendar: calendar)
+        // Nothing this view queries changed — see
+        // `recurringOccurrenceRefreshTick`. Both `cycleRecurringTaskReviewOccurrence`
+        // overloads funnel through here, so one bump covers both row shapes.
+        recurringOccurrenceRefreshTick += 1
         guard next == .missed else { return }
         if let occurrence = ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(task: task, missedDay: day, context: modelContext) {
             immediatelyPushedRecurringOccurrenceIDs.insert(occurrence.id)
