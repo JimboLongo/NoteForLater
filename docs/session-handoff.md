@@ -249,6 +249,52 @@ weaker than it looks: the churn was masking it by constantly re-placing
 blocks into valid windows. Zero-found is not zero-reachable, and a
 Mornings/Afternoons split is exactly the shape that produces it.
 
+**Testing practice, general — when one rule has two call sites written
+independently, fixing one is the default outcome, not the unlucky one.
+Treat "are there other copies of this decision?" as a required step, not a
+thoroughness flourish.**
+
+Three instances in a single session, all the same shape:
+
+1. **`obstacles` and `movable`** in `RippleSchedulingService` — two
+   separately-written filters over the same "may this block move" question.
+   Widening only the first put a high-priority block in *both* sets: the
+   incoming block correctly routed around it, then the ripple moved it
+   anyway. Caught by the test written for the change.
+2. **The push/undo split.** `NightlyReviewView.pushIfMissed` and
+   `DayTimelineGridView.cycleRecurringTaskOccurrence` each had
+   `if next == .missed { push }`, written independently. The undo was added
+   to one. Cycling back to incomplete on the day calendar left the record
+   live and hopping forward, while the identical gesture in Nightly Review
+   undid it. **Caught by the user, not by tests.**
+3. **The `.missed` block-arm test.** Less obvious but the same thing: the
+   replacement test used a `.missed` block, which passes under both the old
+   and new predicate. Sabotage returned zero. The half that *changed
+   meaning* — a `.none` block — had no test at all.
+
+**Why tests do not catch this by default.** Each site is usually correct in
+isolation, so a per-site test passes. The defect only exists in the
+*relationship* between them, and nothing names that relationship. In case 2
+both call sites lived in private view methods no test could reach, so even
+a test that wanted to assert it had nowhere to stand.
+
+**The check:** after changing a rule, grep for the decision — not the
+function name, the *condition*. `if next == .missed`, `!$0.isCompleted`,
+`status == .none`. Two hits in different files is the signal.
+
+**The fix that holds is structural, not a second edit.** All three were
+resolved by giving the rule one owner so a second copy cannot exist:
+- `isFixed(_:)`, with `movable` defined as its complement
+- `cycleRecurringOccurrenceReconcilingPush`, after which
+  `TaskItem.cycleRecurringOccurrence` has exactly one caller — there is no
+  longer an `else` for a surface to forget
+- and earlier, `blockDisplayStatus` unifying the circle and the row fade,
+  and `BlockStatusCircle` taking a status instead of two `Bool`s
+
+That is the same move each time: make the omission unrepresentable rather
+than merely corrected. A second `else` added by hand is one more place for
+the next person to miss.
+
 **Model practice, general — `isCompleted` is a lossy read of a three-state
 field, and every `!isCompleted` written before the three-state redesign
 silently means "including missed".**
