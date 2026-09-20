@@ -2483,55 +2483,6 @@ final class ScheduleReviewViewModel {
     }
 
 
-    /// Task IDs whose most recent occurrence at or before `today` is still
-    /// unresolved and needs to display as carried forward onto
-    /// `targetDate` — a stand-in for the real `PushedRecurringOccurrence`
-    /// Nightly Review would eventually create, shown without waiting for
-    /// that to run. Display only: writes nothing, creates no records.
-    ///
-    /// Bounded exactly the way `PushedRecurringOccurrence.advanceOneHop`
-    /// already bounds a *real* pushed occurrence at runtime: stops the
-    /// moment the task's own next real recurrence day arrives, since the
-    /// ordinary pattern takes back over there — an incomplete monthly task
-    /// shows every day from `today` until its next pattern day, then hands
-    /// off, never past it. `TaskItem.previousRecurringOccurrenceDate`/
-    /// `nextRecurringOccurrenceDate` both cap their own walks (400/366
-    /// days), so neither direction can scan unboundedly on an old daily
-    /// task, and a task whose next occurrence falls outside that cap is
-    /// treated as "never project" rather than "project forever."
-    ///
-    /// Shared between `DayTimelineGridView.openRecurringTaskOccurrences`
-    /// (untimed) and `.projectedRecurringTaskOccurrences` (Specific-Time)
-    /// so the carry-forward rule itself lives in exactly one place — only
-    /// the display wrapper differs per mode, avoiding two near-copies of
-    /// the same rule drifting apart. `alreadyCoveredTaskIDs` (a real
-    /// `PushedRecurringOccurrence` already sitting on `targetDate`, or a
-    /// real `ScheduledBlock` there) is the caller's job to supply, since
-    /// both callers already have that data for their own reasons — this
-    /// only excludes what it's told to, so a task never gets a duplicate
-    /// row alongside its own real one. Excludes `!task.isPushable` tasks
-    /// outright — this is a display stand-in for a real
-    /// `PushedRecurringOccurrence` (see `pushRecurringOccurrenceIfNeeded`,
-    /// which never creates one for such a task either), so it must not
-    /// show a carry-forward that the real mechanism would never produce.
-    static func carriedForwardRecurringTaskIDs(tasks: [TaskItem], targetDate: Date, alreadyCoveredTaskIDs: Set<UUID>, context: ModelContext, calendar: Calendar = .current, today: Date = .now) -> Set<UUID> {
-        let targetDay = calendar.startOfDay(for: targetDate)
-        let todayDay = calendar.startOfDay(for: today)
-        guard targetDay > todayDay else { return [] }
-        var result: Set<UUID> = []
-        for task in tasks where task.isRecurring && task.isPushable {
-            guard !alreadyCoveredTaskIDs.contains(task.id) else { continue }
-            guard !task.hasRecurringOccurrence(on: targetDay, calendar: calendar) else { continue }
-            guard let lastDay = task.previousRecurringOccurrenceDate(onOrBefore: todayDay, calendar: calendar) else { continue }
-            guard !isRecurringTaskOccurrenceComplete(task: task, on: lastDay, context: context, calendar: calendar) else { continue }
-            let dayAfterLast = calendar.date(byAdding: .day, value: 1, to: lastDay) ?? lastDay
-            guard let nextOccurrence = task.nextRecurringOccurrenceDate(asOf: dayAfterLast, calendar: calendar) else { continue }
-            let handoffDay = calendar.startOfDay(for: nextOccurrence)
-            guard targetDay < handoffDay else { continue }
-            result.insert(task.id)
-        }
-        return result
-    }
     /// Shared by `carriedForwardRecurringTaskIDs` — completion for a given
     /// day, checking whichever store that mode could plausibly have
     /// written to: a completed `ScheduledBlock` for a Specific-Time task
@@ -2541,6 +2492,20 @@ final class ScheduleReviewViewModel {
     /// `projectedRecurringTaskOccurrences` — the only place a *projected*
     /// Specific-Time completion could have landed).
     static func isRecurringTaskOccurrenceComplete(task: TaskItem, on day: Date, context: ModelContext, calendar: Calendar = .current) -> Bool {
+        // ⚠️ CURRENTLY UNREFERENCED, AND STILL NOT FOR DELETION.
+        //
+        // Its last caller was `carriedForwardRecurringTaskIDs`, deleted when
+        // the carry-forward projection was removed in favour of
+        // `PushedRecurringOccurrence` driving a single-day appearance.
+        //
+        // **A caller count of zero is not the reason this exists.** The
+        // reason is below, and it did not change: this is the only code that
+        // still reads a *historical* completed block. A grep for callers
+        // will now report none, which is exactly the signal that would
+        // otherwise get this deleted — so the zero is recorded here
+        // deliberately rather than left to be rediscovered as an argument
+        // for removal.
+        //
         // KEPT DESPITE BEING UNREACHABLE FOR NEW DATA — do not delete.
         //
         // No recurring task can be Specific Time any more, so nothing will

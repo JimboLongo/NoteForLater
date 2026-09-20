@@ -160,78 +160,76 @@ final class DayTimelineProjectionAndStreakTests: XCTestCase {
         XCTAssertEqual(pastResult[habit.id], habit.currentStreak(asOf: pastDay, calendar: calendar), "a past day must keep showing its true as-of value, not clamp")
     }
 
-    // MARK: - Carry-forward projection of an incomplete recurring task
+    // MARK: - A pushed occurrence appears on one day only
 
-    /// Verified fail-then-pass: with `carriedForwardRecurringTaskIDs`
-    /// temporarily reverted to `return []` unconditionally, this test
-    /// failed — the incomplete task never carried forward onto the future
-    /// non-pattern day. Restored the real walk and reran: green. Both via
-    /// `xcodebuild test`.
-    func test_carriedForward_incompleteMonthlyTask_appearsOnFutureNonPatternDay() {
+    /// **REVERSAL — the carry-forward projection is gone, and these five
+    /// tests went with the mechanism they covered.**
+    ///
+    /// `carriedForwardRecurringTaskIDs` painted a "Pushed" row onto *every*
+    /// future day until a task's next real recurrence. That was asked for
+    /// when it was the only way to keep a miss visible. It is too much: the
+    /// push should be a single day's reminder, not a banner on every day you
+    /// scroll to.
+    ///
+    /// The mechanism it duplicated already existed. `PushedRecurringOccurrence`
+    /// carries a `currentDate` and shows the occurrence on **exactly that
+    /// day**, and `advanceOneHop` walks it forward one day at a time at each
+    /// launch until it meets the next real recurrence, where it resolves
+    /// itself. So this is a removal, not a narrowing — one row that follows
+    /// you forward, and scroll-ahead days are clean.
+    ///
+    /// **Where the deleted tests' coverage went.** Four of the five were
+    /// pinning rules the record enforces independently, and those tests
+    /// already exist:
+    /// - non-pushable never pushes →
+    ///   `RecurringTaskCycleTests.test_nonPushableTask_commitTimeSweep_createsNoPushRecord`
+    /// - stops at the next real pattern day →
+    ///   `RecurringTaskReviewTests.test_advanceOneHop_resolves_whenNextIsARecurrenceDay`
+    /// - keeps moving otherwise →
+    ///   `RecurringTaskReviewTests.test_advanceOneHop_advancesTheCursor_whenNextIsNotARecurrenceDay`
+    /// - a completed occurrence stops →
+    ///   `PushedRecurringOccurrence.isAlreadyResolved`, covered by the same pair
+    ///
+    /// The fifth — untouched-vs-missed — became the `.missed`-only gate and
+    /// is covered in `RecurringTaskReviewTests`. What none of them pinned is
+    /// the property this change is actually about, so that is what replaces
+    /// them.
+    func test_pushedOccurrence_identifiesExactlyOneDay() {
         let anchor = day(2026, 8, 10)
-        let fixedToday = day(2026, 9, 10) // also a pattern day, left incomplete
-        let notAPatternDay = day(2026, 9, 20)
         let task = makeMonthlyTask(anchor: anchor)
+        let missedDay = day(2026, 9, 10)
+        let pushed = PushedRecurringOccurrence(taskID: task.id, originalDate: missedDay)
+        context.insert(pushed)
 
-        let result = ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
-            tasks: [task], targetDate: notAPatternDay, alreadyCoveredTaskIDs: [], context: context, calendar: calendar, today: fixedToday
-        )
+        // The display predicate `DayTimelineGridView.pushedTaskIDsForTargetDate`
+        // applies: not completed, and `currentDate` is the day being shown.
+        func appears(on target: Date) -> Bool {
+            !pushed.isCompleted && calendar.isDate(pushed.currentDate, inSameDayAs: target)
+        }
 
-        XCTAssertTrue(result.contains(task.id))
+        XCTAssertTrue(appears(on: missedDay), "the day it sits on")
+        XCTAssertFalse(appears(on: day(2026, 9, 11)), "not tomorrow — it has not hopped yet")
+        XCTAssertFalse(appears(on: day(2026, 9, 20)), "and emphatically not every day until the next recurrence, which is what was removed")
     }
 
-    /// Fail-then-pass target: a non-pushable task's incomplete occurrence
-    /// must never carry forward onto a future day — this projection is a
-    /// display stand-in for a real `PushedRecurringOccurrence`
-    /// (`ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded`, which
-    /// itself never creates one for such a task), so it must agree.
-    func test_carriedForward_nonPushableTask_neverProjectsForward() {
+    /// After a hop it appears on the new day and **stops appearing on the
+    /// old one** — the "follows you forward" half. A projection would have
+    /// shown both.
+    func test_pushedOccurrence_movesRatherThanAccumulates() {
         let anchor = day(2026, 8, 10)
-        let fixedToday = day(2026, 9, 10)
-        let notAPatternDay = day(2026, 9, 20)
         let task = makeMonthlyTask(anchor: anchor)
-        task.isPushable = false
+        let missedDay = day(2026, 9, 10)
+        let nextDay = day(2026, 9, 11)
+        let pushed = PushedRecurringOccurrence(taskID: task.id, originalDate: missedDay)
+        context.insert(pushed)
 
-        let result = ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
-            tasks: [task], targetDate: notAPatternDay, alreadyCoveredTaskIDs: [], context: context, calendar: calendar, today: fixedToday
-        )
+        PushedRecurringOccurrence.advanceOneHop(pushed, task: task, from: missedDay, to: nextDay, calendar: calendar, context: context)
 
-        XCTAssertFalse(result.contains(task.id), "a non-pushable task's miss must stay on its own day, never carried forward")
-    }
-
-    /// The bound: projection stops the moment the task's own next real
-    /// pattern day arrives — never past it, never indefinitely.
-    func test_carriedForward_stopsOnAndAfterNextRealPatternDay() {
-        let anchor = day(2026, 8, 10)
-        let fixedToday = day(2026, 9, 10)
-        let nextPatternDay = day(2026, 10, 10)
-        let wellAfterHandoff = day(2026, 10, 15)
-        let task = makeMonthlyTask(anchor: anchor)
-
-        let onHandoffDay = ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
-            tasks: [task], targetDate: nextPatternDay, alreadyCoveredTaskIDs: [], context: context, calendar: calendar, today: fixedToday
-        )
-        let afterHandoff = ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
-            tasks: [task], targetDate: wellAfterHandoff, alreadyCoveredTaskIDs: [], context: context, calendar: calendar, today: fixedToday
-        )
-
-        XCTAssertFalse(onHandoffDay.contains(task.id), "the real occurrence takes over on its own pattern day, not a projection")
-        XCTAssertFalse(afterHandoff.contains(task.id), "must not project past the handoff day either")
-    }
-
-    /// A completed occurrence has nothing to carry forward.
-    func test_carriedForward_completedOccurrence_doesNotProject() {
-        let anchor = day(2026, 8, 10)
-        let fixedToday = day(2026, 9, 10)
-        let notAPatternDay = day(2026, 9, 20)
-        let task = makeMonthlyTask(anchor: anchor)
-        RecurringTaskLog.logOrCreate(taskID: task.id, on: fixedToday, context: context, calendar: calendar).status = .complete
-
-        let result = ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
-            tasks: [task], targetDate: notAPatternDay, alreadyCoveredTaskIDs: [], context: context, calendar: calendar, today: fixedToday
-        )
-
-        XCTAssertFalse(result.contains(task.id))
+        func appears(on target: Date) -> Bool {
+            !pushed.isCompleted && calendar.isDate(pushed.currentDate, inSameDayAs: target)
+        }
+        XCTAssertTrue(appears(on: nextDay), "it moved forward one day")
+        XCTAssertFalse(appears(on: missedDay), "and left the day it came from — one row, not two")
     }
 
 }

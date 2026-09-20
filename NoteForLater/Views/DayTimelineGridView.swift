@@ -104,7 +104,7 @@ struct ProjectedRecurringTaskOccurrence: Identifiable {
     var isMissed: Bool { status == .missed }
     /// True when this occurrence is showing on `targetDate` only because
     /// it's an incomplete occurrence from on-or-before today being carried
-    /// forward (see `ScheduleReviewViewModel.carriedForwardRecurringTaskIDs`)
+    /// forward (see `PushedRecurringOccurrence`)
     /// — a display-only stand-in for the real `PushedRecurringOccurrence`
     /// Nightly Review would eventually create — not because `targetDate`
     /// is one of the task's own real recurrence days. Drives the same
@@ -404,25 +404,7 @@ struct DayTimelineGridView: View {
             .map(\.taskID))
     }
 
-    /// Task IDs needing a carried-forward display row on `targetDate` —
-    /// computed once per body pass (see `body`'s own `carriedForwardTaskIDs`
-    /// local) and threaded into both `openRecurringTaskOccurrences` (all
-    /// three modes) and `projectedRecurringTaskOccurrences`, rather than
-    /// each redoing `ScheduleReviewViewModel.carriedForwardRecurringTaskIDs`'s
-    /// bounded-but-nontrivial walk independently.
-    private func computeCarriedForwardTaskIDs() -> Set<UUID> {
-        let tasksWithRealBlockToday = Set(materializedRows.compactMap { row -> UUID? in
-            guard case .proposed(let block) = row, let task = block.task, task.isRecurring else { return nil }
-            return task.id
-        })
-        return ScheduleReviewViewModel.carriedForwardRecurringTaskIDs(
-            tasks: allTasks, targetDate: targetDate,
-            alreadyCoveredTaskIDs: pushedTaskIDsForTargetDate.union(tasksWithRealBlockToday),
-            context: modelContext
-        )
-    }
-
-    private func openRecurringTaskOccurrences(mode: HabitOccurrenceTimeMode, carriedForwardTaskIDs: Set<UUID>) -> [OpenRecurringTaskOccurrence] {
+    private func openRecurringTaskOccurrences(mode: HabitOccurrenceTimeMode) -> [OpenRecurringTaskOccurrence] {
         let calendar = Calendar.current
         let pushedTaskIDs = pushedTaskIDsForTargetDate
         // Same divergence `projectedRecurringTaskOccurrences` already
@@ -434,7 +416,14 @@ struct DayTimelineGridView: View {
         let isFutureDay = calendar.startOfDay(for: targetDate) > calendar.startOfDay(for: .now)
         var result: [OpenRecurringTaskOccurrence] = []
         for task in allTasks where task.isRecurring && task.recurrenceTimeMode == mode {
-            let isPushed = pushedTaskIDs.contains(task.id) || carriedForwardTaskIDs.contains(task.id)
+            // **`PushedRecurringOccurrence` alone decides this now.** The
+            // carry-forward projection used to OR in here, painting a
+            // "Pushed" row onto *every* future day until the task's next
+            // real recurrence. The record shows the occurrence on exactly
+            // one day — its `currentDate` — and `advanceOneHop` walks that
+            // forward a day at a time at each launch, so the push is one row
+            // that follows you rather than a banner across the week.
+            let isPushed = pushedTaskIDs.contains(task.id)
             guard task.hasRecurringOccurrence(on: targetDate, calendar: calendar) || isPushed else { continue }
             let status = RecurringTaskLog.log(taskID: task.id, on: targetDate, context: modelContext, calendar: calendar)?.status ?? .none
             guard !(isFutureDay && status == .complete) else { continue }
@@ -469,21 +458,21 @@ struct DayTimelineGridView: View {
     /// still governs its position relative to other habits without
     /// recurring tasks (which have no comparable ordering field)
     /// interleaving mid-list.
-    private func computeOpenHabitOccurrenceLists(carriedForwardTaskIDs: Set<UUID>) -> OpenHabitOccurrenceLists {
+    private func computeOpenHabitOccurrenceLists() -> OpenHabitOccurrenceLists {
         OpenHabitOccurrenceLists(
             am: openHabitOccurrences(mode: .am).map(OpenOccurrenceRow.habit)
-                + openRecurringTaskOccurrences(mode: .am, carriedForwardTaskIDs: carriedForwardTaskIDs).map(OpenOccurrenceRow.recurringTask),
+                + openRecurringTaskOccurrences(mode: .am).map(OpenOccurrenceRow.recurringTask),
             midday: openHabitOccurrences(mode: .midday).map(OpenOccurrenceRow.habit)
-                + openRecurringTaskOccurrences(mode: .midday, carriedForwardTaskIDs: carriedForwardTaskIDs).map(OpenOccurrenceRow.recurringTask),
+                + openRecurringTaskOccurrences(mode: .midday).map(OpenOccurrenceRow.recurringTask),
             pm: openHabitOccurrences(mode: .pm).map(OpenOccurrenceRow.habit)
-                + openRecurringTaskOccurrences(mode: .pm, carriedForwardTaskIDs: carriedForwardTaskIDs).map(OpenOccurrenceRow.recurringTask)
+                + openRecurringTaskOccurrences(mode: .pm).map(OpenOccurrenceRow.recurringTask)
         )
     }
 
     /// The calendar only actually splits in two when there's a Midday
     /// occurrence to show between the halves — a day with no Midday
     /// habits renders as the single continuous grid it always has.
-    private var isSplitAtNoon: Bool { !middayOccurrences.isEmpty || !openRecurringTaskOccurrences(mode: .midday, carriedForwardTaskIDs: []).isEmpty }
+    private var isSplitAtNoon: Bool { !middayOccurrences.isEmpty || !openRecurringTaskOccurrences(mode: .midday).isEmpty }
 
     /// Where the day actually splits for Midday habits, in minutes since
     /// midnight — noon by default, but pushed later to clear any row
@@ -596,12 +585,7 @@ struct DayTimelineGridView: View {
         // comment for the measurement. Reading it here, before the occurrence
         // lists are built, covers every row those lists feed.
         let _ = habitOccurrenceRefreshTick
-        // Computed once here — feeds both `occurrenceLists` (all three
-        // modes) and `displayRows` below, rather than each of the four
-        // re-running `ScheduleReviewViewModel.carriedForwardRecurringTaskIDs`'s
-        // bounded backward/forward walk independently.
-        let carriedForwardTaskIDs = computeCarriedForwardTaskIDs()
-        let occurrenceLists = computeOpenHabitOccurrenceLists(carriedForwardTaskIDs: carriedForwardTaskIDs)
+        let occurrenceLists = computeOpenHabitOccurrenceLists()
         // Projected rows are gone: they existed only for Specific-Time
         // recurring tasks, which no longer exist (see
         // `HabitOccurrenceTimeMode.taskSelectableCases`). Every recurring
