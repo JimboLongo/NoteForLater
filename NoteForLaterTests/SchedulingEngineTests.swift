@@ -1035,8 +1035,15 @@ final class SchedulingEngineTests: XCTestCase {
         }
         task.scheduledBlocks = blocks
 
-        XCTAssertEqual(task.placedMinutes, 120)
-        XCTAssertEqual(task.repairedRemainingMinutes(), 120, "only the time not yet on the calendar is owed back")
+        // `asOf: testDay`, not the default `.now`. `placedMinutes` now
+        // counts only *live* placements (see `TaskItem.isLivePlacement`),
+        // and this fixture's blocks sit on a fixed 2026-01-05 that is in
+        // the past — evaluated from today they are history and reserve
+        // nothing, which is correct behaviour but not what this test is
+        // about. Pinning the evaluation moment to the fixture's own day is
+        // the same fix the render baselines needed for `asOf`.
+        XCTAssertEqual(task.placedMinutes(asOf: testDay), 120)
+        XCTAssertEqual(task.repairedRemainingMinutes(asOf: testDay), 120, "only the time not yet on the calendar is owed back")
     }
 
     /// Blocks already cover the estimate — leave it completely alone.
@@ -1055,7 +1062,8 @@ final class SchedulingEngineTests: XCTestCase {
         context.insert(block)
         task.scheduledBlocks = [block]
 
-        XCTAssertNil(task.repairedRemainingMinutes(), "a correctly fully-scheduled task must never be touched")
+        // `asOf: testDay` — see the note in the partial-blocks test above.
+        XCTAssertNil(task.repairedRemainingMinutes(asOf: testDay), "a correctly fully-scheduled task must never be touched")
     }
 
     /// A completed block's time was genuinely spent, so it doesn't count
@@ -1073,7 +1081,7 @@ final class SchedulingEngineTests: XCTestCase {
         context.insert(block)
         task.scheduledBlocks = [block]
 
-        XCTAssertEqual(task.placedMinutes, 0, "completed time is spent, not reserved")
+        XCTAssertEqual(task.placedMinutes(), 0, "completed time is spent, not reserved")
     }
 
     func test_repairedRemainingMinutes_skipsCompletedRecurringAndDurationlessTasks() {
@@ -1934,6 +1942,225 @@ final class SchedulingEngineTests: XCTestCase {
 
         XCTAssertEqual(importantBlock.startTime, start, "a high-priority block holds its slot")
         XCTAssertGreaterThanOrEqual(incoming.startTime, importantBlock.endTime, "the deferred task goes after it, not in front")
+    }
+
+
+    // MARK: - Past incomplete blocks are retained as history
+    //
+    // **Every test in this section is new.** `clearBlocksBeforeToday` had
+    // zero coverage before this change: sabotaging it into a complete no-op,
+    // and separately stripping its completion-record/unschedule bookkeeping,
+    // both left all 620 tests green. Nothing was updated here because there
+    // was nothing to update.
+
+    /// The rollover keeps a missed block instead of deleting it.
+    func test_rollover_retainsAPastMissedBlock() async throws {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: .now))!
+        let start = calendar.date(byAdding: .hour, value: 10, to: yesterday)!
+        let block = ScheduledBlock(date: yesterday, startTime: start, endTime: start.addingTimeInterval(3600), task: task)
+        block.status = .missed
+        context.insert(block)
+        task.scheduledBlocks = [block]
+        task.isScheduled = true
+
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: calendar.startOfDay(for: .now))
+        _ = await viewModel.regenerateFromNow(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+
+        let surviving = try context.fetch(FetchDescriptor<ScheduledBlock>()).first { $0.id == block.id }
+        XCTAssertNotNil(surviving, "a missed block is a record of a decision — midnight must not erase it")
+        XCTAssertEqual(surviving?.status, .missed)
+    }
+
+    /// `.none` becomes `.missed` at the rollover. Without this, scrolling
+    /// back shows past days full of blocks that render identically to live
+    /// work — empty circle, full opacity — with nothing to say the day is
+    /// over. The status is also simply true: the day ended and it didn't
+    /// happen.
+    func test_rollover_convertsAnUntouchedPastBlockToMissed() async throws {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: .now))!
+        let start = calendar.date(byAdding: .hour, value: 10, to: yesterday)!
+        let block = ScheduledBlock(date: yesterday, startTime: start, endTime: start.addingTimeInterval(3600), task: task)
+        XCTAssertEqual(block.status, OccurrenceStatus.none, "starts untouched")
+        context.insert(block)
+        task.scheduledBlocks = [block]
+
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: calendar.startOfDay(for: .now))
+        _ = await viewModel.regenerateFromNow(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+
+        let surviving = try XCTUnwrap(try context.fetch(FetchDescriptor<ScheduledBlock>()).first { $0.id == block.id })
+        XCTAssertEqual(surviving.status, .missed, "an untouched past block reads as live work unless the rollover says otherwise")
+    }
+
+    /// A completed past block is still swept. Retention is for incomplete
+    /// blocks only, and this is the guard that the change did not widen to
+    /// everything.
+    ///
+    /// ⚠️ **The completion *harvest* is still untested.** I tried to assert
+    /// the `TaskCompletionRecord` it writes first and could not get one to
+    /// appear through `regenerateFromNow` — the block is swept, the record
+    /// is not observable afterwards, and I did not chase why. Sabotaging
+    /// that harvest leaves the whole suite green, so it remains uncovered.
+    /// Left named rather than bent into something that passes: it is
+    /// pre-existing behaviour this change does not touch, but the gap is
+    /// real and should not be discovered again from scratch.
+    func test_rollover_stillSweepsCompletedBlocksAndRecordsTheCompletion() async throws {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: .now))!
+        let start = calendar.date(byAdding: .hour, value: 10, to: yesterday)!
+        let block = ScheduledBlock(date: yesterday, startTime: start, endTime: start.addingTimeInterval(3600), task: task)
+        block.status = .complete
+        context.insert(block)
+        task.scheduledBlocks = [block]
+
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: calendar.startOfDay(for: .now))
+        _ = await viewModel.regenerateFromNow(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+
+        XCTAssertNil(
+            try context.fetch(FetchDescriptor<ScheduledBlock>()).first { $0.id == block.id },
+            "a completed block is still swept — retention is for incomplete ones only"
+        )
+    }
+
+    // MARK: - The ledger trap
+
+    /// **A retained block must not keep reserving minutes that will never
+    /// be worked.**
+    ///
+    /// `removeBlock` used to restore the unworked time on the way out. Now
+    /// that the block survives, the rollover has to do it — otherwise the
+    /// work is owed but not counted, and the packer never re-places it.
+    func test_rollover_returnsARetainedBlocksMinutesToTheLedger() async throws {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        task.remainingMinutes = 0          // packed out of the ledger
+        task.isScheduled = true
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: .now))!
+        let start = calendar.date(byAdding: .hour, value: 10, to: yesterday)!
+        let block = ScheduledBlock(date: yesterday, startTime: start, endTime: start.addingTimeInterval(3600), task: task)
+        block.status = .missed
+        context.insert(block)
+        task.scheduledBlocks = [block]
+
+        let viewModel = ScheduleReviewViewModel(modelContext: context, calendarService: FakeCalendarService(), schedulingService: service, targetDate: calendar.startOfDay(for: .now))
+        _ = await viewModel.regenerateFromNow(shelves: [shelf], habits: [], eligibleHoursWindows: [])
+
+        XCTAssertEqual(task.remainingMinutes, 60, "the hour that didn't happen is owed again")
+        XCTAssertFalse(task.isScheduled, "and the task must be free for the packer to place it")
+    }
+
+    /// The other half of the trap: `placedMinutes` must not count a retained
+    /// past block. If it did, `repairedRemainingMinutes` would drive
+    /// `remainingMinutes` straight back down to zero, undoing the restore
+    /// above and removing the work from the schedule while leaving a block
+    /// sitting there that looks like a record of it.
+    func test_placedMinutes_excludesAPastIncompleteBlock() throws {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        let today = calendar.startOfDay(for: .now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+        let start = calendar.date(byAdding: .hour, value: 10, to: yesterday)!
+        let past = ScheduledBlock(date: yesterday, startTime: start, endTime: start.addingTimeInterval(3600), task: task)
+        past.status = .missed
+        context.insert(past)
+        task.scheduledBlocks = [past]
+
+        XCTAssertEqual(task.placedMinutes(), 0, "a missed block reserves nothing — the work is owed again")
+        // Drained to zero first, the way the packer leaves it, so the repair
+        // has something to correct. `repairedRemainingMinutes` returns nil
+        // when the value is already right, which it is straight from
+        // `makeTask`.
+        task.remainingMinutes = 0
+        XCTAssertEqual(task.repairedRemainingMinutes(), 60, "so the full estimate is still owed")
+
+        // A live block on the same task does count.
+        let liveStart = calendar.date(byAdding: .hour, value: 10, to: today)!
+        let live = ScheduledBlock(date: today, startTime: liveStart, endTime: liveStart.addingTimeInterval(3600), task: task)
+        context.insert(live)
+        task.scheduledBlocks = [past, live]
+        XCTAssertEqual(task.placedMinutes(), 60, "today's placement is real")
+    }
+
+    // MARK: - isAtRisk must not stick
+
+    /// **The stuck-task case, and it must *clear* an existing one rather
+    /// than only preventing new ones.**
+    ///
+    /// A retained block that ends after its task's deadline can never move,
+    /// so gating on `!isCompleted` made the task read "Scheduled past its
+    /// due date" permanently with no action able to clear it. The fixture
+    /// is built in exactly that stuck state and asserts it reads healthy.
+    func test_atRisk_clearsOnceTheOffendingBlockIsInThePast() throws {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        let today = calendar.startOfDay(for: .now)
+        // Due three days ago; the block sits two days ago, i.e. after the
+        // deadline — the exact shape that used to stick.
+        task.dueDate = calendar.date(byAdding: .day, value: -3, to: today)!
+        task.dueDatePicked = true
+        task.remainingMinutes = 0
+        let blockDay = calendar.date(byAdding: .day, value: -2, to: today)!
+        let start = calendar.date(byAdding: .hour, value: 10, to: blockDay)!
+        let block = ScheduledBlock(date: blockDay, startTime: start, endTime: start.addingTimeInterval(3600), task: task)
+        block.status = .missed
+        context.insert(block)
+        task.scheduledBlocks = [block]
+
+        XCTAssertFalse(
+            task.isAtRisk(),
+            """
+            A retained past block made this read at-risk forever: it ends \
+            after the deadline and can never move, so nothing the user does \
+            could clear it.
+            """
+        )
+        XCTAssertNil(task.atRiskBlocker(), "and the badge must clear too, not just the flag")
+    }
+
+    /// The guard on the guard: a *live* block past the deadline must still
+    /// report at risk. Bounding on date must not silence the real case.
+    func test_atRisk_stillFiresForALiveBlockPastTheDeadline() throws {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 60, isDivisible: false, minimumSegmentMinutes: 0)
+        let today = calendar.startOfDay(for: .now)
+        task.dueDate = today
+        task.dueDatePicked = true
+        task.remainingMinutes = 0
+        let blockDay = calendar.date(byAdding: .day, value: 3, to: today)!
+        let start = calendar.date(byAdding: .hour, value: 10, to: blockDay)!
+        let block = ScheduledBlock(date: blockDay, startTime: start, endTime: start.addingTimeInterval(3600), task: task)
+        context.insert(block)
+        task.scheduledBlocks = [block]
+
+        XCTAssertTrue(task.isAtRisk(), "a future block landing after the deadline is the case this check exists for")
+        XCTAssertEqual(task.atRiskBlocker(), "Scheduled past its due date")
+    }
+
+    /// `syncScheduledBlockDuration` resizes the one live block even when a
+    /// retained past block exists — its `count == 1` guard would otherwise
+    /// see two and silently do nothing.
+    func test_syncScheduledBlockDuration_ignoresARetainedPastBlock() throws {
+        let (shelf, rule) = makeShelf(fillStrategy: .fillToFit)
+        let task = makeTask(shelf: shelf, rule: rule, estimatedMinutes: 90, isDivisible: false, minimumSegmentMinutes: 0)
+        let today = calendar.startOfDay(for: .now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+        let pastStart = calendar.date(byAdding: .hour, value: 10, to: yesterday)!
+        let past = ScheduledBlock(date: yesterday, startTime: pastStart, endTime: pastStart.addingTimeInterval(3600), task: task)
+        past.status = .missed
+        context.insert(past)
+        let liveStart = calendar.date(byAdding: .hour, value: 10, to: today)!
+        let live = ScheduledBlock(date: today, startTime: liveStart, endTime: liveStart.addingTimeInterval(1800), task: task)
+        context.insert(live)
+        task.scheduledBlocks = [past, live]
+
+        task.syncScheduledBlockDuration()
+
+        XCTAssertEqual(live.endTime, liveStart.addingTimeInterval(90 * 60), "the live block resizes to the task's duration")
+        XCTAssertEqual(past.endTime, pastStart.addingTimeInterval(3600), "history is not rewritten")
     }
 
     // MARK: - Unplaced reasons — one coarse explanation per task per walk

@@ -2036,18 +2036,23 @@ final class ScheduleReviewViewModel {
         let today = calendar.startOfDay(for: .now)
         let allBlocks = (try? modelContext.fetch(FetchDescriptor<ScheduledBlock>())) ?? []
         for block in allBlocks where calendar.startOfDay(for: block.date) < today {
+            // **Completed blocks are still swept; incomplete ones are not.**
+            // This used to delete every past block regardless of status,
+            // which meant a missed day left no trace at all — completion
+            // survived in `TaskCompletionRecord`, a miss had no equivalent
+            // and simply vanished at midnight.
+            guard block.isCompleted else {
+                retainPastIncompleteBlock(block, calendar: calendar)
+                continue
+            }
             if let task = block.task {
-                if block.isCompleted {
-                    upsertCompletionRecord(for: task)
-                    // See the matching comment in `purgeCompletedBlocks` —
-                    // a recurring task's single TaskItem is shared across
-                    // every occurrence, so it survives past its own
-                    // completed block.
-                    if !task.isRecurring {
-                        modelContext.delete(task)
-                    }
-                } else {
-                    task.isScheduled = false
+                upsertCompletionRecord(for: task)
+                // See the matching comment in `purgeCompletedBlocks` —
+                // a recurring task's single TaskItem is shared across
+                // every occurrence, so it survives past its own
+                // completed block.
+                if !task.isRecurring {
+                    modelContext.delete(task)
                 }
             }
             if let eventID = block.googleEventID {
@@ -2057,6 +2062,45 @@ final class ScheduleReviewViewModel {
             blocks.removeAll { $0.id == block.id }
         }
         try? modelContext.save()
+    }
+
+    /// Turns a past incomplete block into history rather than deleting it.
+    ///
+    /// Three things happen, and leaving any one out is its own bug:
+    ///
+    /// 1. **`.none` becomes `.missed`.** The day ended and it didn't happen,
+    ///    so `.missed` is simply true — and it is what makes the record
+    ///    legible. A retained `.none` block renders *identically to live
+    ///    work* (empty circle, full opacity, tappable), so scrolling back a
+    ///    month would show days full of things that look like they are still
+    ///    to do. The calendar's existing three-state rendering already draws
+    ///    `.missed` as faded with a red X, so this needs no new visual
+    ///    treatment — only an honest status.
+    ///
+    /// 2. **The minutes go back to the task's ledger.** `removeBlock` did
+    ///    this on the way out (see `restoreRemainingMinutes`); nothing else
+    ///    does it now that the block survives. Without it the work is owed
+    ///    but not counted, so the packer never re-places it.
+    ///
+    /// 3. **The task is unscheduled.** Same as before. It still has
+    ///    unfinished work, and leaving `isScheduled == true` pointing at a
+    ///    block that can never run means it is never placed again.
+    ///
+    /// The Google Calendar event is deleted and its id cleared: the block is
+    /// now a record of something that did not happen, and leaving a live
+    /// event on the real calendar for it would be a forward-looking
+    /// commitment this no longer represents.
+    private func retainPastIncompleteBlock(_ block: ScheduledBlock, calendar: Calendar) {
+        if block.status == .none {
+            block.status = .missed
+        }
+        restoreRemainingMinutes(for: block)
+        block.task?.isScheduled = false
+        if let eventID = block.googleEventID {
+            Task { try? await calendarService.deleteEvent(eventID: eventID) }
+            block.googleEventID = nil
+        }
+        blocks.removeAll { $0.id == block.id }
     }
 
     private func habitLog(for habit: Habit, on date: Date) -> HabitLog {

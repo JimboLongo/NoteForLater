@@ -1224,12 +1224,34 @@ final class TaskItem {
         return segmentOptionCandidates.filter { $0 < minutes && minutes % $0 == 0 }
     }
 
-    /// Minutes currently accounted for by this task's own incomplete
-    /// blocks. Completed blocks are excluded deliberately — their time
-    /// was genuinely spent, not merely reserved.
-    var placedMinutes: Int {
+    /// Whether `block` still represents work that is going to happen.
+    ///
+    /// **A past incomplete block is not live work — it is history.** Before
+    /// `clearBlocksBeforeToday` stopped deleting them, "incomplete" and
+    /// "in the future" were the same thing, so `!isCompleted` alone was a
+    /// complete test. Retaining missed blocks makes them different, and
+    /// every reader that treated `!isCompleted` as "still going to happen"
+    /// needs this instead.
+    ///
+    /// Day-granular, matching how the rest of the scheduling code compares
+    /// dates: a block earlier today is still today's work.
+    static func isLivePlacement(_ block: ScheduledBlock, asOf date: Date = .now, calendar: Calendar = .current) -> Bool {
+        !block.isCompleted && calendar.startOfDay(for: block.date) >= calendar.startOfDay(for: date)
+    }
+
+    /// Minutes currently accounted for by this task's own **live**
+    /// incomplete blocks. Completed blocks are excluded deliberately —
+    /// their time was genuinely spent, not merely reserved.
+    ///
+    /// **Past incomplete blocks are excluded too, and that is load-bearing.**
+    /// A retained missed block reserves nothing: the work did not happen and
+    /// is owed again. Counting it would make `repairedRemainingMinutes`
+    /// drive `remainingMinutes` back down, which silently removes the work
+    /// from the schedule while leaving a block sitting there that looks
+    /// like a record of it.
+    func placedMinutes(asOf date: Date = .now, calendar: Calendar = .current) -> Int {
         (scheduledBlocks ?? [])
-            .filter { !$0.isCompleted }
+            .filter { Self.isLivePlacement($0, asOf: date, calendar: calendar) }
             .reduce(0) { $0 + Int($1.endTime.timeIntervalSince($1.startTime) / 60) }
     }
 
@@ -1257,9 +1279,9 @@ final class TaskItem {
     /// Returns `nil` for anything completed, recurring (those never drain
     /// `remainingMinutes` at all), or without a duration, and for values
     /// already correct.
-    func repairedRemainingMinutes() -> Int? {
+    func repairedRemainingMinutes(asOf date: Date = .now, calendar: Calendar = .current) -> Int? {
         guard !isCompleted, !isRecurring, estimatedMinutes > 0 else { return nil }
-        let placed = placedMinutes
+        let placed = placedMinutes(asOf: date, calendar: calendar)
         guard placed < estimatedMinutes else { return nil }
         let repaired = estimatedMinutes - placed
         return repaired == remainingMinutes ? nil : repaired
@@ -1593,7 +1615,12 @@ final class TaskItem {
             return true
         }
         guard let deadline = endOfDueDate(calendar: calendar) else { return false }
-        return (scheduledBlocks ?? []).contains { !$0.isCompleted && $0.endTime > deadline }
+        // **`isLivePlacement`, not `!isCompleted`.** A retained past block
+        // can never move, so a task with one ending after its deadline
+        // would read "scheduled past its due date" permanently, with no
+        // action able to clear it. Only a placement still ahead of `date`
+        // says anything about whether this task is going to miss.
+        return (scheduledBlocks ?? []).contains { Self.isLivePlacement($0, asOf: date, calendar: calendar) && $0.endTime > deadline }
     }
 
     /// Names the actual reason `isAtRisk` is true, for the task card's
@@ -1617,7 +1644,7 @@ final class TaskItem {
     func atRiskBlocker(asOf date: Date = .now, calendar: Calendar = .current) -> String? {
         guard isAtRisk(asOf: date, calendar: calendar) else { return nil }
         let deadline = endOfDueDate(calendar: calendar)
-        if let deadline, (scheduledBlocks ?? []).contains(where: { !$0.isCompleted && $0.endTime > deadline }) {
+        if let deadline, (scheduledBlocks ?? []).contains(where: { Self.isLivePlacement($0, asOf: date, calendar: calendar) && $0.endTime > deadline }) {
             return "Scheduled past its due date"
         }
         if let deadline, deadline < date {
@@ -1687,8 +1714,10 @@ final class TaskItem {
     /// when one's rolled back (`TaskEditSnapshot.restore`, on Cancel) —
     /// either way, the calendar should always reflect whatever
     /// `estimatedMinutes` currently says.
-    func syncScheduledBlockDuration() {
-        let activeBlocks = (scheduledBlocks ?? []).filter { !$0.isCompleted }
+    func syncScheduledBlockDuration(asOf date: Date = .now, calendar: Calendar = .current) {
+        // Live blocks only — a retained past block would make this read two
+        // and silently stop resizing the one that still matters.
+        let activeBlocks = (scheduledBlocks ?? []).filter { Self.isLivePlacement($0, asOf: date, calendar: calendar) }
         guard activeBlocks.count == 1, let block = activeBlocks.first, estimatedMinutes > 0 else { return }
         block.endTime = block.startTime.addingTimeInterval(TimeInterval(estimatedMinutes * 60))
         block.isEstimatedDuration = false
