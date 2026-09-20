@@ -1352,20 +1352,42 @@ struct NightlyReviewView: View {
     /// sees records *it* just created via the batch sweep) also catches
     /// this one — without that, a push created here would sit at today's
     /// date, un-hopped, until the next app launch, silently undoing
-    /// "pushes immediately." Does **not** delete the record if the task
-    /// later gets cycled back past `.missed` to `.none` within the same
-    /// session — see `advance()`'s own comment on why that's handled
-    /// there instead, via the already-existing `isAlreadyResolved` check,
-    /// rather than reversed eagerly here.
+    /// "pushes immediately."
+    ///
+    /// **Cycling back off `.missed` deletes the record, right here.**
+    ///
+    /// ⚠️ The previous version of this comment said it did *not* do that,
+    /// and that reversal was "handled there instead, via the
+    /// already-existing `isAlreadyResolved` check" in `advance()`. That was
+    /// wrong, and wrong in the worst way — it named a specific mechanism, so
+    /// anyone checking would read it and stop looking. `isAlreadyResolved`
+    /// only asks whether a *completed* log exists for the pushed day; it has
+    /// nothing to say about an occurrence cycled from `.missed` back to
+    /// `.none`. The record stayed live and kept hopping forward as though
+    /// the user had never changed their mind.
+    ///
+    /// **No captured state, deliberately** — unlike the non-recurring block
+    /// undo (`ScheduleReviewViewModel.undoGuaranteedPlacement`), which needs
+    /// three stored fields because marking missed there also creates a
+    /// block, bumps `pushedCount`, restores minutes and frees `isScheduled`.
+    /// A recurring push does exactly one thing: insert this record. There is
+    /// no prior state to restore because nothing else changed, and inventing
+    /// somewhere to store it would be modelling a problem that does not
+    /// exist. The record *is* the push, so deleting it *is* the undo.
     private func pushIfMissed(task: TaskItem, day: Date) {
         let calendar = Calendar.current
-        let next = task.cycleRecurringOccurrence(on: day, context: modelContext, calendar: calendar)
+        let outcome = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(
+            task: task, on: day, context: modelContext, calendar: calendar
+        )
         // Nothing this view queries changed — see
         // `recurringOccurrenceRefreshTick`. Both `cycleRecurringTaskReviewOccurrence`
         // overloads funnel through here, so one bump covers both row shapes.
         recurringOccurrenceRefreshTick += 1
-        guard next == .missed else { return }
-        if let occurrence = ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(task: task, missedDay: day, context: modelContext) {
+        // `advance()` walks this set to hop each record one day forward, so
+        // an undone record has to leave it — hopping a deleted record is the
+        // failure mode if it does not.
+        immediatelyPushedRecurringOccurrenceIDs.subtract(outcome.undone)
+        if let occurrence = outcome.pushed {
             immediatelyPushedRecurringOccurrenceIDs.insert(occurrence.id)
         }
     }

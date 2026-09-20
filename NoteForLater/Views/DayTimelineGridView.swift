@@ -971,11 +971,17 @@ struct DayTimelineGridView: View {
     private func cycleRecurringTaskOccurrence(task: TaskItem) {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: targetDate)
-        let next = task.cycleRecurringOccurrence(on: today, context: modelContext, calendar: calendar)
-        if next == .missed, let pushed = ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(task: task, missedDay: today, context: modelContext) {
-            if let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) {
-                PushedRecurringOccurrence.advanceOneHop(pushed, task: task, from: today, to: tomorrow, calendar: calendar, context: modelContext)
-            }
+        // Cycle and push/undo together — see
+        // `cycleRecurringOccurrenceReconcilingPush`. This used to call
+        // `cycleRecurringOccurrence` and then push on `.missed` with no
+        // matching `else`, so cycling back to incomplete here left the
+        // record live and still hopping forward while the same gesture in
+        // Nightly Review undid it.
+        let outcome = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(
+            task: task, on: today, context: modelContext, calendar: calendar
+        )
+        if let pushed = outcome.pushed, let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) {
+            PushedRecurringOccurrence.advanceOneHop(pushed, task: task, from: today, to: tomorrow, calendar: calendar, context: modelContext)
         }
         habitOccurrenceRefreshTick += 1
     }

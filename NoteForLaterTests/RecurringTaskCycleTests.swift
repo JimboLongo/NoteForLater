@@ -187,6 +187,179 @@ final class RecurringTaskCycleTests: XCTestCase {
         XCTAssertTrue(allPushes.isEmpty, "isPushable == false suppresses the record even for a real miss")
     }
 
+    // MARK: - Undoing a push
+
+    /// **The shared cycle-and-reconcile entry point, which both surfaces
+    /// now call.**
+    ///
+    /// This is the test that would have caught the real bug. The undo
+    /// function itself was covered and correct; what was missing was any
+    /// assertion that a *tap* reaches it — and both call sites lived in
+    /// private view methods no test can reach. So the day calendar pushed
+    /// without ever undoing (`cycleRecurringTaskOccurrence` had
+    /// `if next == .missed { push }` and no matching `else`) while Nightly
+    /// Review undid correctly, and every test stayed green.
+    ///
+    /// Testing the shared function covers both surfaces at once, because
+    /// there is now only one place the decision lives.
+    func test_cycleReconcilingPush_pushesOnMissedAndUndoesOnTheWayBack() throws {
+        let anchor = day(2026, 9, 9)
+        let task = makeUntimedTask(anchor: anchor)
+
+        let toComplete = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(
+            task: task, on: anchor, context: context, calendar: calendar
+        )
+        XCTAssertEqual(toComplete.next, .complete)
+        XCTAssertNil(toComplete.pushed, "completing pushes nothing")
+        XCTAssertTrue(try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).isEmpty)
+
+        let toMissed = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(
+            task: task, on: anchor, context: context, calendar: calendar
+        )
+        XCTAssertEqual(toMissed.next, .missed)
+        XCTAssertNotNil(toMissed.pushed, "landing on missed creates the record")
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).count, 1)
+
+        let toNone = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(
+            task: task, on: anchor, context: context, calendar: calendar
+        )
+        XCTAssertEqual(toNone.next, OccurrenceStatus.none)
+        XCTAssertEqual(toNone.undone.count, 1, "the caller needs the ids to drop them from its session tracking")
+        XCTAssertTrue(
+            try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).isEmpty,
+            "cycling back off missed must leave no record — this is what stayed broken on the day calendar"
+        )
+    }
+
+    /// **Completing a pushed occurrence removes the push, on the tap.**
+    ///
+    /// The scenario as actually performed: missed on Monday creates the
+    /// record, it hops to Tuesday, and Tuesday's pushed row is tapped
+    /// straight to `.complete` from `.none` — never passing through
+    /// `.missed` on that day at all.
+    ///
+    /// The undo gates on "not landing on `.missed`", not on "was `.none`",
+    /// so this is covered by the same branch. Pinned separately anyway
+    /// because it is the case a `.none`-specific check would silently miss,
+    /// and that is exactly the shape of the bug this whole area keeps
+    /// producing.
+    func test_completingAPushedOccurrence_removesTheRecordImmediately() throws {
+        let monday = day(2026, 9, 14)
+        let tuesday = day(2026, 9, 15)
+        let task = makeUntimedTask(anchor: monday)
+
+        // Missed on Monday, hopped to Tuesday.
+        _ = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(task: task, on: monday, context: context, calendar: calendar) // complete
+        let missed = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(task: task, on: monday, context: context, calendar: calendar) // missed
+        let pushed = try XCTUnwrap(missed.pushed)
+        _ = PushedRecurringOccurrence.advanceOneHop(pushed, task: task, from: monday, to: tuesday, calendar: calendar, context: context)
+        XCTAssertEqual(calendar.startOfDay(for: pushed.currentDate), tuesday, "the row now sits on Tuesday")
+
+        // Tapping Tuesday's row once: .none -> .complete.
+        let done = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(task: task, on: tuesday, context: context, calendar: calendar)
+
+        XCTAssertEqual(done.next, .complete)
+        XCTAssertEqual(done.undone.count, 1)
+        XCTAssertTrue(
+            try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).isEmpty,
+            "the push is gone on the tap — not left for the next launch to clean up"
+        )
+    }
+
+    /// Cycling all the way round to `.complete` also undoes it — the cycle
+    /// reaches `.none` first, so the undo must not be pinned to one exit.
+    func test_cycleReconcilingPush_undoesOnTheCompleteExitToo() throws {
+        let anchor = day(2026, 9, 9)
+        let task = makeUntimedTask(anchor: anchor)
+        for _ in 0..<2 {
+            _ = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(task: task, on: anchor, context: context, calendar: calendar)
+        }
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).count, 1)
+
+        _ = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(task: task, on: anchor, context: context, calendar: calendar) // -> none
+        _ = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(task: task, on: anchor, context: context, calendar: calendar) // -> complete
+
+        XCTAssertTrue(try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).isEmpty)
+    }
+
+    /// **Cycling a recurring occurrence back off `.missed` deletes the push.**
+    ///
+    /// All new — sabotage found this at zero coverage: adding the undo to
+    /// the live code changed nothing in 633 tests, so nothing was asserting
+    /// either that the record survived or that it went.
+    ///
+    /// It survived because `pushIfMissed`'s own comment claimed the reversal
+    /// was "handled there instead, via the already-existing
+    /// `isAlreadyResolved` check" in `advance()`. It was not:
+    /// `isAlreadyResolved` only asks whether a *completed* log exists for the
+    /// pushed day, which says nothing about an occurrence cycled back to
+    /// `.none`. The record stayed live and kept hopping forward.
+    func test_undoRecurringPush_deletesTheOutstandingRecord() throws {
+        let anchor = day(2026, 9, 9)
+        let task = makeUntimedTask(anchor: anchor)
+        let pushed = try XCTUnwrap(
+            ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(task: task, missedDay: anchor, context: context)
+        )
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).count, 1)
+
+        let removed = ScheduleReviewViewModel.undoRecurringPush(for: task, context: context)
+
+        XCTAssertEqual(removed, [pushed.id], "the caller needs the ids to drop them from its own session tracking")
+        XCTAssertTrue(
+            try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).isEmpty,
+            "changing your mind must leave no record behind — otherwise it keeps hopping forward"
+        )
+    }
+
+    /// The full round trip through the real cycle: missed pushes, cycling on
+    /// to `.none` undoes it. This is the sequence a user actually performs.
+    func test_cyclingMissedThenIncomplete_leavesNoPush() throws {
+        let anchor = day(2026, 9, 9)
+        let task = makeUntimedTask(anchor: anchor)
+
+        _ = task.cycleRecurringOccurrence(on: anchor, context: context, calendar: calendar)   // .complete
+        _ = task.cycleRecurringOccurrence(on: anchor, context: context, calendar: calendar)   // .missed
+        _ = ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(task: task, missedDay: anchor, context: context)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).count, 1)
+
+        let next = task.cycleRecurringOccurrence(on: anchor, context: context, calendar: calendar)   // .none
+        XCTAssertEqual(next, OccurrenceStatus.none)
+        ScheduleReviewViewModel.undoRecurringPush(for: task, context: context)
+
+        XCTAssertTrue(try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).isEmpty)
+    }
+
+    /// A resolved record is history and must survive — the undo is scoped to
+    /// live chains, matching the "already pushed" guard's own notion.
+    func test_undoRecurringPush_leavesACompletedRecordAlone() throws {
+        let anchor = day(2026, 9, 9)
+        let task = makeUntimedTask(anchor: anchor)
+        let resolved = PushedRecurringOccurrence(taskID: task.id, originalDate: anchor)
+        resolved.isCompleted = true
+        context.insert(resolved)
+
+        let removed = ScheduleReviewViewModel.undoRecurringPush(for: task, context: context)
+
+        XCTAssertTrue(removed.isEmpty)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).count, 1, "a resolved chain is not undone")
+    }
+
+    /// Another task's push is untouched — the predicate is per-task, and a
+    /// fetch-all-then-delete would have passed every other test here.
+    func test_undoRecurringPush_doesNotTouchAnotherTasksPush() throws {
+        let anchor = day(2026, 9, 9)
+        let mine = makeUntimedTask(anchor: anchor)
+        let theirs = makeUntimedTask(anchor: anchor)
+        _ = ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(task: mine, missedDay: anchor, context: context)
+        _ = ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(task: theirs, missedDay: anchor, context: context)
+
+        ScheduleReviewViewModel.undoRecurringPush(for: mine, context: context)
+
+        let left = try context.fetch(FetchDescriptor<PushedRecurringOccurrence>())
+        XCTAssertEqual(left.count, 1)
+        XCTAssertEqual(left.first?.taskID, theirs.id)
+    }
+
     /// Default is `true`, matching every task's behavior before this
     /// field existed — an opt-out, not an opt-in.
     func test_isPushable_defaultsToTrue() {

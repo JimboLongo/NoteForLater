@@ -2777,6 +2777,74 @@ final class ScheduleReviewViewModel {
     /// `context.insert(PushedRecurringOccurrence(...))` directly instead
     /// of routing through here, `isPushable == false` will silently stop
     /// working for it — there is no other enforcement point.
+    /// Cycles a recurring occurrence **and reconciles its push in the same
+    /// call** — landing on `.missed` creates the record, leaving `.missed`
+    /// deletes it.
+    ///
+    /// **This exists because splitting the two directions across call sites
+    /// let them drift, and they did.** The undo was added to
+    /// `NightlyReviewView.pushIfMissed` and not to
+    /// `DayTimelineGridView.cycleRecurringTaskOccurrence`, so cycling back
+    /// to incomplete on the day calendar left the record live and still
+    /// hopping forward — while the same gesture in Nightly Review undid it.
+    /// Both surfaces had a `if next == .missed { push }` written
+    /// independently, and only one grew the matching `else`.
+    ///
+    /// Tests could not catch that. `undoRecurringPush` was covered and
+    /// correct; what was missing was any assertion that a *tap* reaches it,
+    /// and both call sites live in private view methods no test can reach.
+    /// Making one function own both directions is what makes the omission
+    /// unrepresentable rather than merely fixed — there is no longer an
+    /// `else` for a caller to forget.
+    ///
+    /// Returns the new status plus whatever changed, so each surface can do
+    /// its own follow-up (the calendar hops the record immediately; Nightly
+    /// Review tracks the id for `advance()`) without duplicating the
+    /// decision itself.
+    @discardableResult
+    static func cycleRecurringOccurrenceReconcilingPush(
+        task: TaskItem,
+        on day: Date,
+        context: ModelContext,
+        calendar: Calendar = .current
+    ) -> (next: OccurrenceStatus, pushed: PushedRecurringOccurrence?, undone: Set<UUID>) {
+        let next = task.cycleRecurringOccurrence(on: day, context: context, calendar: calendar)
+        guard next == .missed else {
+            return (next, nil, undoRecurringPush(for: task, context: context))
+        }
+        return (next, pushRecurringOccurrenceIfNeeded(task: task, missedDay: day, context: context), [])
+    }
+
+    /// Deletes any outstanding push for `task`, returning the ids removed.
+    ///
+    /// The exact inverse of `pushRecurringOccurrenceIfNeeded`, and the whole
+    /// of it — a recurring push inserts one record and touches nothing else,
+    /// so there is no prior state to restore and nothing to capture. (The
+    /// non-recurring equivalent, `undoGuaranteedPlacement`, needs three
+    /// stored fields precisely because its push *does* have side effects.)
+    ///
+    /// `static` and free of any view so it can be tested directly: sabotage
+    /// found the undo at zero coverage, and the deletion previously lived
+    /// inline in `NightlyReviewView.pushIfMissed` where no test could reach
+    /// it. Returns the ids so the caller can drop them from its own
+    /// same-session tracking set rather than this needing to know about it.
+    ///
+    /// Scoped to incomplete records: a resolved one is history, matching the
+    /// "already pushed" guard's own notion of a live chain.
+    @discardableResult
+    static func undoRecurringPush(for task: TaskItem, context: ModelContext) -> Set<UUID> {
+        let taskID = task.id
+        let outstanding = (try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>(
+            predicate: #Predicate { $0.taskID == taskID && !$0.isCompleted }
+        ))) ?? []
+        var removed: Set<UUID> = []
+        for record in outstanding {
+            removed.insert(record.id)
+            context.delete(record)
+        }
+        return removed
+    }
+
     static func pushRecurringOccurrenceIfNeeded(task: TaskItem, missedDay: Date, context: ModelContext) -> PushedRecurringOccurrence? {
         guard task.isPushable else { return nil }
         let taskID = task.id
