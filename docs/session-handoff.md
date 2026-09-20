@@ -173,6 +173,31 @@ card body has had three restructuring passes already, and this would be a
 fourth to convert a *caught* problem into a *prevented* one. Scoped as
 larger than the problem it prevents.
 
+**Product condition to watch — recurring backlog volume, and when the bulk
+action becomes worth building.**
+
+An unmarked (`.none`) recurring occurrence is no longer swept into
+`.missed` by the nightly commit. It persists and resurfaces in the Today
+step's backlog (which walks back 400 days) until actually marked, and
+backlog blocks Next — deliberately, that is the pressure.
+
+**Measured against the real store, 2026-09-20: 3–4 rows after a week
+away.** Four recurring tasks, three weekly and one monthly, none daily.
+Two weeks gives 7. The estimate that made a bulk action look necessary
+(35 rows) assumed daily recurrence, which this store does not have — and
+all four anchors are *today*, so there is no history to surface at all yet.
+
+**The number is configuration-dependent, and this is the trigger:** one
+daily recurring task adds 7 rows per week on its own, taking a week away
+to roughly 10. At that point "mark all backlog missed" stops being
+speculative. It is a single button on the Today step running the existing
+`cycleRecurringOccurrence` path over the backlog subset — small, and
+deliberately not built now, because building it today would be building
+for a configuration nobody has.
+
+Recorded as a condition rather than a complaint to wait for: check the
+recurrence mix before concluding the backlog is fine.
+
 **Testing practice, general — the gap that hides a bug for a month is not
 a missing assertion, it is a missing *fixture shape*. A suite whose
 fixtures all share one configuration cannot fail on a bug that needs a

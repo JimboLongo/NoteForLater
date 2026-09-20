@@ -89,10 +89,25 @@ enum ReviewItem: Identifiable {
     /// it's directly testable without a SwiftUI/`@Query` harness — the
     /// same reason `ScheduleReviewViewModel.recurringTaskOccurrenceStatus`
     /// is already a standalone function rather than inline view logic.
-    func blocksGate(context: ModelContext) -> Bool {
+    func blocksGate(context: ModelContext, reviewDate: Date, calendar: Calendar = .current) -> Bool {
         switch self {
         case .habit: return false // unreachable — see `unresolvedGateReviewItems`'s own doc comment
-        case .recurringTask(let occurrence): return occurrence.status == .none
+        case .recurringTask(let occurrence):
+            // **Backlog only**, matching the Habits step's own gate (see
+            // `ScheduleReviewViewModel.backlogHabitOccurrences`). A recurring
+            // task due this evening may still legitimately happen; being made
+            // to declare it done or missed at 9pm while planning tomorrow is
+            // a false choice. Earlier days are over, so anything still
+            // unresolved there is genuinely unaddressed.
+            //
+            // Habits got this treatment when their gate was split out; the
+            // recurring side kept the old combined rule and never did. The
+            // asymmetry was the oversight, not this.
+            //
+            // Visibility is unchanged: the review date's own occurrences
+            // still render and are still markable. Gating only.
+            guard occurrence.status == .none else { return false }
+            return calendar.startOfDay(for: occurrence.targetTime) < calendar.startOfDay(for: reviewDate)
         case .block(let block):
             // KEPT DESPITE BEING UNREACHABLE FOR NEW DATA — same reason as
             // `ScheduleReviewViewModel.isRecurringTaskOccurrenceComplete`'s

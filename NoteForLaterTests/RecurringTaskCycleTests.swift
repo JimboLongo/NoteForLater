@@ -160,24 +160,31 @@ final class RecurringTaskCycleTests: XCTestCase {
     }
 
     /// The commit-time sweep shares the same guarded function, so a
-    /// non-pushable task left incomplete there must also get no push
-    /// record, even though its `RecurringTaskLog` still gets marked
-    /// `.missed`.
+    /// non-pushable task **explicitly marked missed** there must also get no
+    /// push record.
+    ///
+    /// **REVERSAL:** the block used to be left merely incomplete, and the
+    /// test asserted the sweep wrote `.missed` to the log itself. The sweep
+    /// no longer marks anything — only an occurrence already at `.missed`
+    /// is pushable — so the fixture marks it first and the log assertion
+    /// becomes a precondition rather than an outcome. What the test is
+    /// actually for is unchanged: `isPushable == false` must suppress the
+    /// record.
     func test_nonPushableTask_commitTimeSweep_createsNoPushRecord() {
         let anchor = day(2026, 9, 9)
         let task = makeSpecificTimeTask(anchor: anchor)
         task.isPushable = false
         let block = ScheduledBlock(date: anchor, startTime: anchor, endTime: anchor.addingTimeInterval(900), task: task)
         context.insert(block)
+        block.status = .missed
 
         let created = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
             reviewedBlocks: [block], tasks: [task], context: context, cutoff: anchor.addingTimeInterval(86400)
         )
 
         XCTAssertTrue(created.isEmpty)
-        XCTAssertEqual(RecurringTaskLog.log(taskID: task.id, on: anchor, context: context, calendar: calendar)?.status, .missed)
         let allPushes = (try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>())) ?? []
-        XCTAssertTrue(allPushes.isEmpty)
+        XCTAssertTrue(allPushes.isEmpty, "isPushable == false suppresses the record even for a real miss")
     }
 
     /// Default is `true`, matching every task's behavior before this
@@ -232,20 +239,35 @@ final class RecurringTaskCycleTests: XCTestCase {
         XCTAssertEqual(allPushes.count, 1, "exactly one push record must exist, not two")
     }
 
-    /// The sweep's own new responsibility (mirroring
-    /// `markUnresolvedHabitOccurrencesAsMissed`): every occurrence it
-    /// processes gets `.missed` written to its log, not just a push
-    /// record with the log silently left at `.none`.
-    func test_pushMissedRecurringOccurrences_writesMissedStatus_toLog() {
+    /// **REVERSAL — the sweep must NOT mark an untouched occurrence missed.**
+    ///
+    /// This asserted the opposite: that every occurrence the sweep processed
+    /// got `.missed` written to its log, mirroring
+    /// `markUnresolvedHabitOccurrencesAsMissed`. That was right when `.none`
+    /// was the only non-complete state and had to stand in for "unfinished".
+    /// Now `.missed` says it explicitly, and deciding on the user's behalf
+    /// that an untouched occurrence was missed writes a false record *and*
+    /// pushes work nobody deferred.
+    ///
+    /// Inverted rather than deleted: the behaviour is the exact negation of
+    /// what it used to pin, so the test still belongs — it is the guard that
+    /// the sweep stays passive. An untouched occurrence stays `.none` and
+    /// resurfaces as backlog in the Today step until actually marked.
+    func test_pushMissedRecurringOccurrences_leavesAnUntouchedOccurrenceAlone() {
         let anchor = day(2026, 8, 31)
         let task = makeUntimedTask(anchor: anchor)
         let cutoff = day(2026, 9, 1)
 
-        _ = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
+        let created = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
             reviewedBlocks: [], tasks: [task], context: context, cutoff: cutoff
         )
 
-        XCTAssertEqual(RecurringTaskLog.log(taskID: task.id, on: anchor, context: context, calendar: calendar)?.status, .missed)
+        XCTAssertTrue(created.isEmpty, "nothing was marked missed, so nothing is pushed")
+        XCTAssertNil(
+            RecurringTaskLog.log(taskID: task.id, on: anchor, context: context, calendar: calendar)?.status,
+            "an occurrence the user never touched must not be rewritten to .missed by the commit"
+        )
+        XCTAssertTrue(((try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>())) ?? []).isEmpty)
     }
 
     // MARK: - Operational vs. display list (mirrors the habit split)

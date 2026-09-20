@@ -420,6 +420,57 @@ final class ThreeStateCompletionTests: XCTestCase {
         XCTAssertEqual(viewModel.blocks.count, 1, "just the missed original; the replacement belongs to another day")
     }
 
+    /// **The Next gate is backlog-only for recurring occurrences**, matching
+    /// the Habits step (`ScheduleReviewViewModel.backlogHabitOccurrences`).
+    ///
+    /// A recurring task due this evening may still legitimately happen;
+    /// being made to declare it done or missed at 9pm while planning
+    /// tomorrow is a false choice. Earlier days are over. Habits got this
+    /// when their gate was split out; the recurring side kept the old
+    /// combined rule and never did — the asymmetry was the oversight.
+    ///
+    /// Visibility is unchanged: the review date's own occurrences still
+    /// render and are still markable. Gating only.
+    func test_recurringOccurrenceGate_blocksBacklogButNotTheReviewDate() throws {
+        let reviewDate = day(2026, 1, 5)
+        let task = makeEligibleTask()
+        task.isRecurring = true
+
+        func occurrence(on target: Date) -> ReviewItem {
+            .recurringTask(ScheduleReviewViewModel.RecurringTaskReviewOccurrence(
+                id: "\(task.id)-\(Int(target.timeIntervalSince1970))",
+                task: task,
+                status: .none,
+                targetTime: calendar.date(byAdding: .hour, value: 12, to: target)!,
+                modeLabel: "Midday"
+            ))
+        }
+
+        XCTAssertFalse(
+            occurrence(on: reviewDate).blocksGate(context: context, reviewDate: reviewDate),
+            "the review date's own occurrence may still happen — it must not block Next"
+        )
+        XCTAssertTrue(
+            occurrence(on: day(2026, 1, 4)).blocksGate(context: context, reviewDate: reviewDate),
+            "an earlier day is over, so an unresolved occurrence there is genuinely unaddressed"
+        )
+    }
+
+    /// A resolved backlog occurrence satisfies the gate — the date bound
+    /// must not turn the gate into "any backlog blocks".
+    func test_recurringOccurrenceGate_resolvedBacklogDoesNotBlock() throws {
+        let reviewDate = day(2026, 1, 5)
+        let task = makeEligibleTask()
+        task.isRecurring = true
+        let item = ReviewItem.recurringTask(ScheduleReviewViewModel.RecurringTaskReviewOccurrence(
+            id: "x", task: task, status: .missed,
+            targetTime: calendar.date(byAdding: .hour, value: 12, to: day(2026, 1, 4))!,
+            modeLabel: "Midday"
+        ))
+
+        XCTAssertFalse(item.blocksGate(context: context, reviewDate: reviewDate), "missed is a resolved, terminal answer")
+    }
+
     /// The same distinction, verified fail-then-pass directly against
     /// `resolveMissedPastBlocks`'s own filter (`status == .missed`, not
     /// `!isCompleted`) — a block explicitly left at `.none` must never be
@@ -539,22 +590,22 @@ final class ThreeStateCompletionTests: XCTestCase {
         let task = makeEligibleTask()
         let block = makeBlock(for: task, on: day(2026, 1, 5))
 
-        XCTAssertTrue(ReviewItem.block(block).blocksGate(context: context), "an unmarked block must block Next")
+        XCTAssertTrue(ReviewItem.block(block).blocksGate(context: context, reviewDate: day(2026, 1, 5)), "an unmarked block must block Next")
 
         block.status = .missed
-        XCTAssertFalse(ReviewItem.block(block).blocksGate(context: context), "a missed block must satisfy the gate — it's a resolved, terminal answer")
+        XCTAssertFalse(ReviewItem.block(block).blocksGate(context: context, reviewDate: day(2026, 1, 5)), "a missed block must satisfy the gate — it's a resolved, terminal answer")
 
         block.status = .complete
-        XCTAssertFalse(ReviewItem.block(block).blocksGate(context: context))
+        XCTAssertFalse(ReviewItem.block(block).blocksGate(context: context, reviewDate: day(2026, 1, 5)))
     }
 
     func test_gate_blocksOnUnmarkedMeal_notOnMissedOrComplete() {
         let (block, selection, _) = makeMealBlock(on: day(2026, 1, 5))
 
-        XCTAssertTrue(ReviewItem.meal(selection, targetTime: block.startTime).blocksGate(context: context))
+        XCTAssertTrue(ReviewItem.meal(selection, targetTime: block.startTime).blocksGate(context: context, reviewDate: day(2026, 1, 5)))
 
         selection.status = .missed
-        XCTAssertFalse(ReviewItem.meal(selection, targetTime: block.startTime).blocksGate(context: context))
+        XCTAssertFalse(ReviewItem.meal(selection, targetTime: block.startTime).blocksGate(context: context, reviewDate: day(2026, 1, 5)))
     }
 
     func test_gate_recurringTaskSpecificTimeBlock_unaffectedByOrdinaryBlockLogic() {
@@ -575,11 +626,11 @@ final class ThreeStateCompletionTests: XCTestCase {
         let block = makeBlock(for: task, on: day(2026, 1, 5))
         // block.status left at .none, but the recurring path ignores it —
         // RecurringTaskLog is the source of truth for this branch.
-        XCTAssertTrue(ReviewItem.block(block).blocksGate(context: context), "no RecurringTaskLog yet means .none — still unresolved")
+        XCTAssertTrue(ReviewItem.block(block).blocksGate(context: context, reviewDate: day(2026, 1, 5)), "no RecurringTaskLog yet means .none — still unresolved")
 
         let log = RecurringTaskLog.logOrCreate(taskID: task.id, on: block.date, context: context, calendar: calendar)
         log.status = .missed
-        XCTAssertFalse(ReviewItem.block(block).blocksGate(context: context), "resolved in RecurringTaskLog — must satisfy the gate regardless of block.status")
+        XCTAssertFalse(ReviewItem.block(block).blocksGate(context: context, reviewDate: day(2026, 1, 5)), "resolved in RecurringTaskLog — must satisfy the gate regardless of block.status")
     }
 
     // MARK: - Migration: past incomplete -> missed; current/future incomplete -> none; legacy complete preserved

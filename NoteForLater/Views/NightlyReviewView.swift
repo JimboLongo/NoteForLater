@@ -506,7 +506,7 @@ struct NightlyReviewView: View {
     /// `resolveMissedPastBlocks` is the redundant safety net for it, not
     /// this gate's reason to exclude it.
     private var unresolvedGateReviewItems: [ReviewItem] {
-        reviewItems.filter { $0.blocksGate(context: modelContext) }
+        reviewItems.filter { $0.blocksGate(context: modelContext, reviewDate: reviewDate) }
     }
 
     private var todayUnresolvedGateMessage: String {

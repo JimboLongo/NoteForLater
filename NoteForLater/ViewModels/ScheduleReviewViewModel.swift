@@ -2482,6 +2482,7 @@ final class ScheduleReviewViewModel {
         }
     }
 
+
     /// Task IDs whose most recent occurrence at or before `today` is still
     /// unresolved and needs to display as carried forward onto
     /// `targetDate` — a stand-in for the real `PushedRecurringOccurrence`
@@ -2531,7 +2532,6 @@ final class ScheduleReviewViewModel {
         }
         return result
     }
-
     /// Shared by `carriedForwardRecurringTaskIDs` — completion for a given
     /// day, checking whichever store that mode could plausibly have
     /// written to: a completed `ScheduledBlock` for a Specific-Time task
@@ -2868,12 +2868,37 @@ final class ScheduleReviewViewModel {
             }
         }
 
-        for block in reviewedBlocks where !block.isCompleted {
+        // **REVERSAL — only an explicitly missed occurrence pushes now.**
+        //
+        // Both arms used to sweep anything not complete, and
+        // `markMissedAndPush` *writes* `log.status = .missed` before
+        // pushing — so the commit turned every unresolved occurrence into a
+        // miss and pushed it. That was right when `.none` was the only
+        // non-complete state and had to stand in for "unfinished". Now
+        // `.missed` says it explicitly, and deciding on the user's behalf
+        // that an untouched occurrence was missed is both a false record and
+        // an unasked-for push.
+        //
+        // `status == .missed`, not `!isCompleted`: the same lossy read that
+        // produced three separate bugs this session (see
+        // docs/session-handoff.md) — it means "including missed" but also
+        // "including never looked at".
+        //
+        // The untimed arm is gone entirely rather than filtered.
+        // `openRecurringTaskOccurrencesForReview` returns `.none` occurrences
+        // *only*, so under the new rule it can never yield anything
+        // pushable — a filtered call would be a permanent no-op dressed up
+        // as logic. An occurrence marked `.missed` interactively already
+        // pushed at the moment of the tap (`NightlyReviewView.pushIfMissed`),
+        // which is why nothing is lost by dropping it.
+        //
+        // What happens to an unmarked occurrence instead: it stays `.none`,
+        // keeps no forward presence, and resurfaces in the Today step's
+        // backlog (`allRecurringTaskOccurrencesForReview` walks back 400 days)
+        // until it is actually marked.
+        for block in reviewedBlocks where block.status == .missed {
             guard let task = block.task, task.isRecurring else { continue }
             markMissedAndPush(task: task, missedDay: block.date)
-        }
-        for occurrence in openRecurringTaskOccurrencesForReview(tasks: tasks, context: context, upTo: cutoff) {
-            markMissedAndPush(task: occurrence.task, missedDay: occurrence.targetTime)
         }
         return created
     }

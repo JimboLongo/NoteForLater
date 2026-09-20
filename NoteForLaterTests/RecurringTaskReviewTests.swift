@@ -63,19 +63,28 @@ final class RecurringTaskReviewTests: XCTestCase {
 
     // MARK: - Gap 1: the miss must actually be captured
 
-    /// Gap 1's regression case. To verify this genuinely fails on the old
-    /// code — not just "doesn't compile" for a brand-new function, which
-    /// proves nothing about behavior — the `openRecurringTaskOccurrencesForReview`
-    /// half of `pushMissedRecurringOccurrences` was temporarily commented
-    /// out (leaving only the block-scoped loop, exactly what
-    /// `NightlyReviewView.swift:386-394` did before this fix) and this
-    /// test was run in isolation: all 6 assertions in this test failed —
-    /// `created.count` came back `0`, both `first` lookups `nil`, the
-    /// fetched `pending` count `0`, and the final `XCTAssertFalse` failed
-    /// on the coalesced `true`. Restoring the real implementation and
-    /// re-running flipped all 6 green with no other change. Both runs were
-    /// executed via `xcodebuild test`, not inferred.
-    func test_pushMissedRecurringOccurrences_capturesMissedMiddayRecurringTask() throws {
+    /// **REVERSAL — an untimed occurrence the user never touched is no
+    /// longer captured or pushed at the commit.**
+    ///
+    /// This was "Gap 1's regression case": the commit's untimed arm existed
+    /// specifically to sweep `.none` occurrences into `.missed` and push
+    /// them, and this test pinned that with six assertions. It was correct
+    /// when `.none` was the only non-complete state. Now `.missed` is an
+    /// explicit decision, and only an explicit decision pushes — so the
+    /// untimed arm is gone entirely rather than filtered
+    /// (`openRecurringTaskOccurrencesForReview` returns `.none` occurrences
+    /// only, so a filtered call would be a permanent no-op dressed as logic).
+    ///
+    /// Inverted in place rather than deleted: the situation it constructs —
+    /// an untimed recurring task with no log at all, exactly the on-device
+    /// state it was written from — is still the case that matters most. Only
+    /// the expected outcome flipped.
+    ///
+    /// Nothing is lost by this. An occurrence marked `.missed` interactively
+    /// already pushed at the moment of the tap
+    /// (`NightlyReviewView.pushIfMissed`), and an untouched one resurfaces as
+    /// backlog in the Today step, which walks back 400 days.
+    func test_pushMissedRecurringOccurrences_doesNotCaptureAnUntouchedMiddayOccurrence() throws {
         let anchor = day(2026, 8, 31)
         let task = makeMiddayRecurringTask(anchor: anchor)
         let cutoff = day(2026, 9, 1)
@@ -89,14 +98,63 @@ final class RecurringTaskReviewTests: XCTestCase {
             cutoff: cutoff
         )
 
-        XCTAssertEqual(created.count, 1, "a missed midday recurring occurrence should produce exactly one pushed record")
-        XCTAssertEqual(created.first?.task.id, task.id)
-        XCTAssertEqual(created.first.map { calendar.startOfDay(for: $0.missedDay) }, calendar.startOfDay(for: anchor))
+        XCTAssertTrue(created.isEmpty, "never looked at is not the same as missed")
+        XCTAssertNil(
+            RecurringTaskLog.log(taskID: task.id, on: anchor, context: context, calendar: calendar)?.status,
+            "the commit must not write a decision the user did not make"
+        )
+        XCTAssertTrue(try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).isEmpty)
+    }
 
-        let pending = try context.fetch(FetchDescriptor<PushedRecurringOccurrence>())
-        XCTAssertEqual(pending.count, 1)
-        XCTAssertEqual(pending.first?.taskID, task.id)
-        XCTAssertFalse(pending.first?.isCompleted ?? true)
+    /// The other half of the reversal: an occurrence the user *did* mark
+    /// missed still pushes at the commit. Without this the change above
+    /// could be satisfied by the sweep doing nothing at all.
+    ///
+    /// Uses a block-backed task because that is the only arm left — the
+    /// untimed arm is gone, and an untimed occurrence marked `.missed`
+    /// interactively has already pushed via `pushIfMissed`.
+    func test_pushMissedRecurringOccurrences_stillPushesAnExplicitlyMissedBlock() throws {
+        let anchor = day(2026, 8, 31)
+        let task = makeMiddayRecurringTask(anchor: anchor)
+        let block = ScheduledBlock(date: anchor, startTime: anchor, endTime: anchor.addingTimeInterval(900), task: task)
+        context.insert(block)
+        block.status = .missed
+
+        let created = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
+            reviewedBlocks: [block], tasks: [task], context: context, cutoff: day(2026, 9, 1)
+        )
+
+        XCTAssertEqual(created.count, 1, "an explicit miss still pushes")
+        XCTAssertEqual(created.first?.task.id, task.id)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).count, 1)
+    }
+
+    /// The block arm's own half of the reversal: a recurring task's block
+    /// left merely **unmarked** must not push either.
+    ///
+    /// Added because sabotage found this uncovered — reverting the block
+    /// arm's filter from `status == .missed` back to `!isCompleted` left all
+    /// 632 tests green. `ScheduledBlock.isCompleted` is `status ==
+    /// .complete`, so `!isCompleted` silently means "including never looked
+    /// at", the same lossy read that produced three separate bugs this
+    /// session.
+    func test_pushMissedRecurringOccurrences_doesNotPushAnUnmarkedBlock() throws {
+        let anchor = day(2026, 8, 31)
+        let task = makeMiddayRecurringTask(anchor: anchor)
+        let block = ScheduledBlock(date: anchor, startTime: anchor, endTime: anchor.addingTimeInterval(900), task: task)
+        context.insert(block)
+        XCTAssertEqual(block.status, OccurrenceStatus.none, "untouched, which reads !isCompleted just like a real miss")
+
+        let created = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
+            reviewedBlocks: [block], tasks: [task], context: context, cutoff: day(2026, 9, 1)
+        )
+
+        XCTAssertTrue(created.isEmpty, "an unmarked block is not a miss")
+        XCTAssertNil(
+            RecurringTaskLog.log(taskID: task.id, on: anchor, context: context, calendar: calendar)?.status,
+            "and the commit must not write .missed to its log"
+        )
+        XCTAssertTrue(try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).isEmpty)
     }
 
     /// A completed occurrence (real `RecurringTaskLog`, `isCompleted: true`)
