@@ -8,6 +8,32 @@ repeatedly this session — the crash-surface item at the bottom of this file
 exists only because a test actually ran and something broke, not because
 anyone inferred it.
 
+**Sabotage practice — never restore with `git checkout`. Copy the file to
+the scratchpad first and restore from the copy.**
+
+Sabotage means editing a source file, running the suite to see what goes
+red, then putting the file back. `git checkout <file>` reverts it to HEAD —
+which also discards every *uncommitted* change in that file, including the
+new tests written minutes earlier for the very thing being sabotaged.
+
+This happened twice in one session. Once on `DayTimelineGridView.swift`,
+losing the routing fix being verified; once on `TwoMinutePushTests.swift`,
+losing all seven new ledger tests. Both were caught only by the suite count
+reading lower than expected (707 where 714 was due) — **nothing fails when
+tests go missing.** The suite gets smaller and stays green, exactly the
+silent-loss shape the section below describes for deleted tests.
+
+The workflow that does not have this failure mode:
+
+```
+cp <file> $SCRATCH/x.ok      # before the first sabotage
+... sabotage, run, cp $SCRATCH/x.ok <file> ... # restore from the copy
+```
+
+And check the restored suite count matches the pre-sabotage baseline before
+believing any of the numbers. A sabotage count is only meaningful if the
+tests it was measured against still exist.
+
 **Deletion practice, general — a deletion list is a hypothesis, not an
 inventory. Re-derive every site by reading it at delete time.**
 
