@@ -59,7 +59,7 @@ enum TwoMinutePush {
         if next == .missed {
             apply(to: task, planDate: planDate, missedOn: missedDay, calendar: calendar, context: context)
         } else {
-            clearPushBookkeeping(task)
+            clearPushBookkeeping(task, context: context)
         }
         return next
     }
@@ -77,7 +77,15 @@ enum TwoMinutePush {
     /// push, then later cycled to missed again, would skip re-capturing
     /// (`apply` only captures when no push is outstanding) and restore a
     /// start date from two pushes ago.
-    private static func clearPushBookkeeping(_ task: TaskItem) {
+    ///
+    /// **Only when no miss record is left standing.** An open record means
+    /// a push chain is still running and its rows are still tappable, so
+    /// the capture is the only thing that can answer them — dropping it
+    /// there is what made a second miss restore the pushed date instead of
+    /// the original (see `apply`). The `.complete` on the way to a second
+    /// `.missed` is transitional, not the end of the chain.
+    private static func clearPushBookkeeping(_ task: TaskItem, context: ModelContext) {
+        guard TaskMissRecord.record(for: task, in: context) == nil else { return }
         task.hasOutstandingTwoMinutePush = false
         task.startDateBeforePush = nil
         task.startDatePickedBeforePush = false
@@ -144,11 +152,29 @@ enum TwoMinutePush {
             assertionFailure("planDate (\(planDayStart)) must be after missedDay (\(missedDayStart)) — a push has nowhere to go otherwise")
             return
         }
-        if !task.hasOutstandingTwoMinutePush {
+        // **Capture on the first miss of the chain, and only then** — so an
+        // undo restores the date the task had before *any* of this, not the
+        // one the previous push wrote.
+        //
+        // REVERSAL: this gated on `!task.hasOutstandingTwoMinutePush`, which
+        // silently restored the wrong date. Reaching `.missed` a second time
+        // passes through `.complete`, and that step calls
+        // `clearPushBookkeeping` — so by the time the second `apply` ran the
+        // flag was already `false` and the capture was overwritten with the
+        // *pushed* date. Undoing a Monday miss then put the task back on
+        // Tuesday rather than clearing its start date.
+        //
+        // The open miss records are the durable statement that a chain is
+        // still running, so they are what this asks. A transitional
+        // `.complete` cannot erase them.
+        if TaskMissRecord.record(for: task, in: context) == nil {
             task.startDateBeforePush = task.startDate
             task.startDatePickedBeforePush = task.startDatePicked
-            task.hasOutstandingTwoMinutePush = true
         }
+        // Set unconditionally, not inside the capture branch: after that
+        // transitional `.complete` the flag is `false` while a chain is
+        // genuinely open, and `undo` refuses to restore without it.
+        task.hasOutstandingTwoMinutePush = true
         task.setStartDate(planDayStart, calendar: calendar)
         // **Back to `.none`.** The miss is carried by the record on the
         // original day now; the task's own status describes the row on the
@@ -162,11 +188,22 @@ enum TwoMinutePush {
         // `.none → .complete → (pushed away)`, and the third state lives on
         // the other day as history rather than on this row.
         task.status = .none
-        // The half that stays behind — see `TaskMissRecord`. At most one
-        // outstanding record per task: cycling missed twice without an
-        // intervening undo keeps the first, so the record names the day the
-        // miss actually happened rather than the last day it was re-tapped.
-        guard TaskMissRecord.record(for: task, in: context) == nil else { return }
+        // The half that stays behind — see `TaskMissRecord`. **One record
+        // per task per day**, so each miss leaves its own row: missed
+        // Monday, missed again Tuesday, and Monday and Tuesday both read as
+        // missed while the live task sits on Wednesday.
+        //
+        // REVERSAL: this was one record per *task*, which made a re-miss
+        // insert nothing at all — the second miss's day ended up blank
+        // while the first day's row carried the whole chain. That guard was
+        // protecting the record from being *moved* off the day the miss
+        // happened, which is still right; a miss belongs to its day. It was
+        // too strong, because each miss is its own event.
+        //
+        // Per-day is still needed: `apply` leaves the task at `.none`, so
+        // the same row can be cycled back to `.missed` without an
+        // intervening undo, and that must not stack two rows on one day.
+        guard TaskMissRecord.record(for: task, on: missedDay, in: context, calendar: calendar) == nil else { return }
         context.insert(TaskMissRecord(
             taskID: task.id,
             title: task.title,
@@ -189,13 +226,55 @@ enum TwoMinutePush {
     /// unambiguous: that row *is* the push, and tapping it puts it back.
     ///
     /// A no-op when no push is outstanding, so a caller need not check.
-    static func undo(for task: TaskItem, context: ModelContext) {
-        // The record goes with the push, always — even if the bookkeeping
-        // below has already been cleared by something else, an undo must not
-        // leave a miss row standing for a push that no longer exists.
-        if let record = TaskMissRecord.record(for: task, in: context) {
-            context.delete(record)
+    static func undo(for task: TaskItem, context: ModelContext, calendar: Calendar = .current) {
+        guard let earliest = TaskMissRecord.record(for: task, in: context) else {
+            // A push with no record behind it — restore what was captured
+            // and stop. Reachable only for a task pushed before records
+            // existed.
+            restoreCapturedStartDate(for: task)
+            return
         }
+        undo(earliest, for: task, context: context, calendar: calendar)
+    }
+
+    /// Undoes one miss **and everything that followed from it**.
+    ///
+    /// A chain of misses is causal, not independent: the task was only on
+    /// Tuesday to be missed because Monday's miss put it there. So undoing
+    /// Monday has to take Tuesday's record with it, or the day would keep a
+    /// red row for a miss that, after the undo, never happened.
+    ///
+    /// **Where the task lands depends on which row was tapped.** Undoing
+    /// the earliest miss restores the captured pre-chain state — which
+    /// includes having had no start date at all, cleared rather than left
+    /// stranded. Undoing a later one puts the task back on that record's own
+    /// day, which is where it was sitting when that miss was marked. No
+    /// extra stored state is needed for the second case: `missedDay` already
+    /// says it.
+    static func undo(
+        _ record: TaskMissRecord,
+        for task: TaskItem,
+        context: ModelContext,
+        calendar: Calendar = .current
+    ) {
+        let from = calendar.startOfDay(for: record.missedDay)
+        let chain = TaskMissRecord.records(for: task, in: context)
+        let isEarliest = chain.first.map { calendar.startOfDay(for: $0.missedDay) >= from } ?? true
+
+        for later in chain where calendar.startOfDay(for: later.missedDay) >= from {
+            context.delete(later)
+        }
+
+        if isEarliest {
+            restoreCapturedStartDate(for: task)
+        } else {
+            // Earlier misses are still standing, so the chain — and its
+            // capture — stays open.
+            task.setStartDate(from, calendar: calendar)
+        }
+    }
+
+    private static func restoreCapturedStartDate(for task: TaskItem) {
         guard task.hasOutstandingTwoMinutePush else { return }
         if let prior = task.startDateBeforePush {
             task.setStartDate(prior)

@@ -154,7 +154,22 @@ final class TwoMinutePushTests: XCTestCase {
     /// The record names the day the miss actually happened, not the last day
     /// it was re-tapped. Cycling missed twice without an intervening undo
     /// keeps the first record.
-    func test_reMissingDoesNotMoveOrDuplicateTheRecord() throws {
+    /// UPDATED — the rule this asserts changed, so the assertions changed
+    /// with it rather than the test being dropped.
+    ///
+    /// It used to demand **one record per task**, which it got by having
+    /// `apply` decline to insert a second. That was protecting something
+    /// real and still is: a record must never *move* off the day its miss
+    /// happened on, so re-missing cannot rewrite Jan 5 to Jan 8. But it was
+    /// too strong. Each miss is its own event — missed Monday, missed again
+    /// Tuesday, and both days should read as missed — so the second insert
+    /// is now correct and the first record staying put is what matters.
+    ///
+    /// The old name said "DoesNotMoveOrDuplicate". Only the first half
+    /// survives, so the name says that and the duplicate-suppression it also
+    /// covered moved to `test_reMissingTheSameDayDoesNotStackTwoRecords`,
+    /// where that rule actually lives now (per *day*, not per task).
+    func test_reMissingDoesNotMoveAnEarlierRecord() throws {
         let task = makeTask()
         for _ in 0..<2 {
             _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
@@ -162,9 +177,22 @@ final class TwoMinutePushTests: XCTestCase {
         // Re-missed from a later day without undoing first.
         TwoMinutePush.apply(to: task, planDate: day(2026, 1, 9), missedOn: day(2026, 1, 8), context: context)
 
-        let all = try context.fetch(FetchDescriptor<TaskMissRecord>())
-        XCTAssertEqual(all.count, 1, "one outstanding record per task, not a pile")
-        XCTAssertEqual(all.first?.missedDay, day(2026, 1, 5), "still the day the miss happened")
+        let all = TaskMissRecord.records(for: task, in: context)
+        XCTAssertEqual(all.count, 2, "each miss is its own event — one row per day it happened on")
+        XCTAssertEqual(all.first?.missedDay, day(2026, 1, 5), "the first record never moves off the day the miss happened")
+        XCTAssertEqual(all.last?.missedDay, day(2026, 1, 8))
+    }
+
+    /// The per-day uniqueness that replaced per-task uniqueness. `apply`
+    /// leaves the task at `.none`, so the same row can reach `.missed` again
+    /// without an intervening undo — and that must not stack two red rows on
+    /// one day.
+    func test_reMissingTheSameDayDoesNotStackTwoRecords() throws {
+        let task = makeTask()
+        TwoMinutePush.apply(to: task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+        TwoMinutePush.apply(to: task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+
+        XCTAssertEqual(TaskMissRecord.records(for: task, in: context).count, 1)
     }
 
     /// Undo takes the record with it — otherwise a miss row would stand for
@@ -413,7 +441,21 @@ final class TwoMinutePushTests: XCTestCase {
     /// Completing on the pushed day, then missing again later, re-captures
     /// the prior state rather than restoring one from two pushes ago. This
     /// is what `clearPushBookkeeping` is for.
-    func test_aSecondPushAfterCompletionRecapturesPriorState() throws {
+    /// UPDATED — this asserted the bug, so it now asserts the rule that
+    /// replaced it.
+    ///
+    /// It demanded that a second miss *re-capture*, restoring "where it was
+    /// before THIS push". That reads reasonably in isolation and is wrong
+    /// once misses chain: the task was only sitting on Jan 6 because the
+    /// Jan 5 miss put it there, so restoring Jan 6 restores a date the user
+    /// never chose. Undoing the first miss has to unwind everything that
+    /// followed from it, which means the capture is taken once, on the
+    /// first miss of the chain, and held.
+    ///
+    /// The re-capture it was pinning came from `.complete` clearing the
+    /// bookkeeping on the way to the second `.missed` — a transitional step
+    /// being treated as the end of the chain. See `TwoMinutePush.apply`.
+    func test_undoAfterASecondPushRestoresTheOriginalDate() throws {
         let task = makeTask()
         let original = day(2025, 12, 1)
         task.setStartDate(original)
@@ -427,8 +469,8 @@ final class TwoMinutePushTests: XCTestCase {
         TwoMinutePush.undo(for: task, context: context)
 
         XCTAssertEqual(
-            task.startDate.map { calendar.startOfDay(for: $0) }, day(2026, 1, 6),
-            "undo restores where it was before THIS push, not the original date from before the first one"
+            task.startDate.map { calendar.startOfDay(for: $0) }, original,
+            "the original date, from before the first miss — the whole chain unwinds"
         )
     }
 
@@ -630,7 +672,21 @@ final class TwoMinutePushTests: XCTestCase {
 
         XCTAssertEqual(task.startDate.map { calendar.startOfDay(for: $0) }, planDate, "done on the day it was owed")
         XCTAssertEqual(try context.fetch(FetchDescriptor<TaskMissRecord>()).count, 1, "the miss still happened")
-        XCTAssertFalse(task.hasOutstandingTwoMinutePush, "but there is nothing left to reverse")
+        // UPDATED — this asserted `false`, on the reasoning that completing
+        // leaves nothing to reverse. That held while the record was inert
+        // history. It is not: the record's row on the calendar is a live
+        // undo target, and it outlives the completion. Tapping Jan 5's red
+        // row after finishing the task on Jan 6 still has to put the start
+        // date back, so the capture has to still be there to put back.
+        //
+        // The clearing now keys off whether any record is left standing
+        // (`clearPushBookkeeping`), which is also what fixed the
+        // transitional `.complete` overwriting the capture mid-chain.
+        XCTAssertTrue(task.hasOutstandingTwoMinutePush, "the record is still a tappable undo, so the capture stays")
+
+        TwoMinutePush.undo(for: task, context: context)
+        XCTAssertNil(task.startDate, "and that undo still works after completion")
+        XCTAssertTrue(task.isCompleted, "without un-completing it — completing and undoing are different things")
     }
 
     // MARK: - The expired-push sweep
@@ -937,5 +993,155 @@ final class TaskMissRecordTests: XCTestCase {
         let records = TaskMissRecord.records(on: today, in: context)
         XCTAssertEqual(records.count, 1)
         XCTAssertEqual(calendar.startOfDay(for: try XCTUnwrap(records.first).pushedToDay), day(2026, 9, 22))
+    }
+
+    // MARK: - A chain of misses
+
+    private func missOnCalendar(_ task: TaskItem, on missedDay: Date, to planDate: Date) {
+        // Two taps reach `.missed` from a live row; `apply` leaves the task
+        // at `.none`, so the pushed row starts from `.none` again.
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, calendar: calendar, context: context)
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, calendar: calendar, context: context)
+    }
+
+    /// **Three days, three rows** — the reported bug. Missing Monday then
+    /// missing again Tuesday used to leave Monday's record carrying the
+    /// whole chain and Tuesday's day blank, because `apply` declined to
+    /// insert a second record for a task that already had one.
+    func test_missingOnConsecutiveDays_leavesARowOnEachDay() throws {
+        let mon = day(2026, 9, 21), tue = day(2026, 9, 22), wed = day(2026, 9, 23)
+        let task = makeTask()
+
+        missOnCalendar(task, on: mon, to: tue)
+        missOnCalendar(task, on: tue, to: wed)
+
+        XCTAssertEqual(
+            TaskMissRecord.records(for: task, in: context).map(\.missedDay), [mon, tue],
+            "Tuesday's miss produced no record at all before this — its day read as empty"
+        )
+        XCTAssertEqual(task.startDate.map { calendar.startOfDay(for: $0) }, wed)
+
+        func kinds(_ d: Date) -> [String] {
+            TaskItem.twoMinuteRows(on: d, from: [task], context: context, calendar: calendar).map {
+                if case .miss = $0 { return "miss" } else { return "task" }
+            }
+        }
+        XCTAssertEqual(kinds(mon), ["miss"])
+        XCTAssertEqual(kinds(tue), ["miss"], "the day that was blank")
+        XCTAssertEqual(kinds(wed), ["task"])
+    }
+
+    /// **The capture survives the chain.** A second miss passes through
+    /// `.complete` on the way, and that step used to clear the bookkeeping —
+    /// so `apply` re-captured, storing the *pushed* date as the "prior"
+    /// one. Undoing then restored Tuesday instead of clearing a start date
+    /// the task never had.
+    ///
+    /// Sabotage note: removing the first-push gate entirely produced **0
+    /// failures** across 685 tests, which is why this shipped wrong.
+    func test_secondMissDoesNotOverwriteTheCapturedPriorState() throws {
+        let mon = day(2026, 9, 21), tue = day(2026, 9, 22), wed = day(2026, 9, 23)
+        let task = makeTask()
+        XCTAssertNil(task.startDate, "no start date before any of this")
+
+        missOnCalendar(task, on: mon, to: tue)
+        missOnCalendar(task, on: tue, to: wed)
+
+        XCTAssertNil(task.startDateBeforePush, "captured nil, not Tuesday")
+        XCTAssertTrue(task.hasOutstandingTwoMinutePush, "the chain is still open")
+    }
+
+    /// Undoing the **first** miss unwinds everything after it: the task goes
+    /// back to where it started, and no day is left showing a red row for a
+    /// miss that no longer happened.
+    func test_undoingTheFirstMissClearsTheWholeChain() throws {
+        let mon = day(2026, 9, 21), tue = day(2026, 9, 22), wed = day(2026, 9, 23)
+        let task = makeTask()
+        missOnCalendar(task, on: mon, to: tue)
+        missOnCalendar(task, on: tue, to: wed)
+
+        let first = try XCTUnwrap(TaskMissRecord.records(for: task, in: context).first)
+        TwoMinutePush.undo(first, for: task, context: context, calendar: calendar)
+
+        XCTAssertTrue(TaskMissRecord.records(for: task, in: context).isEmpty, "both records go")
+        XCTAssertNil(task.startDate, "restored to having none — not to Tuesday")
+        XCTAssertFalse(task.hasOutstandingTwoMinutePush)
+        // Not "no rows": with the start date cleared the live task falls
+        // back to `createdAt`, which in this fixture is today. What must be
+        // gone is the *miss* row.
+        XCTAssertFalse(
+            TaskItem.twoMinuteRows(on: mon, from: [task], context: context, calendar: calendar)
+                .contains { if case .miss = $0 { return true } else { return false } },
+            "no red row for a miss that no longer happened"
+        )
+    }
+
+    /// Undoing a **later** miss unwinds only from there: the earlier miss
+    /// still happened, so its row stays and the task goes back to the day
+    /// the undone miss was marked on.
+    func test_undoingALaterMissLeavesTheEarlierOneStanding() throws {
+        let mon = day(2026, 9, 21), tue = day(2026, 9, 22), wed = day(2026, 9, 23)
+        let task = makeTask()
+        missOnCalendar(task, on: mon, to: tue)
+        missOnCalendar(task, on: tue, to: wed)
+
+        let second = try XCTUnwrap(TaskMissRecord.records(for: task, in: context).last)
+        TwoMinutePush.undo(second, for: task, context: context, calendar: calendar)
+
+        XCTAssertEqual(TaskMissRecord.records(for: task, in: context).map(\.missedDay), [mon])
+        XCTAssertEqual(task.startDate.map { calendar.startOfDay(for: $0) }, tue, "back to the day that miss was marked on")
+        XCTAssertTrue(task.hasOutstandingTwoMinutePush, "Monday's miss is still standing, so its capture stays")
+    }
+
+    /// Undoing the first miss after the chain was undone from the middle
+    /// still restores the original — the capture was not consumed early.
+    func test_undoingBothMissesInSequenceRestoresTheOriginal() throws {
+        let mon = day(2026, 9, 21), tue = day(2026, 9, 22), wed = day(2026, 9, 23)
+        let task = makeTask()
+        missOnCalendar(task, on: mon, to: tue)
+        missOnCalendar(task, on: tue, to: wed)
+
+        let records = TaskMissRecord.records(for: task, in: context)
+        TwoMinutePush.undo(try XCTUnwrap(records.last), for: task, context: context, calendar: calendar)
+        TwoMinutePush.undo(try XCTUnwrap(records.first), for: task, context: context, calendar: calendar)
+
+        XCTAssertNil(task.startDate)
+        XCTAssertTrue(TaskMissRecord.records(for: task, in: context).isEmpty)
+    }
+
+    // MARK: - Row order is total, so it cannot shuffle
+
+    /// **Hardening, not a demonstrated fix.** The order key was already
+    /// status-independent — nothing in `twoMinuteTasksVisible` or
+    /// `twoMinuteRows` reads `status`, unlike `Habit.todayOrderKey` before
+    /// its own fix. What was missing is *totality*: `sorted(by:)` is not
+    /// guaranteed stable, and its input here is `shelf.tasks`, a SwiftData
+    /// to-many whose order is undefined. Equal keys could therefore come
+    /// back in either order on any render.
+    ///
+    /// These two tests are what makes that unrepresentable rather than
+    /// merely unlikely.
+    func test_tasksCreatedInTheSameInstantHaveAStableOrder() throws {
+        let created = day(2026, 9, 21)
+        let a = makeTask(title: "Alpha"); a.createdAt = created
+        let b = makeTask(title: "Bravo"); b.createdAt = created
+
+        let forward = TaskItem.twoMinuteTasksVisible(on: created, from: [a, b], calendar: calendar).map(\.title)
+        let reversed = TaskItem.twoMinuteTasksVisible(on: created, from: [b, a], calendar: calendar).map(\.title)
+
+        XCTAssertEqual(forward, reversed, "same list whichever order the relationship hands them over in")
+    }
+
+    func test_missRecordsWithTheSameTitleHaveAStableOrder() throws {
+        let missed = day(2026, 9, 21), pushed = day(2026, 9, 22)
+        let a = makeTask(title: "Same"), b = makeTask(title: "Same")
+        TwoMinutePush.apply(to: a, planDate: pushed, missedOn: missed, calendar: calendar, context: context)
+        TwoMinutePush.apply(to: b, planDate: pushed, missedOn: missed, calendar: calendar, context: context)
+
+        let ids = {
+            TaskItem.twoMinuteRows(on: missed, from: [], context: self.context, calendar: self.calendar).map(\.id)
+        }
+        XCTAssertEqual(ids(), ids(), "identical titles and identical missedDay still order deterministically")
+        XCTAssertEqual(ids().count, 2)
     }
 }

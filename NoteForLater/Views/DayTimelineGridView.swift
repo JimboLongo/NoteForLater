@@ -929,8 +929,12 @@ struct DayTimelineGridView: View {
             Button {
                 // UNDO — see this function's own warning. The task comes
                 // back to this day and the record goes with the push.
+                //
+                // The *tapped* record is passed, not just the task: a task
+                // can now carry several misses at once, and undoing this one
+                // has to take the misses that followed from it with it.
                 if let task = allTasks.first(where: { $0.id == record.taskID }) {
-                    TwoMinutePush.undo(for: task, context: modelContext)
+                    TwoMinutePush.undo(record, for: task, context: modelContext, calendar: Calendar.current)
                 } else {
                     // The task is gone; the record is all that is left of
                     // it, so there is nothing to put back.

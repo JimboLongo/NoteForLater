@@ -79,7 +79,11 @@ extension TaskMissRecord {
         let all = (try? context.fetch(FetchDescriptor<TaskMissRecord>(
             predicate: #Predicate { $0.missedDay >= start && $0.missedDay < end }
         ))) ?? []
-        return all.sorted { $0.missedDay < $1.missedDay }
+        // Total order — `missedDay` is identical for every record on this
+        // day, so it decides nothing here and the fetch's own order is
+        // unspecified. `id` breaks the tie so the list cannot shuffle
+        // between renders. See `TaskItem.twoMinuteRows`.
+        return all.sorted { ($0.missedDay, $0.id.uuidString) < ($1.missedDay, $1.id.uuidString) }
     }
 
     /// The miss records Nightly Review should still offer, oldest first.
@@ -113,18 +117,49 @@ extension TaskMissRecord {
                 guard let task = byID[record.taskID], !task.isCompleted else { return nil }
                 return (record, task)
             }
-            .sorted { $0.record.missedDay < $1.record.missedDay }
+            .sorted { ($0.record.missedDay, $0.record.id.uuidString) < ($1.record.missedDay, $1.record.id.uuidString) }
     }
 
-    /// The outstanding record for `task`, if any.
+    /// Every outstanding record for `task`, **oldest miss first** — the
+    /// chain of misses, in the order they happened.
     ///
-    /// At most one exists at a time: a task cycled missed twice without an
-    /// intervening undo keeps its first record rather than piling up, the
-    /// same "already pushed" shape `pushRecurringOccurrenceIfNeeded` uses.
-    static func record(for task: TaskItem, in context: ModelContext) -> TaskMissRecord? {
+    /// REVERSAL: there used to be at most one of these per task, so a single
+    /// lookup sufficed. Each miss is its own event now (see
+    /// `TwoMinutePush.apply`), so a task missed on consecutive days carries
+    /// one record per day and the *order* matters: the earliest is the one
+    /// holding the pre-chain state.
+    static func records(for task: TaskItem, in context: ModelContext) -> [TaskMissRecord] {
         let taskID = task.id
-        return (try? context.fetch(FetchDescriptor<TaskMissRecord>(
+        let all = (try? context.fetch(FetchDescriptor<TaskMissRecord>(
             predicate: #Predicate { $0.taskID == taskID }
-        )))?.first
+        ))) ?? []
+        return all.sorted { ($0.missedDay, $0.id.uuidString) < ($1.missedDay, $1.id.uuidString) }
+    }
+
+    /// The **earliest** outstanding record for `task`, if any — the one that
+    /// started the chain.
+    ///
+    /// Non-nil is also the answer to "is a push chain still open", which is
+    /// what `TwoMinutePush` asks it for. Deliberately the earliest rather
+    /// than an arbitrary `.first` off the fetch: an undo restores the state
+    /// captured before *any* of the chain, so which record that is has to be
+    /// deterministic.
+    static func record(for task: TaskItem, in context: ModelContext) -> TaskMissRecord? {
+        records(for: task, in: context).first
+    }
+
+    /// The record for `task` on one specific day, if it has one.
+    ///
+    /// The per-day uniqueness `TwoMinutePush.apply` enforces: a row cycled
+    /// back to `.missed` without an intervening undo must not stack a second
+    /// row on the day it is already recorded as missed on.
+    static func record(
+        for task: TaskItem,
+        on day: Date,
+        in context: ModelContext,
+        calendar: Calendar = .current
+    ) -> TaskMissRecord? {
+        let target = calendar.startOfDay(for: day)
+        return records(for: task, in: context).first { $0.missedDay == target }
     }
 }

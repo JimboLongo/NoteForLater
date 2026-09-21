@@ -1500,7 +1500,8 @@ struct NightlyReviewView: View {
     private var twoMinuteReviewTasks: [TaskItem] {
         allTasks
             .filter { twoMinuteReviewTaskIDs.contains($0.id) }
-            .sorted { $0.createdAt < $1.createdAt }
+            // Total order — see `TaskItem.twoMinuteTasksVisible`.
+            .sorted { ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString) }
     }
 
     /// Misses from earlier days that are still worth offering — see

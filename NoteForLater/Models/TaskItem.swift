@@ -710,7 +710,12 @@ final class TaskItem {
     static func twoMinuteTasksVisible(on day: Date, from tasks: [TaskItem], calendar: Calendar = .current) -> [TaskItem] {
         tasks
             .filter { calendar.isDate($0.twoMinuteDisplayDay(calendar: calendar), inSameDayAs: day) }
-            .sorted { $0.createdAt < $1.createdAt }
+            // Total order. `createdAt` alone is status-independent already
+            // — nothing here reads `status` — but two tasks created in the
+            // same instant tie, and `sorted(by:)` is not guaranteed stable
+            // over an input array (`shelf.tasks`) whose own order SwiftData
+            // does not define. `id` makes a tie impossible.
+            .sorted { ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString) }
     }
 
     /// One row the 2-Minute checklist can show for a given day.
@@ -779,7 +784,12 @@ final class TaskItem {
         calendar: Calendar = .current
     ) -> [TwoMinuteRow] {
         let misses = TaskMissRecord.records(on: day, in: context, calendar: calendar)
-            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+            // Total order, same reasoning as `twoMinuteTasksVisible`: title
+            // is status-independent but two rows can share one.
+            .sorted {
+                let byTitle = $0.title.localizedCaseInsensitiveCompare($1.title)
+                return byTitle == .orderedSame ? $0.id.uuidString < $1.id.uuidString : byTitle == .orderedAscending
+            }
             .map { TwoMinuteRow.miss($0) }
         let live = twoMinuteTasksVisible(on: day, from: tasks, calendar: calendar)
             .map { TwoMinuteRow.task($0) }
