@@ -28,6 +28,13 @@ final class TaskItem {
     /// code. That has already happened twice, on two different clock axes —
     /// `atRiskBlocker()` defaulting to `.now`, then a fixture start date
     /// built from `.now`. This is the third axis, pre-labelled.
+    ///
+    /// ⚠️ **It now has a display role outside the card**: a 2-Minute task
+    /// with no `startDate` appears on the calendar on its creation day (see
+    /// `twoMinuteDisplayDay`). The exemption above still holds — that is the
+    /// day *list*, not the card, and the calendar has no render baselines —
+    /// but "the task card never renders it" is no longer the same statement
+    /// as "nothing renders it."
     var createdAt: Date
 
     /// Set when this task came from a Gmail sync rather than manual
@@ -87,6 +94,41 @@ final class TaskItem {
     /// for an untouched task, making a deliberate choice of today
     /// indistinguishable from no choice at all. See `setStartDate(_:)`.
     var startDatePicked: Bool = false
+
+    // MARK: - Undo state for a 2-Minute push
+    //
+    // Marking a 2-Minute task missed moves it by writing `startDate`.
+    // Cycling back off `.missed` has to put back whatever was there before,
+    // including *nothing* — a task with no "Can Start By" must end up with
+    // none again rather than keeping the pushed date.
+    //
+    // **Stored on the task, not held in view state.** `TwoMinutePushState`
+    // kept this in an in-memory `[UUID: Date?]` on `NightlyReviewView`, and
+    // its own comment justified that on the grounds that a 2-Minute push is
+    // "a single `startDate` write with no persistent object behind it,"
+    // unlike the recurring push. **That reasoning was wrong**: the *write*
+    // is persistent, so the information needed to reverse it has to be too.
+    // Leaving the review destroyed the map, and cycling off `.missed`
+    // afterwards silently did nothing — the pushed date stayed forever.
+    //
+    // Two fields rather than one optional `Date?`, because `nil` is a real
+    // prior value ("had no start date") and has to be distinguishable from
+    // "no push outstanding". `wasPushed` is the presence flag; the date is
+    // what to restore. Same shape as `ScheduledBlock`'s own undo trio, for
+    // the same reason.
+
+    /// Whether a 2-Minute push is currently outstanding for this task.
+    /// The presence flag — `startDateBeforePush` being `nil` is a genuine
+    /// prior value, not an absence.
+    var hasOutstandingTwoMinutePush: Bool = false
+    /// `startDate` before the push moved it. `nil` is meaningful: the task
+    /// had no "Can Start By" at all, and undo must clear rather than
+    /// restore.
+    var startDateBeforePush: Date?
+    /// `startDatePicked` before the push, restored alongside the date so
+    /// the card doesn't keep showing a picked state for a value that was
+    /// never chosen.
+    var startDatePickedBeforePush: Bool = false
     var nextStep: String = ""
     /// Whether "Has next step" has actually been answered (either way) —
     /// same shape as `dueDateDecided`: a bare `nextStep == ""` can't tell
@@ -631,6 +673,46 @@ final class TaskItem {
     /// `startDate` — `true` when there's no `startDate` set. Checked by
     /// `AISchedulingService` before ever considering a task as a
     /// candidate for a given day's packing.
+    /// **The one day a 2-Minute task appears on the calendar.**
+    ///
+    /// Its `startDate` if it has one — whether the user set it as "Can Start
+    /// By" or a push moved it there — otherwise the day it was created.
+    ///
+    /// REVERSAL: the calendar used to filter on `isEligibleToStart`, which
+    /// is a *lower bound* (`>=`), not a placement. A task with no start date
+    /// appeared on **every day you scrolled to**, past and future; a pushed
+    /// one appeared from its new day onward, forever. That is the
+    /// banner-on-every-day shape the recurring carry-forward projection was
+    /// removed for, and more so, since the default case had no bound at all.
+    ///
+    /// **Nightly Review deliberately does NOT use this** — its 2-Minute step
+    /// still filters on `isEligibleToStart`, so a task created weeks ago and
+    /// never actioned keeps surfacing there. Same split the recurring work
+    /// settled on: the calendar shows what is planned, the review shows what
+    /// is owed. Without that, day-scoping here would strand an old task on a
+    /// day nobody will ever scroll back to.
+    func twoMinuteDisplayDay(calendar: Calendar = .current) -> Date {
+        calendar.startOfDay(for: startDate ?? createdAt)
+    }
+
+    /// The 2-Minute tasks the day calendar shows for `day`.
+    ///
+    /// `static` and free of any view so the *call site* can be tested, not
+    /// just the per-task rule. Sabotage found exactly that gap: reverting
+    /// the view's filter to the old lower bound left every
+    /// `twoMinuteDisplayDay` test green, because they asserted the rule
+    /// while nothing asserted the list used it.
+    ///
+    /// Completed tasks are kept deliberately — a task checked off today
+    /// stays visible, faded and struck through, the same as a completed
+    /// calendar block, rather than vanishing under the finger that
+    /// completed it.
+    static func twoMinuteTasksVisible(on day: Date, from tasks: [TaskItem], calendar: Calendar = .current) -> [TaskItem] {
+        tasks
+            .filter { calendar.isDate($0.twoMinuteDisplayDay(calendar: calendar), inSameDayAs: day) }
+            .sorted { $0.createdAt < $1.createdAt }
+    }
+
     func isEligibleToStart(on date: Date, calendar: Calendar = .current) -> Bool {
         guard let startDate else { return true }
         return calendar.startOfDay(for: date) >= calendar.startOfDay(for: startDate)

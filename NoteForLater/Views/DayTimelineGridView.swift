@@ -812,9 +812,13 @@ struct DayTimelineGridView: View {
     @ViewBuilder
     private var twoMinuteTasksSection: some View {
         if let shelf = allShelves.first(where: { $0.isTwoMinuteTasks }) {
-            let visible = (shelf.tasks ?? [])
-                .filter { $0.isEligibleToStart(on: targetDate) }
-                .sorted { $0.createdAt < $1.createdAt }
+            // One day per task — see `TaskItem.twoMinuteTasksVisible`. This
+            // filtered on `isEligibleToStart`, a lower bound, so a task with
+            // no start date appeared on every day scrolled to and a pushed
+            // one appeared from its new day onward forever. Extracted rather
+            // than inlined so the *list* is testable, not just the per-task
+            // rule it applies.
+            let visible = TaskItem.twoMinuteTasksVisible(on: targetDate, from: shelf.tasks ?? [])
             if !visible.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 5) {
@@ -828,20 +832,21 @@ struct DayTimelineGridView: View {
                     VStack(spacing: 6) {
                         ForEach(visible) { task in
                             Button {
-                                // `TaskItem.cycleCompletion` — the same
-                                // shared `cycledExcludingExcused` cycle
-                                // Nightly Review's own 2-Minute row uses
-                                // (there, wrapped by `TwoMinutePushState`).
-                                // Was a plain `setCompleted(!isCompleted)`
-                                // two-state toggle, which is why `.missed`
-                                // could be reached in Nightly Review and
-                                // then not be expressible here.
-                                //
-                                // **Deliberately not wrapped in
-                                // `TwoMinutePushState`** — see
-                                // `twoMinuteStatusCircle` for why the push
-                                // is Nightly-Review-only.
-                                task.cycleCompletion(in: modelContext)
+                                // The same shared owner Nightly Review's
+                                // 2-Minute row calls — see
+                                // `TwoMinutePush.cycle`. Marking missed
+                                // pushes here too now; see
+                                // `twoMinuteStatusCircle` for why that
+                                // became safe.
+                                TwoMinutePush.cycle(
+                                    task,
+                                    planDate: ChooseDayPlanning.planDate(
+                                        forPlanning: ChooseDayPlanning.defaultPlanningChoice(now: .now, calendar: Calendar.current),
+                                        now: .now,
+                                        calendar: Calendar.current
+                                    ),
+                                    context: modelContext
+                                )
                             } label: {
                                 HStack(spacing: 10) {
                                     twoMinuteStatusCircle(status: task.status)
@@ -879,28 +884,32 @@ struct DayTimelineGridView: View {
     /// and `OverdueBlocksReviewList.habitSelectionCircle`, at this list's
     /// own smaller 15pt size.
     ///
-    /// **Why `.missed` here does NOT push the task to tomorrow**, unlike
-    /// Nightly Review's 2-Minute step (see `TwoMinutePushState`):
+    /// **REVERSAL — marking missed here pushes now.**
     ///
-    /// The push works by setting `startDate` to tomorrow, and this list
-    /// filters on `isEligibleToStart(on: targetDate)` — the very same
-    /// mechanism. So a push here would make the row **vanish on the tap that
-    /// marked it**, with no trace of what happened and no way back: cycling
-    /// past `.missed` is how you undo a push, and you cannot cycle a row
-    /// that is no longer drawn.
+    /// It used to not, and the reasoning was sound at the time: the push
+    /// writes `startDate`, this list filtered on `isEligibleToStart` — the
+    /// very same mechanism — so the row vanished on the tap that marked it,
+    /// with no way back, since cycling past `.missed` is how a push is
+    /// undone and you cannot cycle a row that is no longer drawn.
     ///
-    /// Nightly Review does not have that problem because its list is
-    /// *frozen* on step entry (`twoMinuteReviewTaskIDs`), so a pushed task
-    /// stays on screen, struck through, for the rest of the session — which
-    /// is exactly what makes the push safe to apply there.
+    /// Two things changed and both were needed:
     ///
-    /// So the two surfaces mean different things by a missed 2-minute task,
-    /// and that is the honest split rather than an inconsistency to iron
-    /// out: `.missed` is a *status* ("not doing this now"), while the push
-    /// is a Nightly-Review scheduling action serving that step's engagement
-    /// timer. `TwoMinutePushState` already models the push as a wrapper
-    /// around `cycleCompletion` rather than part of it, so declining to wrap
-    /// it here uses an existing seam instead of cutting a new one.
+    /// 1. **The list is day-scoped** (`TaskItem.twoMinuteDisplayDay`), so a
+    ///    pushed task leaves this day because it *moved to another day* —
+    ///    which is what the gesture means — rather than disappearing into a
+    ///    lower bound that never shows it here again.
+    /// 2. **The undo is persistent** (`TaskItem.hasOutstandingTwoMinutePush`
+    ///    and friends), so it no longer depends on a view being alive.
+    ///    Navigating to the day it landed on and cycling it back works.
+    ///
+    /// The push destination is `ChooseDayPlanning.planDate` with the
+    /// default planning choice, not `targetDate`: pushing to the day you are
+    /// looking at would be a no-op, since that is where the row already is.
+    /// That helper already encodes "the day you would be planning right
+    /// now" as a function of the clock — before noon it resolves to today,
+    /// after noon to tomorrow, the same rule the review's own default nudge
+    /// uses. Reusing it is also what stops the two surfaces drifting on what
+    /// "the day being planned" means.
     private func twoMinuteStatusCircle(status: OccurrenceStatus) -> some View {
         let fillColor: Color = status == .complete ? .green : (status == .missed ? .red.opacity(0.55) : .clear)
         let strokeColor: Color = status == .none ? .secondary.opacity(0.7) : fillColor

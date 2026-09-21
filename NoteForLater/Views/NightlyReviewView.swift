@@ -124,11 +124,6 @@ struct NightlyReviewView: View {
     /// flag that can go stale). Resolved the same way extending/clearing
     /// the due date does: the task drops off `atRiskTasks`, just without
     /// touching the task itself.
-    /// Prior start dates for 2-minute tasks pushed this session — see
-    /// `TwoMinutePushState`. Session-scoped: a push is committed the moment
-    /// it happens, and this only exists so changing your mind restores what
-    /// was there before rather than clearing to nil.
-    @State private var twoMinutePushState = TwoMinutePushState()
     /// One budget per review session — see `TwoMinuteEngagementTimer`.
     /// Held here, not in the step, so leaving and returning resumes.
     @State private var twoMinuteEngagementTimer = TwoMinuteEngagementTimer()
@@ -728,7 +723,7 @@ struct NightlyReviewView: View {
             // A push from an earlier night whose day has arrived — clear it
             // before the list is built, so the card stops showing a start
             // date that has already come and gone.
-            TwoMinutePushState.clearExpiredPushes(on: twoMinuteShelf?.tasks ?? [], asOf: reviewDate)
+            TwoMinutePush.clearExpiredPushes(on: twoMinuteShelf?.tasks ?? [], asOf: reviewDate)
             let pending = (twoMinuteShelf?.tasks ?? []).filter { !$0.isCompleted && $0.isEligibleToStart(on: reviewDate) }
             // Also pick up anything completed earlier today (or since the
             // last review closed), before this step's own snapshot: the
@@ -1559,10 +1554,12 @@ struct NightlyReviewView: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            // Routed through `TwoMinutePushState` so landing on `.missed`
-            // pushes the task a day, and leaving `.missed` puts its old
-            // start date back.
-            twoMinutePushState.cycle(task, reviewDate: reviewDate, context: modelContext)
+            // One shared owner for both surfaces — see `TwoMinutePush.cycle`.
+            // Pushes to `planDate`, the day this step's own header says is
+            // being planned, rather than recomputing `reviewDate + 1`
+            // locally: catching up several days late used to land a miss on
+            // the day after the miss, still in the past and invisible.
+            TwoMinutePush.cycle(task, planDate: planDate, context: modelContext)
             ScheduleDirtyState.shared.isDirty = true
         }
         .opacity(task.status == .none ? 1 : 0.5)
