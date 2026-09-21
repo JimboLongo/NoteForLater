@@ -295,6 +295,93 @@ That is the same move each time: make the omission unrepresentable rather
 than merely corrected. A second `else` added by hand is one more place for
 the next person to miss.
 
+**The actionable version, learned the expensive way: if you cannot reach the
+call site from a test, EXTRACT IT FIRST. Patching it in place and testing
+the rule beside it does not work — that was tried three times and sabotage
+came back zero every time.**
+
+Four more instances in one stretch of work, all the same shape — a rule with
+tests, and the thing choosing its input without any:
+
+| Rule (covered) | Call site (not) | Result |
+|---|---|---|
+| `twoMinuteDisplayDay` | the calendar's filter | reverting it to the old lower bound failed nothing |
+| `undoRecurringPush` | the two cycle handlers | undo worked; only one surface called it |
+| `pushRecurringOccurrenceIfNeeded` | `calendarPushDay` | every test passed `plannedDay` explicitly, so none exercised the real choice of date — marking missed on the calendar silently did nothing, shipped |
+| `PushedRecurringOccurrence` placement | the view's inline filter | completing a pushed row made it vanish |
+
+Each was fixed by pulling the decision into a `static` function with no view
+in it — `twoMinuteTasksVisible`, `cycleRecurringOccurrenceReconcilingPush`,
+`calendarPushDay`, `taskIDs(on:from:)` — after which the same sabotage
+failed 3, 3, 2 and 1 tests respectively.
+
+**Why in-place patching keeps failing here:** these call sites live in
+private view methods and computed properties. No test can call them, so the
+only coverage available is of the rule they invoke — which passes whether or
+not the call site invokes it correctly, or at all. The gap is structural,
+not an oversight, and it closes only by moving the decision somewhere a test
+can stand.
+
+**Sabotage before deleting, not after — three things that looked
+load-bearing were already no-ops.**
+
+All three were removed or rewritten in the same stretch, and all three had
+**zero** coverage when sabotaged beforehand:
+- `NoteForLaterApp.advanceOneDay`, the launch catch-up walk — the most
+  load-bearing-looking part of the push machinery
+- the "hide a completed occurrence on a future day" guard in
+  `openRecurringTaskOccurrences`, which existed to agree with
+  `projectedRecurringTaskOccurrences` — a function deleted earlier, so it
+  was enforcing agreement with something that no longer existed
+- the resolved-record cleanup in `processPushedRecurringOccurrencesIfNeeded`
+
+Each could have been a no-op indefinitely without a single test noticing.
+Sabotaging *before* touching them is what surfaced that, and it changes what
+the deletion is: removing code nothing depends on, rather than removing code
+whose dependants you have to go and find.
+
+One note on reading the result: an `assertionFailure` in the sabotaged path
+**aborts the test run** rather than failing cleanly — the summary shows a
+truncated count with zero failures, the same signature as the `@MainActor`
+trap above. That is detection, not absence of it.
+
+**Design note — the two push models, and why they differ without
+disagreeing.**
+
+A 2-Minute task and a recurring occurrence both "push to tomorrow", and they
+are built from opposite materials:
+
+| | 2-Minute | Recurring |
+|---|---|---|
+| What moves | the task, via `startDate` | nothing |
+| What stays | a `TaskMissRecord` on the missed day | the occurrence, on its own day |
+| The new row | the task itself | a `PushedRecurringOccurrence` placing it |
+| Undo | explicit — tapping the miss row | cycling back to `.none` |
+| Completing | keeps the record | marks it resolved, keeps the row |
+
+The asymmetry is forced by what each *is*. A 2-Minute task is one thing that
+happens once, so the only way to move it is to move it — and the day it left
+needs something to stand in. A recurring occurrence is already a projection
+of a pattern onto a day, so it stays put and another day gets its own
+placement.
+
+**What they share is the part that matters, and both got it wrong the same
+way first:**
+- Both land on **the day being planned**, not mechanically the next
+  calendar day. Catching up late used to put a miss on the day after the
+  miss — still in the past.
+- Neither walks forward. A push sits where it landed until acted on.
+- **Completing and undoing had to be split apart.** In both, one code path
+  served both intents — any transition off `.missed` reversed the push — and
+  in both that made completing destroy the thing that rendered the row.
+  Fixing it meant giving each intent its own path, and in the 2-Minute case
+  the undo stopped being a status transition at all, because once a push
+  resets the status there is no transition left that can tell "I did it"
+  from "I changed my mind".
+
+If a third push-like thing appears, those three are the properties to copy;
+the mechanism is whatever the underlying object makes honest.
+
 **Model practice, general — `isCompleted` is a lossy read of a three-state
 field, and every `!isCompleted` written before the three-state redesign
 silently means "including missed".**
