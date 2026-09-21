@@ -1512,4 +1512,86 @@ final class TaskMissRecordTests: XCTestCase {
             TaskItem.missRowAction(for: record, reviewDate: reviewDate, calendar: calendar), .completeFromRecord
         )
     }
+
+    // MARK: - The warning and the gate agree
+
+    /// **They can never disagree, across every shape of list.**
+    ///
+    /// The failure guarded against is a warning reading "0 tasks still
+    /// unmarked" beside a disabled Next, or no warning at all beside one.
+    /// That happens the moment the two count separate lists, so this drives
+    /// both from the same `rows` and asserts the biconditional plus the
+    /// number itself.
+    func test_gateWarningAndNextGateAlwaysAgree() throws {
+        let reviewDate = day(2026, 9, 21)
+        let tasks = (0..<4).map { i -> TaskItem in
+            let t = makeTask(title: "T\(i)")
+            t.createdAt = reviewDate.addingTimeInterval(TimeInterval(i + 1) * 3600)
+            return t
+        }
+
+        // Walk the list from all-unanswered to all-answered, alternating how
+        // each row is answered so both terminal states are covered.
+        for answered in 0..<tasks.count {
+            let task = tasks[answered]
+            if answered.isMultiple(of: 2) {
+                _ = TwoMinutePush.cycle(task, planDate: day(2026, 9, 22), missedOn: reviewDate, calendar: calendar, context: context)
+            } else {
+                for _ in 0..<2 {
+                    _ = TwoMinutePush.cycle(task, planDate: day(2026, 9, 22), missedOn: reviewDate, calendar: calendar, context: context)
+                }
+            }
+
+            let rows = reviewRows(reviewDate, tasks)
+            let gate = TaskItem.unresolvedTwoMinuteRows(rows)
+            let warning = ScheduleReviewViewModel.twoMinuteGateWarning(rows: rows)
+
+            XCTAssertEqual(
+                warning == nil, gate.isEmpty,
+                "after answering \(answered + 1): warning presence must track the gate exactly"
+            )
+            if let warning {
+                let expectedNoun = gate.count == 1 ? "1 task" : "\(gate.count) tasks"
+                XCTAssertTrue(
+                    warning.contains(expectedNoun),
+                    "warning said \"\(warning)\" while the gate was blocking on \(gate.count)"
+                )
+            }
+        }
+
+        let finalRows = reviewRows(reviewDate, tasks)
+        XCTAssertTrue(TaskItem.unresolvedTwoMinuteRows(finalRows).isEmpty, "everything answered")
+        XCTAssertNil(ScheduleReviewViewModel.twoMinuteGateWarning(rows: finalRows), "and no warning")
+    }
+
+    /// Undoing a miss re-blocks Next, so it must bring the warning back with
+    /// it — the reverse direction of the same agreement.
+    func test_undoingAMissBringsTheWarningBack() throws {
+        let reviewDate = day(2026, 9, 21)
+        let only = makeTask(title: "Only"); only.createdAt = reviewDate.addingTimeInterval(3600)
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(only, planDate: day(2026, 9, 22), missedOn: reviewDate, calendar: calendar, context: context)
+        }
+        XCTAssertNil(ScheduleReviewViewModel.twoMinuteGateWarning(rows: reviewRows(reviewDate, [only])))
+
+        let record = try XCTUnwrap(TaskMissRecord.records(for: only, in: context).first)
+        TwoMinutePush.undo(record, for: only, context: context, calendar: calendar)
+
+        let rows = reviewRows(reviewDate, [only])
+        XCTAssertEqual(TaskItem.unresolvedTwoMinuteRows(rows).count, 1)
+        XCTAssertEqual(ScheduleReviewViewModel.twoMinuteGateWarning(rows: rows), "1 task still unmarked")
+    }
+
+    /// The warning is the same string the Habits step uses, not a second
+    /// phrasing that happens to look similar.
+    func test_gateWarningReusesTheSharedString() throws {
+        let reviewDate = day(2026, 9, 21)
+        let a = makeTask(title: "A"); a.createdAt = reviewDate.addingTimeInterval(3600)
+        let b = makeTask(title: "B"); b.createdAt = reviewDate.addingTimeInterval(2 * 3600)
+
+        XCTAssertEqual(
+            ScheduleReviewViewModel.twoMinuteGateWarning(rows: reviewRows(reviewDate, [a, b])),
+            ScheduleReviewViewModel.unresolvedGateMessage(unresolvedHabitCount: 0, unresolvedRecurringTaskCount: 2)
+        )
+    }
 }

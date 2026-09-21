@@ -2734,6 +2734,22 @@ final class ScheduleReviewViewModel {
     /// reader could misread as counting an ordinary unfinished (and
     /// deliberately ungated) task block. Only ever called with at least
     /// one nonzero count — the caller doesn't show this line otherwise.
+    /// The 2-Minute step's gate warning, or `nil` when nothing blocks.
+    ///
+    /// **Takes the same rows the gate takes**, so the number in the warning
+    /// and the number the Next button keys on cannot come apart. The failure
+    /// this prevents is the warning reading "0 tasks still unmarked" beside a
+    /// disabled Next, or no warning at all beside one — which is what
+    /// happens the moment two call sites each count their own list.
+    ///
+    /// Reuses `unresolvedGateMessage` rather than phrasing its own: one
+    /// string for all three steps.
+    static func twoMinuteGateWarning(rows: [TaskItem.TwoMinuteRow]) -> String? {
+        let unresolved = TaskItem.unresolvedTwoMinuteRows(rows).count
+        guard unresolved > 0 else { return nil }
+        return unresolvedGateMessage(unresolvedHabitCount: 0, unresolvedRecurringTaskCount: unresolved)
+    }
+
     static func unresolvedGateMessage(unresolvedHabitCount: Int, unresolvedRecurringTaskCount: Int) -> String {
         var parts: [String] = []
         if unresolvedHabitCount > 0 {

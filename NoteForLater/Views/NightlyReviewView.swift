@@ -425,15 +425,17 @@ struct NightlyReviewView: View {
             // separate gate).
             if step == .today, !unresolvedGateReviewItems.isEmpty {
                 Button(action: jumpToFirstUnresolvedGateItem) {
-                    Label(todayUnresolvedGateMessage, systemImage: "arrow.down.circle")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.orange)
+                    Self.gateWarningLabel(todayUnresolvedGateMessage)
                 }
             }
             if step == .habits, !unresolvedHabitOccurrencesForGate.isEmpty {
-                Label(habitsUnresolvedGateMessage, systemImage: "arrow.down.circle")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.orange)
+                Self.gateWarningLabel(habitsUnresolvedGateMessage)
+            }
+            // Only once the wait is served. While the timer is still running
+            // the step already shows it, and two competing reasons Next is
+            // disabled read as one of them being wrong.
+            if step == .twoMinuteTasks, twoMinuteCanProceed, let message = twoMinuteGateWarning {
+                Self.gateWarningLabel(message)
             }
             HStack {
                 Button("Close") { finishAndDismiss() }
@@ -503,6 +505,22 @@ struct NightlyReviewView: View {
     /// this gate's reason to exclude it.
     private var unresolvedGateReviewItems: [ReviewItem] {
         reviewItems.filter { $0.blocksGate(context: modelContext, reviewDate: reviewDate) }
+    }
+
+    /// The one gate-warning row, shared by `.today`, `.habits` and
+    /// `.twoMinuteTasks`. It was written out twice before this; a third copy
+    /// is how the three drift apart.
+    private static func gateWarningLabel(_ message: String) -> some View {
+        Label(message, systemImage: "arrow.down.circle")
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.orange)
+    }
+
+    /// `nil` when nothing blocks — see
+    /// `ScheduleReviewViewModel.twoMinuteGateWarning`, which takes the same
+    /// rows the gate does so the two can never disagree.
+    private var twoMinuteGateWarning: String? {
+        ScheduleReviewViewModel.twoMinuteGateWarning(rows: twoMinuteRows)
     }
 
     private var todayUnresolvedGateMessage: String {
@@ -1572,7 +1590,7 @@ struct NightlyReviewView: View {
                     Section {
                         let counts = twoMinuteUnresolvedCounts
                         Label(
-                            "Wait \(Self.formattedRemaining(twoMinuteEngagementTimer.remaining(missed: counts.missed, unanswered: counts.unanswered))) or finish them",
+                            "Wait \(Self.formattedRemaining(twoMinuteEngagementTimer.remaining(missed: counts.missed, unanswered: counts.unanswered))) or Complete Them",
                             systemImage: "timer"
                         )
                         .font(.subheadline)
