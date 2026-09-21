@@ -208,28 +208,33 @@ final class DayTimelineProjectionAndStreakTests: XCTestCase {
         }
 
         XCTAssertTrue(appears(on: missedDay), "the day it sits on")
-        XCTAssertFalse(appears(on: day(2026, 9, 11)), "not tomorrow — it has not hopped yet")
+        XCTAssertFalse(appears(on: day(2026, 9, 11)), "not tomorrow — nothing moves it")
         XCTAssertFalse(appears(on: day(2026, 9, 20)), "and emphatically not every day until the next recurrence, which is what was removed")
     }
 
-    /// After a hop it appears on the new day and **stops appearing on the
-    /// old one** — the "follows you forward" half. A projection would have
-    /// shown both.
-    func test_pushedOccurrence_movesRatherThanAccumulates() {
+    /// It appears on the day it was pushed to and **nowhere else** — not on
+    /// the day it was missed, and not on the days between.
+    ///
+    /// REVERSAL: this used to hop the record forward with `advanceOneHop`
+    /// and assert it had moved off the previous day. The record is now
+    /// created directly on the day being planned and never moves, so the
+    /// "it left where it came from" property is established at birth rather
+    /// than by a step.
+    func test_pushedOccurrence_appearsOnlyOnTheDayItWasPushedTo() throws {
         let anchor = day(2026, 8, 10)
         let task = makeMonthlyTask(anchor: anchor)
         let missedDay = day(2026, 9, 10)
-        let nextDay = day(2026, 9, 11)
-        let pushed = PushedRecurringOccurrence(taskID: task.id, originalDate: missedDay)
-        context.insert(pushed)
-
-        PushedRecurringOccurrence.advanceOneHop(pushed, task: task, from: missedDay, to: nextDay, calendar: calendar, context: context)
+        let plannedDay = day(2026, 9, 11)
+        let pushed = try XCTUnwrap(ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(
+            task: task, missedDay: missedDay, plannedDay: plannedDay, context: context
+        ))
 
         func appears(on target: Date) -> Bool {
             !pushed.isCompleted && calendar.isDate(pushed.currentDate, inSameDayAs: target)
         }
-        XCTAssertTrue(appears(on: nextDay), "it moved forward one day")
-        XCTAssertFalse(appears(on: missedDay), "and left the day it came from — one row, not two")
+        XCTAssertTrue(appears(on: plannedDay), "the day being planned")
+        XCTAssertFalse(appears(on: missedDay), "not the day it came from — one row, not two")
+        XCTAssertFalse(appears(on: day(2026, 9, 12)), "and nothing carries it further")
     }
 
 }

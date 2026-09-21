@@ -91,8 +91,14 @@ extension ScheduleReviewViewModel {
         // earlier miss that hasn't resolved yet) — that record's own
         // `currentDate` already points at today, so there's nothing new
         // to record.
+        // `plannedDay` is the day this review is planning — `reviewDate + 1`
+        // — so a miss lands where it is owed rather than the day after the
+        // day it was missed. Catching up several nights late used to create
+        // the record back at the miss and leave a launch-time walk to drag
+        // it forward.
+        let plannedDay = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: reviewDate)) ?? reviewDate
         let freshlyPushedRecurringOccurrences = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
-            reviewedBlocks: reviewedBlocks, tasks: allTasks, context: modelContext, cutoff: frozenCutoff
+            reviewedBlocks: reviewedBlocks, tasks: allTasks, context: modelContext, cutoff: frozenCutoff, plannedDay: plannedDay
         )
         // Immediate-tap-created pushes (see `pushIfMissed`, fired
         // whenever cycling a habit-style row this step landed on
@@ -207,24 +213,6 @@ extension ScheduleReviewViewModel {
         tomorrowViewModel.resolveMissedPastBlocks(allBlocks: frozenAllBlocks)
         for task in incompleteTasks {
             task.isNightlyReviewed = false
-        }
-        // Same guarantee as `guaranteePlacement` above, for a
-        // recurring miss: rather than leaving the record it just
-        // created sitting at today's date until the next app
-        // launch's catch-up walk gets to it
-        // (`NoteForLaterApp.processPushedRecurringOccurrencesIfNeeded`),
-        // hop it forward one day — onto tomorrow — right now, via
-        // the exact function that walk uses per day
-        // (`PushedRecurringOccurrence.advanceOneHop`). Only ever
-        // one hop, for records created by *this* review — a task
-        // whose miss dates further back (the review didn't run for
-        // several nights) is still left for that launch-time walk
-        // to catch all the way up, deliberately: this Task isn't
-        // the place to fast-forward stale backlog.
-        let calendar = Calendar.current
-        for pushed in allFreshRecurringTaskPushes {
-            guard let next = calendar.date(byAdding: .day, value: 1, to: pushed.missedDay) else { continue }
-            PushedRecurringOccurrence.advanceOneHop(pushed.occurrence, task: pushed.task, from: pushed.missedDay, to: next, calendar: calendar, context: modelContext)
         }
         // Unconditional — today's (and any prior day's) unfinished
         // tasks were just freed up above, and they need an actual

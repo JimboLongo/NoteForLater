@@ -1373,8 +1373,11 @@ struct NightlyReviewView: View {
     /// exist. The record *is* the push, so deleting it *is* the undo.
     private func pushIfMissed(task: TaskItem, day: Date) {
         let calendar = Calendar.current
+        // `planDate` — the day this review is planning, which is where a
+        // miss is owed. The record used to be created at the miss and walked
+        // forward; it lands directly now.
         let outcome = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(
-            task: task, on: day, context: modelContext, calendar: calendar
+            task: task, on: day, plannedDay: planDate, context: modelContext, calendar: calendar
         )
         // Nothing this view queries changed — see
         // `recurringOccurrenceRefreshTick`. Both `cycleRecurringTaskReviewOccurrence`

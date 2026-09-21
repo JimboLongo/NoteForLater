@@ -2805,14 +2805,55 @@ final class ScheduleReviewViewModel {
     static func cycleRecurringOccurrenceReconcilingPush(
         task: TaskItem,
         on day: Date,
+        plannedDay: Date,
         context: ModelContext,
         calendar: Calendar = .current
     ) -> (next: OccurrenceStatus, pushed: PushedRecurringOccurrence?, undone: Set<UUID>) {
         let next = task.cycleRecurringOccurrence(on: day, context: context, calendar: calendar)
-        guard next == .missed else {
+        switch next {
+        case .missed:
+            return (next, pushRecurringOccurrenceIfNeeded(task: task, missedDay: day, plannedDay: plannedDay, context: context, calendar: calendar), [])
+        case .complete:
+            // **Completing is not undoing.** Both used to land here — any
+            // transition off `.missed` deleted the record — and since a
+            // pushed occurrence only appears on its day *because* of the
+            // record, completing it made the row vanish instead of showing
+            // as done.
+            //
+            // The record is marked resolved rather than deleted: the row
+            // keeps rendering (its status comes from `RecurringTaskLog`, so
+            // it reads `.complete`), the day keeps its history, and the
+            // `alreadyPushed` guard stops blocking a future push for this
+            // task.
+            resolveRecurringPush(for: task, context: context)
+            return (next, nil, [])
+        default:
+            // Back to `.none` — the user changed their mind, so the push
+            // goes with it and the row leaves the day it was sent to.
             return (next, nil, undoRecurringPush(for: task, context: context))
         }
-        return (next, pushRecurringOccurrenceIfNeeded(task: task, missedDay: day, context: context), [])
+    }
+
+    /// Marks `task`'s outstanding push resolved without deleting it.
+    ///
+    /// **The difference from `undoRecurringPush` is intent, and they used to
+    /// share a code path.** Completing means the work happened: the record
+    /// stays so the day it landed on keeps showing it, now reading as
+    /// complete. Undoing means it never should have moved: the record goes.
+    ///
+    /// `isCompleted` on the record was dead state before this — declared,
+    /// never written, and resolution was expressed by deleting instead. It
+    /// now means "this push chain is finished", which is what the
+    /// `alreadyPushed` guard actually wants to ask: without it a completed
+    /// record would block the task from ever being pushed again.
+    static func resolveRecurringPush(for task: TaskItem, context: ModelContext) {
+        let taskID = task.id
+        let outstanding = (try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>(
+            predicate: #Predicate { $0.taskID == taskID && !$0.isCompleted }
+        ))) ?? []
+        for record in outstanding {
+            record.isCompleted = true
+        }
     }
 
     /// Deletes any outstanding push for `task`, returning the ids removed.
@@ -2845,14 +2886,50 @@ final class ScheduleReviewViewModel {
         return removed
     }
 
-    static func pushRecurringOccurrenceIfNeeded(task: TaskItem, missedDay: Date, context: ModelContext) -> PushedRecurringOccurrence? {
+    static func pushRecurringOccurrenceIfNeeded(
+        task: TaskItem,
+        missedDay: Date,
+        plannedDay: Date,
+        context: ModelContext,
+        calendar: Calendar = .current
+    ) -> PushedRecurringOccurrence? {
         guard task.isPushable else { return nil }
+        // **A push must go somewhere later than the miss.** A caller passing
+        // a `plannedDay` on or before `missedDay` is asking for a no-op it
+        // will not notice: the record would sit on the day the row is
+        // already on, and the recurrence check below would then suppress it
+        // outright, so marking missed would silently do nothing.
+        //
+        // That is not hypothetical — the day calendar shipped exactly that.
+        // It derived its destination from `ChooseDayPlanning.planDate`,
+        // which before noon resolves to *today*, so marking today's own
+        // occurrence pushed it to the day it was already on. The caller is
+        // fixed; this makes the degenerate pair impossible to pass quietly
+        // rather than relying on every future caller getting it right.
+        let missedDayStart = calendar.startOfDay(for: missedDay)
+        let plannedDayStart = calendar.startOfDay(for: plannedDay)
+        guard plannedDayStart > missedDayStart else {
+            assertionFailure("plannedDay (\(plannedDayStart)) must be after missedDay (\(missedDayStart)) — a push has nowhere to go otherwise")
+            return nil
+        }
         let taskID = task.id
         let alreadyPushed = (try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>(
             predicate: #Predicate { $0.taskID == taskID && !$0.isCompleted }
         )))?.first != nil
         guard !alreadyPushed else { return nil }
-        let occurrence = PushedRecurringOccurrence(taskID: taskID, originalDate: missedDay)
+        // **No record when the planned day already carries the occurrence.**
+        // The task recurs there anyway, so a record would put a second,
+        // identical row on that day. This used to be caught after the fact,
+        // by the day-by-day walk noticing it had landed on a recurrence day
+        // and deleting itself; with the record placed directly there is
+        // nothing to drift onto, so it is a question asked once, here.
+        guard !task.hasRecurringOccurrence(on: plannedDayStart, calendar: calendar) else { return nil }
+        // `currentDate` is the day being **planned**, not the day after the
+        // miss. Catching up several days late used to create the record at
+        // the miss and rely on a launch-time walk to drag it forward one day
+        // at a time; it now lands where it is owed immediately, and nothing
+        // moves it afterwards.
+        let occurrence = PushedRecurringOccurrence(taskID: taskID, originalDate: missedDayStart, currentDate: plannedDayStart)
         context.insert(occurrence)
         return occurrence
     }
@@ -2880,7 +2957,7 @@ final class ScheduleReviewViewModel {
     /// (`PushedRecurringOccurrence.advanceOneHop`) instead of leaving it to
     /// sit unresolved until the next app launch's catch-up walk.
     @discardableResult
-    static func pushMissedRecurringOccurrences(reviewedBlocks: [ScheduledBlock], tasks: [TaskItem], context: ModelContext, cutoff: Date) -> [(occurrence: PushedRecurringOccurrence, task: TaskItem, missedDay: Date)] {
+    static func pushMissedRecurringOccurrences(reviewedBlocks: [ScheduledBlock], tasks: [TaskItem], context: ModelContext, cutoff: Date, plannedDay: Date) -> [(occurrence: PushedRecurringOccurrence, task: TaskItem, missedDay: Date)] {
         var created: [(occurrence: PushedRecurringOccurrence, task: TaskItem, missedDay: Date)] = []
 
         func markMissedAndPush(task: TaskItem, missedDay: Date) {
@@ -2896,7 +2973,7 @@ final class ScheduleReviewViewModel {
                 // distinctly from `.none` too.
                 block.status = .missed
             }
-            if let occurrence = pushRecurringOccurrenceIfNeeded(task: task, missedDay: missedDay, context: context) {
+            if let occurrence = pushRecurringOccurrenceIfNeeded(task: task, missedDay: missedDay, plannedDay: plannedDay, context: context) {
                 created.append((occurrence, task, missedDay))
             }
         }

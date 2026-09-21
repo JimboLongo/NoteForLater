@@ -62,16 +62,21 @@ struct NoteForLaterApp: App {
         Self.migrateRecurringSpecificTimeTasksIfNeeded(container: sharedModelContainer)
     }
 
-    /// Runs once per calendar day, not once ever — unlike the one-time
-    /// repairs above (which each guard on a permanent `UserDefaults`
-    /// flag), a `PushedRecurringOccurrence` needs advancing every day it
-    /// stays unresolved, so this tracks the *last day it ran* instead and
-    /// re-runs whenever that's stale. Catches up on more than one missed
-    /// launch at once — `advanceOneDay` below is a loop, not a single
-    /// step, so going a week without opening the app still walks each
-    /// pushed occurrence the correct number of days forward (or resolves
-    /// it early, the moment the walk crosses a real recurrence day)
-    /// rather than only ever advancing by one.
+    /// Daily cleanup for `PushedRecurringOccurrence` — **not a walk.**
+    ///
+    /// **REVERSAL:** this used to advance each pending record one day at a
+    /// time, catching up however many launches had been missed, and
+    /// resolving a record early if the walk crossed a real recurrence day.
+    /// A record now lands directly on the day being planned and never
+    /// moves, so there is nothing to advance.
+    ///
+    /// What is left is genuinely cleanup, and it is why this still runs:
+    /// a record whose task has been deleted or is no longer recurring, and
+    /// one whose day has since been completed. Neither is noticed by the
+    /// interactive paths, because both can happen while the app is closed.
+    ///
+    /// Still once per calendar day rather than once ever — it tracks the
+    /// last day it ran, since the conditions it clears up recur.
     private static func processPushedRecurringOccurrencesIfNeeded(container: ModelContainer) {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: .now)
@@ -82,9 +87,10 @@ struct NoteForLaterApp: App {
         }
 
         let context = ModelContext(container)
-        guard let pending = try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>(
-            predicate: #Predicate { !$0.isCompleted }
-        )), !pending.isEmpty else {
+        // Every record, not just unresolved ones: a resolved record whose
+        // task has since been deleted still needs clearing out.
+        guard let pending = try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>()),
+              !pending.isEmpty else {
             UserDefaults.standard.set(today, forKey: lastRunKey)
             return
         }
@@ -101,12 +107,21 @@ struct NoteForLaterApp: App {
                 didChange = true
                 continue
             }
-            if PushedRecurringOccurrence.isAlreadyResolved(occurrence, task: task, calendar: calendar, context: context) {
-                context.delete(occurrence)
+            // **Marked, not deleted.** Deleting removed the row from the
+            // day it had landed on, so a pushed occurrence completed on
+            // that day vanished at the next launch instead of staying as
+            // history. Marking resolves the chain — which is all the
+            // `alreadyPushed` guard needs — while the day keeps its record.
+            //
+            // Still worth doing here rather than leaving it to the tap:
+            // a completion can arrive from any surface, and this catches one
+            // made while the app was closed.
+            if !occurrence.isCompleted,
+               PushedRecurringOccurrence.isAlreadyResolved(occurrence, task: task, calendar: calendar, context: context) {
+                occurrence.isCompleted = true
                 didChange = true
                 continue
             }
-            didChange = advanceOneDay(occurrence, task: task, today: today, calendar: calendar, context: context) || didChange
         }
 
         guard didChange else {
@@ -402,33 +417,6 @@ struct NoteForLaterApp: App {
         legacyIsCompleted ? .complete : .none
     }
 
-    /// Walks `occurrence.currentDate` forward one day at a time, up to
-    /// (not including) `today`, via `PushedRecurringOccurrence.advanceOneHop`
-    /// — stopping the instant a hop resolves the occurrence (a real
-    /// recurrence day for `task` was reached), or once it catches up to
-    /// `today` still unresolved. Returns whether anything actually
-    /// changed, so the caller only bothers saving when it did. Deliberately
-    /// never consults `recurrenceEndDate` — see `PushedRecurringOccurrence`'s
-    /// own doc comment for why an already-missed occurrence keeps pushing
-    /// regardless.
-    ///
-    /// `advanceOneHop` is shared with `NightlyReviewView`'s today→tomorrow
-    /// `Task`, which calls it once, synchronously, for a miss just detected
-    /// tonight — this loop is what still exists for catching up a
-    /// multi-day gap (the app not opened for several days), one hop per
-    /// day via the exact same function, not a second implementation of it.
-    private static func advanceOneDay(_ occurrence: PushedRecurringOccurrence, task: TaskItem, today: Date, calendar: Calendar, context: ModelContext) -> Bool {
-        var cursor = calendar.startOfDay(for: occurrence.currentDate)
-        var changed = false
-        while cursor < today {
-            guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
-            let resolved = PushedRecurringOccurrence.advanceOneHop(occurrence, task: task, from: cursor, to: next, calendar: calendar, context: context)
-            changed = true
-            if resolved { return true }
-            cursor = next
-        }
-        return changed
-    }
 
     /// One-time launch repair for `HabitLog` damage predating the
     /// fetch-based write funnel (`Habit.logOrCreate`). Two distinct

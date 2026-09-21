@@ -95,7 +95,8 @@ final class RecurringTaskReviewTests: XCTestCase {
             reviewedBlocks: [], // AM/Midday/PM: no ScheduledBlock ever exists for this task
             tasks: [task],
             context: context,
-            cutoff: cutoff
+            cutoff: cutoff,
+            plannedDay: cutoff
         )
 
         XCTAssertTrue(created.isEmpty, "never looked at is not the same as missed")
@@ -121,7 +122,7 @@ final class RecurringTaskReviewTests: XCTestCase {
         block.status = .missed
 
         let created = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
-            reviewedBlocks: [block], tasks: [task], context: context, cutoff: day(2026, 9, 1)
+            reviewedBlocks: [block], tasks: [task], context: context, cutoff: day(2026, 9, 1), plannedDay: day(2026, 9, 1)
         )
 
         XCTAssertEqual(created.count, 1, "an explicit miss still pushes")
@@ -146,7 +147,7 @@ final class RecurringTaskReviewTests: XCTestCase {
         XCTAssertEqual(block.status, OccurrenceStatus.none, "untouched, which reads !isCompleted just like a real miss")
 
         let created = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
-            reviewedBlocks: [block], tasks: [task], context: context, cutoff: day(2026, 9, 1)
+            reviewedBlocks: [block], tasks: [task], context: context, cutoff: day(2026, 9, 1), plannedDay: day(2026, 9, 1)
         )
 
         XCTAssertTrue(created.isEmpty, "an unmarked block is not a miss")
@@ -171,7 +172,7 @@ final class RecurringTaskReviewTests: XCTestCase {
         log.status = .complete
 
         let created = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
-            reviewedBlocks: [], tasks: [task], context: context, cutoff: cutoff
+            reviewedBlocks: [], tasks: [task], context: context, cutoff: cutoff, plannedDay: cutoff
         )
         XCTAssertTrue(created.isEmpty)
     }
@@ -185,7 +186,7 @@ final class RecurringTaskReviewTests: XCTestCase {
         context.insert(PushedRecurringOccurrence(taskID: task.id, originalDate: anchor))
 
         let created = ScheduleReviewViewModel.pushMissedRecurringOccurrences(
-            reviewedBlocks: [], tasks: [task], context: context, cutoff: day(2026, 9, 1)
+            reviewedBlocks: [], tasks: [task], context: context, cutoff: day(2026, 9, 1), plannedDay: day(2026, 9, 1)
         )
         XCTAssertTrue(created.isEmpty)
 
@@ -195,50 +196,76 @@ final class RecurringTaskReviewTests: XCTestCase {
 
     // MARK: - advanceOneHop: what survives the removal of Specific Time
 
-    /// Three tests used to live here, all built around the Specific-Time
-    /// *placeholder block* — relocating it a day at a time, and not
-    /// double-placing it on relaunch. That block no longer exists (stage
-    /// 4b), so those tests went with it.
+    // MARK: - A push lands where it is owed, and stays there
+
+    /// **REVERSAL — `advanceOneHop` is gone, and these two tests replace
+    /// the pair that pinned it.**
     ///
-    /// **What they were also covering incidentally still matters**, and
-    /// would have been left bare: `advanceOneHop`'s own date walk. These two
-    /// pin exactly that, so the surviving half of the function keeps its
-    /// coverage rather than losing it as a side effect of deleting the half
-    /// that went away.
-    func test_advanceOneHop_advancesTheCursor_whenNextIsNotARecurrenceDay() {
+    /// A record used to be created at the day of the miss and walked
+    /// forward one day at a time — by the app-launch catch-up routine, and
+    /// by an immediate one-hop call from each interactive surface. That made
+    /// a miss found several days late land the day *after* the miss, still
+    /// in the past, and crawl from there.
+    ///
+    /// It now lands on the day being planned at creation, and nothing moves
+    /// it. Both halves of the deleted function are still pinned, just
+    /// earlier: the destination by `test_pushLandsOnThePlannedDay`, and the
+    /// resolve-on-a-recurrence-day half by
+    /// `test_noRecordWhenThePlannedDayAlreadyRecurs` — which is now a
+    /// question asked once at creation rather than re-checked on every hop.
+    func test_pushLandsOnThePlannedDay_notTheDayAfterTheMiss() throws {
         let anchor = day(2026, 8, 31)
         let task = makeMiddayRecurringTask(anchor: anchor)
-        let occurrence = PushedRecurringOccurrence(taskID: task.id, originalDate: anchor)
-        context.insert(occurrence)
+        // Missed a while back; the review being run is planning much later.
+        let plannedDay = day(2026, 9, 12)
 
-        let next = day(2026, 9, 1)
-        let resolved = PushedRecurringOccurrence.advanceOneHop(
-            occurrence, task: task, from: anchor, to: next, calendar: calendar, context: context
+        let pushed = try XCTUnwrap(ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(
+            task: task, missedDay: anchor, plannedDay: plannedDay, context: context
+        ))
+
+        XCTAssertEqual(calendar.startOfDay(for: pushed.currentDate), plannedDay, "it lands where it is owed")
+        XCTAssertEqual(calendar.startOfDay(for: pushed.originalDate), anchor, "and still remembers where it came from")
+        XCTAssertNotEqual(
+            calendar.startOfDay(for: pushed.currentDate), day(2026, 9, 1),
+            "not the day after the miss — that is the walk this replaces"
         )
-
-        XCTAssertFalse(resolved, "not a recurrence day, so the chain continues")
-        XCTAssertEqual(occurrence.currentDate, next)
     }
 
-    /// The resolving half: landing on a real recurrence day deletes the
-    /// pushed record and lets the ordinary pattern take over.
-    func test_advanceOneHop_resolves_whenNextIsARecurrenceDay() throws {
+    /// No record at all when the planned day already carries the
+    /// occurrence: the task recurs there anyway, so a record would draw a
+    /// second identical row.
+    ///
+    /// The walk used to catch this after the fact, by noticing it had
+    /// landed on a recurrence day and deleting itself. Placed directly,
+    /// there is nothing to drift onto.
+    func test_noRecordWhenThePlannedDayAlreadyRecurs() throws {
         let anchor = day(2026, 8, 31)
         let task = makeMiddayRecurringTask(anchor: anchor)
-        let occurrence = PushedRecurringOccurrence(taskID: task.id, originalDate: anchor)
-        context.insert(occurrence)
-        try context.save()
+        let recurrenceDay = day(2026, 9, 30)
+        XCTAssertTrue(task.hasRecurringOccurrence(on: recurrenceDay, calendar: calendar), "sanity: a real pattern day")
 
-        let next = day(2026, 9, 30)
-        XCTAssertTrue(task.hasRecurringOccurrence(on: next, calendar: calendar), "sanity: a real pattern day")
-
-        let resolved = PushedRecurringOccurrence.advanceOneHop(
-            occurrence, task: task, from: anchor, to: next, calendar: calendar, context: context
+        let pushed = ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(
+            task: task, missedDay: anchor, plannedDay: recurrenceDay, context: context
         )
-        try context.save()
 
-        XCTAssertTrue(resolved)
-        let pending = try context.fetch(FetchDescriptor<PushedRecurringOccurrence>())
-        XCTAssertTrue(pending.isEmpty, "resolved chains are deleted, not left sitting")
+        XCTAssertNil(pushed, "the task shows there on its own")
+        XCTAssertTrue(try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).isEmpty)
+    }
+
+    /// And nothing advances it afterwards. The record sits on its day until
+    /// acted on — this is the property the whole change is for.
+    func test_aPushedRecordDoesNotMoveOnItsOwn() throws {
+        let anchor = day(2026, 8, 31)
+        let task = makeMiddayRecurringTask(anchor: anchor)
+        let plannedDay = day(2026, 9, 1)
+        let pushed = try XCTUnwrap(ScheduleReviewViewModel.pushRecurringOccurrenceIfNeeded(
+            task: task, missedDay: anchor, plannedDay: plannedDay, context: context
+        ))
+
+        // Whatever else happens to the task, the record keeps its day.
+        task.isNightlyReviewed = true
+        _ = task.cycleRecurringOccurrence(on: day(2026, 9, 5), context: context, calendar: calendar)
+
+        XCTAssertEqual(calendar.startOfDay(for: pushed.currentDate), plannedDay)
     }
 }

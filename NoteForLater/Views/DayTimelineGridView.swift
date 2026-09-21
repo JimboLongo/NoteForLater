@@ -399,34 +399,29 @@ struct DayTimelineGridView: View {
     /// set too.
     private var pushedTaskIDsForTargetDate: Set<UUID> {
         let calendar = Calendar.current
-        return Set(allPushedRecurringOccurrences
-            .filter { !$0.isCompleted && calendar.isDate($0.currentDate, inSameDayAs: targetDate) }
-            .map(\.taskID))
+        return PushedRecurringOccurrence.taskIDs(on: targetDate, from: allPushedRecurringOccurrences, calendar: calendar)
     }
 
     private func openRecurringTaskOccurrences(mode: HabitOccurrenceTimeMode) -> [OpenRecurringTaskOccurrence] {
         let calendar = Calendar.current
         let pushedTaskIDs = pushedTaskIDsForTargetDate
-        // Same divergence `projectedRecurringTaskOccurrences` already
-        // documents: a completed occurrence on a *future* day is hidden
-        // entirely rather than shown faded — applied here too now that
-        // this function can also admit a future day via carry-forward, so
-        // the two paths agree once an occurrence actually gets checked
-        // off out there rather than one hiding it and the other not.
-        let isFutureDay = calendar.startOfDay(for: targetDate) > calendar.startOfDay(for: .now)
         var result: [OpenRecurringTaskOccurrence] = []
         for task in allTasks where task.isRecurring && task.recurrenceTimeMode == mode {
             // **`PushedRecurringOccurrence` alone decides this now.** The
             // carry-forward projection used to OR in here, painting a
             // "Pushed" row onto *every* future day until the task's next
-            // real recurrence. The record shows the occurrence on exactly
-            // one day — its `currentDate` — and `advanceOneHop` walks that
-            // forward a day at a time at each launch, so the push is one row
-            // that follows you rather than a banner across the week.
+            // real recurrence. The record places the occurrence on exactly
+            // one day — its `currentDate`, the day that was being planned
+            // when the miss was marked — and nothing moves it afterwards.
             let isPushed = pushedTaskIDs.contains(task.id)
             guard task.hasRecurringOccurrence(on: targetDate, calendar: calendar) || isPushed else { continue }
+            // **REVERSAL: a completed occurrence on a future day is no
+            // longer hidden.** That rule existed to keep this function
+            // agreeing with `projectedRecurringTaskOccurrences`, which was
+            // deleted with the carry-forward projection — and it meant
+            // completing a pushed occurrence (which lands on a future day by
+            // definition) made the row vanish rather than show as done.
             let status = RecurringTaskLog.log(taskID: task.id, on: targetDate, context: modelContext, calendar: calendar)?.status ?? .none
-            guard !(isFutureDay && status == .complete) else { continue }
             result.append(OpenRecurringTaskOccurrence(id: "recurringTask.\(task.id)", task: task, status: status, isPushed: isPushed))
         }
         return result
@@ -844,6 +839,35 @@ struct DayTimelineGridView: View {
         }
     }
 
+    /// Where a miss marked on `missedDay` goes, from the calendar.
+    ///
+    /// `ChooseDayPlanning.planDate` with the default choice — "the day you
+    /// would be planning right now", today before noon and tomorrow after —
+    /// **floored at the day after the miss**.
+    ///
+    /// ⚠️ That floor is the whole point. Without it, marking today's own row
+    /// before noon pushed to *today*: `planDate` resolves to today, which is
+    /// the day the row is already on, and the push then got suppressed by
+    /// the recurrence check for landing on a day the task already occurs.
+    /// Marking missed did nothing at all, silently.
+    ///
+    /// `targetDate` was rejected as the destination for the same reason
+    /// (pushing to the day you are looking at is a no-op) — and then the
+    /// replacement collapsed to it half the time. The floor makes the
+    /// degenerate case unreachable rather than unlikely;
+    /// `pushRecurringOccurrenceIfNeeded` asserts on it too, so a future
+    /// caller cannot reintroduce it quietly.
+    static func calendarPushDay(missedOn missedDay: Date, calendar: Calendar, now: Date = .now) -> Date {
+        let planned = ChooseDayPlanning.planDate(
+            forPlanning: ChooseDayPlanning.defaultPlanningChoice(now: now, calendar: calendar),
+            now: now,
+            calendar: calendar
+        )
+        let dayAfterMiss = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: missedDay))
+            ?? calendar.startOfDay(for: missedDay)
+        return max(calendar.startOfDay(for: planned), dayAfterMiss)
+    }
+
     /// One 2-Minute row — a live task, or a record of a miss that happened
     /// on this day.
     ///
@@ -1040,12 +1064,17 @@ struct DayTimelineGridView: View {
         // matching `else`, so cycling back to incomplete here left the
         // record live and still hopping forward while the same gesture in
         // Nightly Review undid it.
+        // The record lands on the day being planned directly — see
+        // `pushRecurringOccurrenceIfNeeded`. It used to be created at the
+        // miss and hopped forward one day here, which is why this had a
+        // follow-up call; there is nothing left to advance.
         let outcome = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(
-            task: task, on: today, context: modelContext, calendar: calendar
+            task: task,
+            on: today,
+            plannedDay: Self.calendarPushDay(missedOn: today, calendar: calendar),
+            context: modelContext,
+            calendar: calendar
         )
-        if let pushed = outcome.pushed, let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) {
-            PushedRecurringOccurrence.advanceOneHop(pushed, task: task, from: today, to: tomorrow, calendar: calendar, context: modelContext)
-        }
         habitOccurrenceRefreshTick += 1
     }
 }

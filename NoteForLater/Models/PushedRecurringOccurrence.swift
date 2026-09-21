@@ -32,10 +32,9 @@ final class PushedRecurringOccurrence {
     /// future "originally due" label); the push-forward walk itself only
     /// ever reads/writes `currentDate`.
     var originalDate: Date
-    /// Where the chain currently sits — advances one day at a time each
-    /// time the app-launch catch-up routine
-    /// (`NoteForLaterApp.processPushedRecurringOccurrencesIfNeeded`)
-    /// finds it still unresolved.
+    /// The day this sits on — the day that was being planned when the miss
+    /// was marked. Set once at creation and never advanced; see this type's
+    /// own doc comment for the walk that used to move it.
     var currentDate: Date
     var isCompleted: Bool = false
 
@@ -49,6 +48,23 @@ final class PushedRecurringOccurrence {
 }
 
 extension PushedRecurringOccurrence {
+    /// Which tasks a set of push records places on `day`.
+    ///
+    /// **No `isCompleted` filter, deliberately.** A resolved record still
+    /// placed the occurrence on that day, and the row then reads
+    /// `.complete` from `RecurringTaskLog` — which is the history the day
+    /// should keep. Filtering resolved records out here made a completed
+    /// pushed row disappear rather than show as done.
+    ///
+    /// `static` and free of any view so the *list* is testable: the same
+    /// rule expressed inline in `DayTimelineGridView` went uncovered, and
+    /// reverting it to the old filter failed nothing.
+    static func taskIDs(on day: Date, from records: [PushedRecurringOccurrence], calendar: Calendar = .current) -> Set<UUID> {
+        Set(records
+            .filter { calendar.isDate($0.currentDate, inSameDayAs: day) }
+            .map(\.taskID))
+    }
+
     /// True once a completed `RecurringTaskLog` exists for
     /// `occurrence.currentDate`.
     ///
@@ -63,40 +79,5 @@ extension PushedRecurringOccurrence {
         RecurringTaskLog.log(taskID: task.id, on: occurrence.currentDate, context: context, calendar: calendar)?.isCompleted ?? false
     }
 
-    /// Advances `occurrence` forward by exactly one day, from `cursor`
-    /// (its own current position) to `next` — the extracted body of what
-    /// used to be one iteration of `NoteForLaterApp.advanceOneDay`'s
-    /// catch-up loop, now shared so a fresh miss detected by tonight's
-    /// Nightly Review can get this same one-day hop immediately (see
-    /// `NightlyReviewView`'s today→tomorrow `Task`, alongside
-    /// `ScheduleReviewViewModel.guaranteePlacement`) instead of only ever
-    /// happening at the next app launch. `advanceOneDay` itself becomes a
-    /// loop that calls this once per day it needs to catch up — the two
-    /// call sites share one implementation rather than risking two that
-    /// drift apart.
-    ///
-    /// Resolves (deletes) `occurrence` outright if `next` is itself a real
-    /// recurrence day for `task` — the ordinary recurrence pattern takes
-    /// over from there, with `AISchedulingService
-    /// .placeHabitsAndRecurringTasks`'s own "already exists" check
-    /// preventing a duplicate. Otherwise advances `occurrence.currentDate`.
-    /// Returns whether the occurrence was resolved, so a calling loop knows
-    /// to stop.
-    ///
-    /// This used to relocate a Specific Time placeholder `ScheduledBlock`
-    /// alongside the date advance, and delete it on resolve. A recurring
-    /// task can no longer be Specific Time (see `HabitOccurrenceTimeMode
-    /// .taskSelectableCases`), so it has no block to move — the push is
-    /// purely a date advance now, and completion lives in
-    /// `RecurringTaskLog` for every recurring task.
-    @discardableResult
-    static func advanceOneHop(_ occurrence: PushedRecurringOccurrence, task: TaskItem, from cursor: Date, to next: Date, calendar: Calendar, context: ModelContext) -> Bool {
-        if task.hasRecurringOccurrence(on: next, calendar: calendar) {
-            context.delete(occurrence)
-            return true
-        }
-        occurrence.currentDate = next
-        return false
-    }
 
 }
