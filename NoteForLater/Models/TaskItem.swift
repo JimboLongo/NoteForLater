@@ -748,6 +748,51 @@ final class TaskItem {
             }
         }
 
+        /// The **one** ordering rule for this section, and the only place it
+        /// is defined.
+        ///
+        /// Due-dated rows first, earliest due date first; then everything
+        /// else, oldest `createdAt` first; `id` last so a tie is impossible.
+        ///
+        /// A miss row resolves its task through `taskID` and uses *that
+        /// task's* dates and id, which is what makes the key survive the
+        /// TASK ↔ MISS transition unchanged.
+        struct SortKey: Comparable {
+            let dueDate: Date?
+            let createdAt: Date
+            let id: UUID
+
+            static func < (a: SortKey, b: SortKey) -> Bool {
+                switch (a.dueDate, b.dueDate) {
+                case let (l?, r?) where l != r: return l < r
+                case (.some, .none): return true
+                case (.none, .some): return false
+                default: break
+                }
+                if a.createdAt != b.createdAt { return a.createdAt < b.createdAt }
+                return a.id.uuidString < b.id.uuidString
+            }
+        }
+
+        static func sortKey(_ row: TwoMinuteRow, in tasksByID: [UUID: TaskItem]) -> SortKey {
+            switch row {
+            case .task(let task):
+                return SortKey(dueDate: task.dueDate, createdAt: task.createdAt, id: task.id)
+            case .miss(let record):
+                if let task = tasksByID[record.taskID] {
+                    return SortKey(dueDate: task.dueDate, createdAt: task.createdAt, id: task.id)
+                }
+                // **Orphan — by design, not a defect.** `TaskMissRecord`
+                // copies `title` and `taskID` rather than relating to the
+                // task precisely so the row still renders after the task is
+                // deleted (see the model's own doc comment). There is
+                // therefore no `createdAt` to read, and `missedDay` is the
+                // only date the record owns. It still keys on `taskID`, so
+                // an orphan's position is stable too.
+                return SortKey(dueDate: nil, createdAt: record.missedDay, id: record.taskID)
+            }
+        }
+
         /// What the row's circle draws.
         ///
         /// **A miss row is always `.missed`, whatever became of the task.**
@@ -767,10 +812,22 @@ final class TaskItem {
         }
     }
 
-    /// Every 2-Minute row for `day` — live tasks and miss records together.
+    /// Every 2-Minute row for `day` — live tasks and miss records together,
+    /// in **one flat order**.
     ///
-    /// Misses sort first: they belong to a day that has already been
-    /// decided, so they read as context above whatever is still live.
+    /// REVERSAL: misses used to be grouped ahead of live rows. Measured
+    /// instrumentation on the real device showed that grouping was what made
+    /// rows jump on a tap: cycling to `.missed` turns a live row into a miss
+    /// row and undoing turns it back, so a row changed *group* and moved,
+    /// while its sort key never changed and the input order never changed.
+    /// The red styling already says which rows are misses, so the grouping
+    /// was doing that job a second time at the cost of the movement.
+    ///
+    /// **The comparator keys on the underlying task, not on the row.** That
+    /// is the whole point: a task's key is identical whether it is currently
+    /// drawn as a live row or as a miss record, so a row holds its index
+    /// across the transition. Nothing in it reads `status`, `isCompleted`,
+    /// `isPushed`, or the row kind — a tap cannot change any input to it.
     ///
     /// **The list is the testable unit, deliberately.** Three separate times
     /// this session a rule was covered while the call site applying it was
@@ -783,17 +840,10 @@ final class TaskItem {
         context: ModelContext,
         calendar: Calendar = .current
     ) -> [TwoMinuteRow] {
-        let misses = TaskMissRecord.records(on: day, in: context, calendar: calendar)
-            // Total order, same reasoning as `twoMinuteTasksVisible`: title
-            // is status-independent but two rows can share one.
-            .sorted {
-                let byTitle = $0.title.localizedCaseInsensitiveCompare($1.title)
-                return byTitle == .orderedSame ? $0.id.uuidString < $1.id.uuidString : byTitle == .orderedAscending
-            }
-            .map { TwoMinuteRow.miss($0) }
-        let live = twoMinuteTasksVisible(on: day, from: tasks, calendar: calendar)
-            .map { TwoMinuteRow.task($0) }
-        return misses + live
+        let byID = Dictionary(tasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let rows = TaskMissRecord.records(on: day, in: context, calendar: calendar).map { TwoMinuteRow.miss($0) }
+            + twoMinuteTasksVisible(on: day, from: tasks, calendar: calendar).map { TwoMinuteRow.task($0) }
+        return rows.sorted { TwoMinuteRow.sortKey($0, in: byID) < TwoMinuteRow.sortKey($1, in: byID) }
     }
 
     func isEligibleToStart(on date: Date, calendar: Calendar = .current) -> Bool {

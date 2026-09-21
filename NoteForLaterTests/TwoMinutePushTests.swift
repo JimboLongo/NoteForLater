@@ -355,20 +355,33 @@ final class TwoMinutePushTests: XCTestCase {
 
     /// Both kinds on one day: a task missed today and pushed forward leaves
     /// its record here, and an unrelated task created today is still live
-    /// here. Misses sort first.
+    /// here.
+    ///
+    /// UPDATED — this asserted `["Pushed away", "Still here"]` with the
+    /// reason "misses first, then live work". That grouping is gone: it was
+    /// measured on device as the thing that made rows jump on a tap, since
+    /// cycling a row to `.missed` changes which group it is in. Rows now sit
+    /// in one flat order keyed on the underlying task, so the miss row sorts
+    /// by *its task's* `createdAt` like any other row — here, last.
+    ///
+    /// It was also flaky, and the grouping hid that: both tasks were given
+    /// the same `createdAt`, so under the flat rule the `id` tiebreaker
+    /// decided, and `id` is a fresh UUID each run. The dates are distinct
+    /// now. (Production is unaffected — a real task's `id` is stable, so the
+    /// same data always renders in the same order.)
     func test_rows_canHoldBothKindsOnOneDay() throws {
+        let staying = makeTask(title: "Still here")
+        staying.createdAt = day(2026, 1, 5)
         let pushed = makeTask(title: "Pushed away")
-        pushed.createdAt = day(2026, 1, 5)
+        pushed.createdAt = day(2026, 1, 5).addingTimeInterval(3600)
         for _ in 0..<2 {
             _ = TwoMinutePush.cycle(pushed, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
         }
-        let staying = makeTask(title: "Still here")
-        staying.createdAt = day(2026, 1, 5)
 
         let rows = TaskItem.twoMinuteRows(on: day(2026, 1, 5), from: [pushed, staying], context: context)
 
-        XCTAssertEqual(rows.map(\.title), ["Pushed away", "Still here"], "misses first, then live work")
-        XCTAssertEqual(rows.first?.status, .missed, "the record reads as a miss regardless of the task's own status")
+        XCTAssertEqual(rows.map(\.title), ["Still here", "Pushed away"], "one flat order, by the task behind each row")
+        XCTAssertEqual(rows.last?.status, .missed, "the record reads as a miss regardless of the task's own status")
     }
 
     /// A miss row stays a miss whatever became of the task. That day it was
@@ -1144,5 +1157,104 @@ final class TaskMissRecordTests: XCTestCase {
         }
         XCTAssertEqual(ids(), ids(), "identical titles and identical missedDay still order deterministically")
         XCTAssertEqual(ids().count, 2)
+    }
+
+    // MARK: - One flat order, and a tap cannot change it
+
+    /// Rows mapped to the identity of the task behind them, so a snapshot is
+    /// comparable across the TASK ↔ MISS transition — which is exactly the
+    /// case that used to move a row.
+    private func orderIdentity(on day: Date, from tasks: [TaskItem]) -> [UUID] {
+        TaskItem.twoMinuteRows(on: day, from: tasks, context: context, calendar: calendar).map {
+            switch $0 {
+            case .task(let t): return t.id
+            case .miss(let r): return r.taskID
+            }
+        }
+    }
+
+    private func makeDatedTask(_ title: String, created: Date, due: Date?) -> TaskItem {
+        let task = makeTask(title: title)
+        task.createdAt = created
+        if let due { task.dueDate = due }
+        return task
+    }
+
+    /// **The order is one rule and a tap cannot touch any input to it.**
+    ///
+    /// Measured on device: cycling a row to `.missed` turned it from a live
+    /// row into a miss row, and the misses-first grouping then moved it to
+    /// the top of the section. The comparator was never the problem — it was
+    /// stable and status-independent throughout, and the input array's order
+    /// never changed. The grouping was.
+    ///
+    /// So this cycles one row the whole way round — `none → complete →
+    /// missed` (which pushes it away and leaves a miss record behind) and
+    /// then undo — and demands the order is identical at every step.
+    func test_orderIsIdenticalThroughAFullCycle_includingTheTaskMissTransition() throws {
+        let day5 = day(2026, 1, 5)
+        let at = { (h: Int) in day5.addingTimeInterval(TimeInterval(h) * 3600) }
+
+        let a = makeDatedTask("A late due", created: at(15), due: day(2026, 1, 10))
+        let b = makeDatedTask("B early due", created: at(10), due: day(2026, 1, 8))
+        let c = makeDatedTask("C no due", created: at(9), due: nil)
+        let d = makeDatedTask("D no due", created: at(12), due: nil)
+        let all = [a, b, c, d]
+
+        let expected = [b.id, a.id, c.id, d.id]
+        XCTAssertEqual(
+            orderIdentity(on: day5, from: all), expected,
+            "due-dated first by due date, then the rest by createdAt"
+        )
+
+        // none -> complete
+        _ = TwoMinutePush.cycle(c, planDate: day(2026, 1, 6), missedOn: day5, calendar: calendar, context: context)
+        XCTAssertEqual(c.status, .complete)
+        XCTAssertEqual(orderIdentity(on: day5, from: all), expected, "completing moved a row")
+
+        // complete -> missed: c is pushed off day 5 and leaves a miss record
+        _ = TwoMinutePush.cycle(c, planDate: day(2026, 1, 6), missedOn: day5, calendar: calendar, context: context)
+        let rows = TaskItem.twoMinuteRows(on: day5, from: all, context: context, calendar: calendar)
+        XCTAssertTrue(
+            rows.contains { if case .miss = $0 { return true } else { return false } },
+            "the transition actually happened — otherwise this test proves nothing"
+        )
+        XCTAssertEqual(
+            orderIdentity(on: day5, from: all), expected,
+            "a live row became a miss row and kept its index — this is the case that was broken"
+        )
+
+        // undo: the miss row becomes a live row again
+        let record = try XCTUnwrap(TaskMissRecord.records(for: c, in: context).first)
+        TwoMinutePush.undo(record, for: c, context: context, calendar: calendar)
+        XCTAssertEqual(orderIdentity(on: day5, from: all), expected, "undo moved a row back the other way")
+    }
+
+    /// Goes red if misses-first is reintroduced. A miss row whose task sorts
+    /// *last* must still be drawn last — grouping it to the front is the
+    /// specific regression this guards.
+    func test_missRowsAreNotGroupedAheadOfLiveRows() throws {
+        let day5 = day(2026, 1, 5)
+        let early = makeDatedTask("Early", created: day5.addingTimeInterval(3600), due: nil)
+        let late = makeDatedTask("Late", created: day5.addingTimeInterval(20 * 3600), due: nil)
+
+        // `late` becomes a miss row on day 5 while `early` stays live.
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(late, planDate: day(2026, 1, 6), missedOn: day5, calendar: calendar, context: context)
+        }
+
+        let rows = TaskItem.twoMinuteRows(on: day5, from: [early, late], context: context, calendar: calendar)
+        XCTAssertEqual(rows.count, 2)
+        guard case .task = rows[0] else { return XCTFail("the live row sorts first by createdAt — a miss was grouped ahead of it") }
+        guard case .miss = rows[1] else { return XCTFail("expected the miss row last") }
+    }
+
+    /// A due date beats an older `createdAt`, in both row kinds.
+    func test_dueDatedRowsSortAheadOfUndatedOnes() throws {
+        let day5 = day(2026, 1, 5)
+        let oldest = makeDatedTask("Oldest, no due", created: day5.addingTimeInterval(3600), due: nil)
+        let dated = makeDatedTask("Newer, due", created: day5.addingTimeInterval(20 * 3600), due: day(2026, 1, 9))
+
+        XCTAssertEqual(orderIdentity(on: day5, from: [oldest, dated]), [dated.id, oldest.id])
     }
 }
