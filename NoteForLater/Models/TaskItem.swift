@@ -860,6 +860,44 @@ final class TaskItem {
         return TwoMinuteRow.sorted(backlog + today.map { TwoMinuteRow.miss($0) } + live, tasks: allTasks)
     }
 
+    /// What tapping a miss row in Nightly Review means.
+    ///
+    /// **Two red rows that look alike and are not.** The step draws misses
+    /// from earlier days *and*, since misses became visible here, misses
+    /// made during this review. They deserve opposite verbs:
+    ///
+    /// - **A backlog miss** is the documented "one last chance to actually
+    ///   do it" — you are closing out a day and the useful verb is *do it*.
+    ///   That is the deliberate split from the calendar, where the same row
+    ///   kind undoes instead (see `DayTimelineGridView.twoMinuteRowView`'s
+    ///   warning). Unchanged.
+    /// - **A miss made during this review** is this review's own answer, one
+    ///   tap old. The useful verb is *take it back* — exactly what the
+    ///   calendar's red row does — so it continues the three-state cycle
+    ///   rather than dead-ending.
+    ///
+    /// Without the second case the row was a dead end: `TwoMinuteRow.status`
+    /// is hardcoded `.missed` for a record, so the row could never render
+    /// anything but red however the tap was handled, and `completeFromRecord`
+    /// left a today-record in place because only the *backlog* list filters
+    /// on completion.
+    enum MissRowAction: Equatable {
+        /// Undo this review's own push — the shared cascading undo, the same
+        /// call the calendar's red row makes.
+        case undoPush
+        /// Complete the task the record stands for — the backlog's last
+        /// chance.
+        case completeFromRecord
+    }
+
+    static func missRowAction(
+        for record: TaskMissRecord,
+        reviewDate: Date,
+        calendar: Calendar = .current
+    ) -> MissRowAction {
+        calendar.isDate(record.missedDay, inSameDayAs: reviewDate) ? .undoPush : .completeFromRecord
+    }
+
     /// The rows that block Next — **`.none` only**, the same shape
     /// `unresolvedGateReviewItems` and `unresolvedHabitOccurrencesForGate`
     /// already use. A miss row is never `.none`, so complete and missed are

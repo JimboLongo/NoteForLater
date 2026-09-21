@@ -1663,16 +1663,31 @@ struct NightlyReviewView: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            TwoMinutePush.completeFromRecord(record, task: task, context: modelContext)
+            // Which verb this row carries is decided by
+            // `TaskItem.missRowAction`, not here — see its doc comment for
+            // why the two red rows differ. Both arms call `TwoMinutePush`;
+            // there is no second undo implementation.
+            switch TaskItem.missRowAction(for: record, reviewDate: reviewDate) {
+            case .undoPush:
+                TwoMinutePush.undo(record, for: task, context: modelContext)
+            case .completeFromRecord:
+                TwoMinutePush.completeFromRecord(record, task: task, context: modelContext)
+            }
             ScheduleDirtyState.shared.isDirty = true
         }
         .opacity(0.65)
     }
 
-    /// "Missed Friday" / "Missed Sep 12" — the day the miss belongs to,
-    /// which is never today (see `actionableRecords`' backlog filter).
+    /// "Missed today" / "Missed Friday" / "Missed Sep 12" — the day the
+    /// miss belongs to.
+    ///
+    /// REVERSAL: this said the day "is never today (see `actionableRecords`'
+    /// backlog filter)". It can be today now — a miss marked during this
+    /// review is drawn here so the answer is visible, which is what that
+    /// filter alone used to hide.
     private func missedDayLabel(_ day: Date) -> String {
         let calendar = Calendar.current
+        if calendar.isDateInToday(day) { return "Missed today" }
         if calendar.isDateInYesterday(day) { return "Missed yesterday" }
         let formatter = DateFormatter()
         formatter.dateFormat = calendar.isDate(day, equalTo: .now, toGranularity: .weekOfYear) ? "EEEE" : "MMM d"

@@ -1417,4 +1417,99 @@ final class TaskMissRecordTests: XCTestCase {
             TwoMinuteEngagementTimer.budget(missed: 2, unanswered: 0)
         )
     }
+
+    // MARK: - The review's red row is not a dead end
+
+    /// **Full cycle through the kind change, both directions.**
+    ///
+    /// Marking missed in the review turns the row red; tapping the red row
+    /// takes it back; tapping again completes. Before this the red row was a
+    /// dead end — `TwoMinuteRow.status` is hardcoded `.missed` for a record,
+    /// so the row could never render anything but red whatever the tap did,
+    /// and the review's only record handler was `completeFromRecord`, which
+    /// leaves a same-day record in place because only the *backlog* list
+    /// filters on completion.
+    func test_reviewRedRow_cyclesBackToIncompleteAndOnAgain() throws {
+        let reviewDate = day(2026, 9, 21)
+        let a = makeTask(title: "A"); a.createdAt = reviewDate.addingTimeInterval(3600)
+        let b = makeTask(title: "B"); b.createdAt = reviewDate.addingTimeInterval(2 * 3600)
+        let c = makeTask(title: "C"); c.createdAt = reviewDate.addingTimeInterval(3 * 3600)
+        let all = [a, b, c]
+        let expected = [a.id, b.id, c.id]
+
+        func identity() -> [UUID] {
+            reviewRows(reviewDate, all).map {
+                switch $0 { case .task(let t): return t.id; case .miss(let r): return r.taskID }
+            }
+        }
+        func statusOfB() -> OccurrenceStatus? { reviewRows(reviewDate, all).dropFirst().first?.status }
+
+        // incomplete -> complete -> missed
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(
+                b, planDate: ChooseDayPlanning.pushDay(missedOn: reviewDate, calendar: calendar, now: reviewDate),
+                missedOn: reviewDate, calendar: calendar, context: context
+            )
+        }
+        XCTAssertEqual(statusOfB(), .missed)
+        XCTAssertEqual(identity(), expected, "index held on incomplete -> missed")
+
+        // The red row's own tap. Same shared undo the calendar's red row calls.
+        let record = try XCTUnwrap(TaskMissRecord.records(for: b, in: context).first)
+        XCTAssertEqual(
+            TaskItem.missRowAction(for: record, reviewDate: reviewDate, calendar: calendar), .undoPush,
+            "a miss made during this review takes itself back"
+        )
+        TwoMinutePush.undo(record, for: b, context: context, calendar: calendar)
+
+        XCTAssertEqual(statusOfB(), OccurrenceStatus.none, "back to incomplete, not stuck red")
+        XCTAssertEqual(identity(), expected, "index held on missed -> incomplete too")
+        XCTAssertNil(b.startDate, "the captured start date was restored")
+        XCTAssertTrue(TaskMissRecord.records(for: b, in: context).isEmpty)
+
+        // And the cycle keeps going.
+        _ = TwoMinutePush.cycle(b, planDate: day(2026, 9, 22), missedOn: reviewDate, calendar: calendar, context: context)
+        XCTAssertEqual(statusOfB(), .complete)
+        XCTAssertEqual(identity(), expected)
+    }
+
+    /// Going back to incomplete must re-block Next. The gate is derived from
+    /// the same rows, so this is really asserting nothing caches.
+    func test_undoingAMissReblocksTheNextGate() throws {
+        let reviewDate = day(2026, 9, 21)
+        let only = makeTask(title: "Only"); only.createdAt = reviewDate.addingTimeInterval(3600)
+
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(
+                only, planDate: ChooseDayPlanning.pushDay(missedOn: reviewDate, calendar: calendar, now: reviewDate),
+                missedOn: reviewDate, calendar: calendar, context: context
+            )
+        }
+        XCTAssertTrue(
+            TaskItem.unresolvedTwoMinuteRows(reviewRows(reviewDate, [only])).isEmpty,
+            "missed is an answer — Next is open"
+        )
+
+        let record = try XCTUnwrap(TaskMissRecord.records(for: only, in: context).first)
+        TwoMinutePush.undo(record, for: only, context: context, calendar: calendar)
+
+        XCTAssertEqual(
+            TaskItem.unresolvedTwoMinuteRows(reviewRows(reviewDate, [only])).count, 1,
+            "back to incomplete — Next blocks again"
+        )
+    }
+
+    /// **The backlog row keeps its own verb.** Unifying the two would delete
+    /// the documented "one last chance to actually do it", which is the
+    /// whole reason the review and the calendar differ on this row kind.
+    func test_backlogMissRowStillCompletesRatherThanUndoing() throws {
+        let reviewDate = day(2026, 9, 21)
+        let task = makeTask(title: "From Friday")
+        let record = TaskMissRecord(taskID: task.id, title: task.title, missedDay: day(2026, 9, 18))
+        context.insert(record)
+
+        XCTAssertEqual(
+            TaskItem.missRowAction(for: record, reviewDate: reviewDate, calendar: calendar), .completeFromRecord
+        )
+    }
 }
