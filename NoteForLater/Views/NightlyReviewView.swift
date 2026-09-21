@@ -1559,7 +1559,9 @@ struct NightlyReviewView: View {
             // being planned, rather than recomputing `reviewDate + 1`
             // locally: catching up several days late used to land a miss on
             // the day after the miss, still in the past and invisible.
-            TwoMinutePush.cycle(task, planDate: planDate, context: modelContext)
+            // `missedOn: reviewDate` — the day being reviewed is the day
+            // the miss belongs to, which is not the day it is pushed to.
+            TwoMinutePush.cycle(task, planDate: planDate, missedOn: reviewDate, context: modelContext)
             ScheduleDirtyState.shared.isDirty = true
         }
         .opacity(task.status == .none ? 1 : 0.5)

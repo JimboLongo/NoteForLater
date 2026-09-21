@@ -818,8 +818,8 @@ struct DayTimelineGridView: View {
             // one appeared from its new day onward forever. Extracted rather
             // than inlined so the *list* is testable, not just the per-task
             // rule it applies.
-            let visible = TaskItem.twoMinuteTasksVisible(on: targetDate, from: shelf.tasks ?? [])
-            if !visible.isEmpty {
+            let rows = TaskItem.twoMinuteRows(on: targetDate, from: shelf.tasks ?? [], context: modelContext)
+            if !rows.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 5) {
                         Image(systemName: shelf.systemImage)
@@ -830,43 +830,8 @@ struct DayTimelineGridView: View {
                     .foregroundStyle(.secondary)
 
                     VStack(spacing: 6) {
-                        ForEach(visible) { task in
-                            Button {
-                                // The same shared owner Nightly Review's
-                                // 2-Minute row calls — see
-                                // `TwoMinutePush.cycle`. Marking missed
-                                // pushes here too now; see
-                                // `twoMinuteStatusCircle` for why that
-                                // became safe.
-                                TwoMinutePush.cycle(
-                                    task,
-                                    planDate: ChooseDayPlanning.planDate(
-                                        forPlanning: ChooseDayPlanning.defaultPlanningChoice(now: .now, calendar: Calendar.current),
-                                        now: .now,
-                                        calendar: Calendar.current
-                                    ),
-                                    context: modelContext
-                                )
-                            } label: {
-                                HStack(spacing: 10) {
-                                    twoMinuteStatusCircle(status: task.status)
-                                    Text(task.title)
-                                        // Strikethrough stays tied to
-                                        // completion specifically, not
-                                        // missed — same rule as
-                                        // `occurrenceRow` and
-                                        // `OverdueBlocksReviewList.habitRow`:
-                                        // crossed-out reads as "done", which
-                                        // missed is not. The circle alone
-                                        // carries that distinction.
-                                        .foregroundStyle(.primary)
-                                        .strikethrough(task.status == .complete)
-                                    Spacer()
-                                }
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .opacity(task.status == .none ? 1 : 0.5)
+                        ForEach(rows) { row in
+                            twoMinuteRowView(row)
                         }
                     }
                 }
@@ -877,6 +842,95 @@ struct DayTimelineGridView: View {
                 .padding(.bottom, 10)
             }
         }
+    }
+
+    /// One 2-Minute row — a live task, or a record of a miss that happened
+    /// on this day.
+    ///
+    /// ⚠️ **Tapping a miss row means UNDO here and COMPLETE in Nightly
+    /// Review. That is deliberate. Do not unify them.**
+    ///
+    /// The two handlers look like the same gesture on the same row kind, and
+    /// they are not — they match what each surface is *for*:
+    ///
+    /// - **Calendar:** you are looking at a day and putting the task back on
+    ///   it. The push was made from here; undoing it from the same row is
+    ///   the reversal of what you just did. Completing from here would be
+    ///   odd — the work has moved to another day, and that day's row is
+    ///   where it gets done.
+    /// - **Nightly Review:** you are closing a day out. The miss is shown as
+    ///   a last chance to actually do the thing before it goes, so tapping
+    ///   it completes the task (`TwoMinutePush.completeFromRecord`) and the
+    ///   record stays as history.
+    ///
+    /// Both directions live in `TwoMinutePush`, so each surface *chooses*
+    /// one rather than implementing it. That is what keeps this an
+    /// intentional asymmetry rather than the two-call-sites-one-rule drift
+    /// recorded in docs/session-handoff.md — there is no logic here for the
+    /// other surface to fall out of step with, only a choice of which
+    /// shared function to call.
+    @ViewBuilder
+    private func twoMinuteRowView(_ row: TaskItem.TwoMinuteRow) -> some View {
+        switch row {
+        case .task(let task):
+            Button {
+                // The same shared owner Nightly Review's 2-Minute row calls
+                // — see `TwoMinutePush.cycle`. Marking missed pushes here
+                // too now; see `twoMinuteStatusCircle` for why that became
+                // safe.
+                TwoMinutePush.cycle(
+                    task,
+                    planDate: ChooseDayPlanning.planDate(
+                        forPlanning: ChooseDayPlanning.defaultPlanningChoice(now: .now, calendar: Calendar.current),
+                        now: .now,
+                        calendar: Calendar.current
+                    ),
+                    // The day on screen is the day the miss belongs to —
+                    // the row is sitting on it.
+                    missedOn: targetDate,
+                    context: modelContext
+                )
+            } label: {
+                twoMinuteRowLabel(title: task.title, status: task.status)
+            }
+            .buttonStyle(.plain)
+            .opacity(task.status == .none ? 1 : 0.5)
+
+        case .miss(let record):
+            Button {
+                // UNDO — see this function's own warning. The task comes
+                // back to this day and the record goes with the push.
+                if let task = allTasks.first(where: { $0.id == record.taskID }) {
+                    TwoMinutePush.undo(for: task, context: modelContext)
+                } else {
+                    // The task is gone; the record is all that is left of
+                    // it, so there is nothing to put back.
+                    modelContext.delete(record)
+                }
+            } label: {
+                twoMinuteRowLabel(title: record.title, status: .missed)
+            }
+            .buttonStyle(.plain)
+            .opacity(0.5)
+        }
+    }
+
+    /// Shared label for both row kinds, so a miss and a live task can never
+    /// drift apart visually — one circle treatment, one strikethrough rule.
+    private func twoMinuteRowLabel(title: String, status: OccurrenceStatus) -> some View {
+        HStack(spacing: 10) {
+            twoMinuteStatusCircle(status: status)
+            Text(title)
+                // Strikethrough stays tied to completion specifically, not
+                // missed — same rule as `occurrenceRow` and
+                // `OverdueBlocksReviewList.habitRow`: crossed-out reads as
+                // "done", which missed is not. The circle alone carries
+                // that distinction.
+                .foregroundStyle(.primary)
+                .strikethrough(status == .complete)
+            Spacer()
+        }
+        .contentShape(Rectangle())
     }
 
     /// Three-state circle for a 2-Minute task row — same green-check /

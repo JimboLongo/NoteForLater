@@ -713,6 +713,71 @@ final class TaskItem {
             .sorted { $0.createdAt < $1.createdAt }
     }
 
+    /// One row the 2-Minute checklist can show for a given day.
+    ///
+    /// Two kinds, because a day can carry both: the **live task**, which is
+    /// the work and moves when pushed, and a **miss record**, which stays on
+    /// the day the miss happened and never moves. Same enum-of-row-kinds
+    /// shape as `ReviewItem`, for the same reason — one ordered list the
+    /// view renders straight through, rather than two lists it has to
+    /// interleave itself and keep in agreement.
+    enum TwoMinuteRow: Identifiable {
+        case task(TaskItem)
+        /// A miss that happened on this day. The task it names has moved on
+        /// (or been completed since); this row is the record that the day
+        /// carried it. Read-only on the calendar, actionable in Nightly
+        /// Review — see `TwoMinutePush.completeFromRecord`.
+        case miss(TaskMissRecord)
+
+        var id: String {
+            switch self {
+            case .task(let task): return "task-\(task.id)"
+            case .miss(let record): return "miss-\(record.id)"
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .task(let task): return task.title
+            case .miss(let record): return record.title
+            }
+        }
+
+        /// What the row's circle draws. A miss record is always `.missed` —
+        /// that is the whole of what it says. The task's own status can be
+        /// anything, including `.complete` for one finished on this day.
+        var status: OccurrenceStatus {
+            switch self {
+            case .task(let task): return task.status
+            case .miss: return .missed
+            }
+        }
+    }
+
+    /// Every 2-Minute row for `day` — live tasks and miss records together.
+    ///
+    /// Misses sort first: they belong to a day that has already been
+    /// decided, so they read as context above whatever is still live.
+    ///
+    /// **The list is the testable unit, deliberately.** Three separate times
+    /// this session a rule was covered while the call site applying it was
+    /// not — most recently this exact function, where reverting the view's
+    /// filter to a lower bound left every per-task test green. The view
+    /// calls this and renders what it returns; it filters nothing itself.
+    static func twoMinuteRows(
+        on day: Date,
+        from tasks: [TaskItem],
+        context: ModelContext,
+        calendar: Calendar = .current
+    ) -> [TwoMinuteRow] {
+        let misses = TaskMissRecord.records(on: day, in: context, calendar: calendar)
+            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+            .map { TwoMinuteRow.miss($0) }
+        let live = twoMinuteTasksVisible(on: day, from: tasks, calendar: calendar)
+            .map { TwoMinuteRow.task($0) }
+        return misses + live
+    }
+
     func isEligibleToStart(on date: Date, calendar: Calendar = .current) -> Bool {
         guard let startDate else { return true }
         return calendar.startOfDay(for: date) >= calendar.startOfDay(for: startDate)

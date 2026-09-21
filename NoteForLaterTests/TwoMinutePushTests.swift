@@ -38,12 +38,13 @@ final class TwoMinutePushTests: XCTestCase {
     /// is what pushes.
     func test_missedPushesToThePlannedDay() throws {
         let planDate = day(2026, 1, 6)
+        let missedDay = day(2026, 1, 5)
         let task = makeTask()
 
-        XCTAssertEqual(TwoMinutePush.cycle(task, planDate: planDate, context: context), .complete)
+        XCTAssertEqual(TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context), .complete)
         XCTAssertNil(task.startDate, "completing doesn't push")
 
-        XCTAssertEqual(TwoMinutePush.cycle(task, planDate: planDate, context: context), .missed)
+        XCTAssertEqual(TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context), .missed)
 
         XCTAssertEqual(task.startDate.map { calendar.startOfDay(for: $0) }, day(2026, 1, 6))
         XCTAssertTrue(task.startDatePicked, "the card shows it — a startDate it doesn't display is invisible state")
@@ -53,9 +54,10 @@ final class TwoMinutePushTests: XCTestCase {
     /// through the predicate both real call sites actually use.
     func test_pushedTaskIsIneligibleTonight_andEligibleTomorrow() throws {
         let planDate = day(2026, 1, 6)
+        let missedDay = day(2026, 1, 5)
         let task = makeTask()
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context)
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context)
 
         XCTAssertFalse(task.isEligibleToStart(on: day(2026, 1, 5)), "gone from tonight")
         XCTAssertTrue(task.isEligibleToStart(on: planDate), "on the day being planned")
@@ -71,9 +73,10 @@ final class TwoMinutePushTests: XCTestCase {
     /// screen says it will.
     func test_landsOnTheDayBeingPlanned_notRelativeToTheMiss() throws {
         let planDate = day(2025, 3, 11)
+        let missedDay = day(2025, 3, 10)
         let task = makeTask()
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context)
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context)
 
         XCTAssertEqual(task.startDate.map { calendar.startOfDay(for: $0) }, day(2025, 3, 11))
     }
@@ -84,12 +87,13 @@ final class TwoMinutePushTests: XCTestCase {
     /// date goes back to having none, rather than keeping the pushed one.
     func test_cyclingPastMissed_clearsThePushEntirely() throws {
         let planDate = day(2026, 1, 6)
+        let missedDay = day(2026, 1, 5)
         let task = makeTask()
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)   // complete
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)   // missed
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context)   // complete
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context)   // missed
         XCTAssertNotNil(task.startDate)
 
-        XCTAssertEqual(TwoMinutePush.cycle(task, planDate: planDate, context: context), .none)
+        TwoMinutePush.undo(for: task, context: context)
 
         XCTAssertNil(task.startDate, "no prior date, so the push clears rather than lingering")
         XCTAssertFalse(task.startDatePicked)
@@ -98,32 +102,251 @@ final class TwoMinutePushTests: XCTestCase {
     /// A task that already had a start date gets *that* back, not nil.
     func test_undoRestoresAPriorStartDate() throws {
         let planDate = day(2026, 1, 6)
+        let missedDay = day(2026, 1, 5)
         let prior = day(2025, 12, 1)
         let task = makeTask()
         task.setStartDate(prior)
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context)
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context)
         XCTAssertEqual(task.startDate.map { calendar.startOfDay(for: $0) }, day(2026, 1, 6))
 
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)   // back to .none
+        TwoMinutePush.undo(for: task, context: context)
 
         XCTAssertEqual(task.startDate.map { calendar.startOfDay(for: $0) }, prior)
     }
 
-    /// Round the loop twice: the restore must be the *original* date, not
+    /// Push and undo twice: the restore must be the *original* date, not
     /// the pushed one captured on the second pass.
     func test_twoFullCycles_restoreTheOriginalDate_notThePushedOne() throws {
         let planDate = day(2026, 1, 6)
+        let missedDay = day(2026, 1, 5)
         let prior = day(2025, 12, 1)
         let task = makeTask()
         task.setStartDate(prior)
 
-        for _ in 0..<3 { _ = TwoMinutePush.cycle(task, planDate: planDate, context: context) }   // none→complete→missed→none
-        for _ in 0..<3 { _ = TwoMinutePush.cycle(task, planDate: planDate, context: context) }   // and again
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context)   // -> missed, pushes
+            _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context)   // -> complete
+            TwoMinutePush.undo(for: task, context: context)
+        }
 
         XCTAssertEqual(task.startDate.map { calendar.startOfDay(for: $0) }, prior)
     }
 
+
+    // MARK: - The miss record: the half that stays behind
+
+    /// **Two rows, not one moving row.** The live task moves to the planned
+    /// day; the record stays on the day the miss happened.
+    func test_pushLeavesARecordOnTheDayItWasMissed() throws {
+        let task = makeTask()
+        task.createdAt = day(2026, 1, 5)
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+        }
+
+        XCTAssertEqual(task.twoMinuteDisplayDay(), day(2026, 1, 6), "the live task moved")
+        let onFifth = TaskMissRecord.records(on: day(2026, 1, 5), in: context)
+        XCTAssertEqual(onFifth.count, 1, "and the day it was missed on still shows something")
+        XCTAssertEqual(onFifth.first?.pushedToDay, day(2026, 1, 6))
+    }
+
+    /// The record names the day the miss actually happened, not the last day
+    /// it was re-tapped. Cycling missed twice without an intervening undo
+    /// keeps the first record.
+    func test_reMissingDoesNotMoveOrDuplicateTheRecord() throws {
+        let task = makeTask()
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+        }
+        // Re-missed from a later day without undoing first.
+        TwoMinutePush.apply(to: task, planDate: day(2026, 1, 9), missedOn: day(2026, 1, 8), context: context)
+
+        let all = try context.fetch(FetchDescriptor<TaskMissRecord>())
+        XCTAssertEqual(all.count, 1, "one outstanding record per task, not a pile")
+        XCTAssertEqual(all.first?.missedDay, day(2026, 1, 5), "still the day the miss happened")
+    }
+
+    /// Undo takes the record with it — otherwise a miss row would stand for
+    /// a push that no longer exists.
+    func test_undoRemovesTheRecord() throws {
+        let task = makeTask()
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+        }
+        XCTAssertEqual(try context.fetch(FetchDescriptor<TaskMissRecord>()).count, 1)
+
+        TwoMinutePush.undo(for: task, context: context)
+
+        XCTAssertTrue(try context.fetch(FetchDescriptor<TaskMissRecord>()).isEmpty)
+        XCTAssertEqual(task.twoMinuteDisplayDay(), task.twoMinuteDisplayDay(), "and the task is back where it was")
+    }
+
+    /// **Completing from the record completes the task and keeps the
+    /// record.**
+    ///
+    /// The two answers have to agree: the calendar keeps missed rows as
+    /// history, so a miss completed later still reads as missed on the day
+    /// it was missed. "Missed Monday, done Tuesday" is true, and matches
+    /// `TaskCompletionRecord` — history is not rewritten by what happened
+    /// after.
+    func test_completingFromTheRecord_completesTheTaskAndKeepsTheRecord() throws {
+        let task = makeTask()
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+        }
+        let record = try XCTUnwrap(TaskMissRecord.record(for: task, in: context))
+
+        TwoMinutePush.completeFromRecord(record, task: task, context: context)
+
+        XCTAssertTrue(task.isCompleted, "the point is one last chance to actually do it, not to dismiss a reminder")
+        XCTAssertEqual(try context.fetch(FetchDescriptor<TaskMissRecord>()).count, 1, "the miss still happened")
+        XCTAssertFalse(task.hasOutstandingTwoMinutePush, "nothing left to undo")
+    }
+
+    /// `startDate` is deliberately left where the push put it. Restoring it
+    /// would drag the now-completed task back onto the original day, putting
+    /// two rows for one task there — the record and the completed task.
+    func test_completingFromTheRecord_doesNotDragTheTaskBack() throws {
+        let task = makeTask()
+        task.createdAt = day(2026, 1, 5)
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+        }
+        let record = try XCTUnwrap(TaskMissRecord.record(for: task, in: context))
+
+        TwoMinutePush.completeFromRecord(record, task: task, context: context)
+
+        XCTAssertEqual(task.twoMinuteDisplayDay(), day(2026, 1, 6), "completed on the day it was owed, not the day it was missed")
+    }
+
+    // MARK: - The mixed row list
+
+    /// **The whole point: two rows, on two days, from one push.**
+    func test_rows_missOnTheOriginalDay_liveTaskOnThePushedDay() throws {
+        let task = makeTask(title: "Water the plant")
+        task.createdAt = day(2026, 1, 5)
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+        }
+        let all = [task]
+
+        let fifth = TaskItem.twoMinuteRows(on: day(2026, 1, 5), from: all, context: context)
+        XCTAssertEqual(fifth.count, 1)
+        XCTAssertEqual(fifth.first?.status, .missed, "the day it was missed still shows it, as missed")
+        if case .task = fifth.first { XCTFail("the original day holds the record, not the live task") }
+
+        let sixth = TaskItem.twoMinuteRows(on: day(2026, 1, 6), from: all, context: context)
+        XCTAssertEqual(sixth.count, 1)
+        if case .miss = sixth.first { XCTFail("the pushed day holds the live task, not a record") }
+        XCTAssertEqual(
+            sixth.first?.status, OccurrenceStatus.none,
+            "and the day it moved to shows it as still to do — the miss is carried by the record, not by both rows"
+        )
+    }
+
+    /// Both kinds on one day: a task missed today and pushed forward leaves
+    /// its record here, and an unrelated task created today is still live
+    /// here. Misses sort first.
+    func test_rows_canHoldBothKindsOnOneDay() throws {
+        let pushed = makeTask(title: "Pushed away")
+        pushed.createdAt = day(2026, 1, 5)
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(pushed, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+        }
+        let staying = makeTask(title: "Still here")
+        staying.createdAt = day(2026, 1, 5)
+
+        let rows = TaskItem.twoMinuteRows(on: day(2026, 1, 5), from: [pushed, staying], context: context)
+
+        XCTAssertEqual(rows.map(\.title), ["Pushed away", "Still here"], "misses first, then live work")
+        XCTAssertEqual(rows.first?.status, .missed, "the record reads as a miss regardless of the task's own status")
+    }
+
+    /// Completing from the record leaves the miss row on its day — the
+    /// calendar keeps history. Paired with the review's own behaviour in
+    /// `test_reviewRows_dropAHandledMiss` so the two answers are asserted
+    /// from one state rather than separately.
+    func test_rows_keepAMissAfterItsTaskIsCompleted() throws {
+        let task = makeTask()
+        task.createdAt = day(2026, 1, 5)
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+        }
+        let record = try XCTUnwrap(TaskMissRecord.record(for: task, in: context))
+        TwoMinutePush.completeFromRecord(record, task: task, context: context)
+
+        let fifth = TaskItem.twoMinuteRows(on: day(2026, 1, 5), from: [task], context: context)
+        XCTAssertEqual(fifth.count, 1, "missed Monday stays true after doing it Tuesday")
+        XCTAssertEqual(fifth.first?.status, .missed)
+    }
+
+    /// Undo collapses both rows back to one on the original day.
+    func test_rows_undoCollapsesBackToOneRow() throws {
+        let task = makeTask()
+        task.createdAt = day(2026, 1, 5)
+        for _ in 0..<2 {   // complete -> missed (pushes)
+            _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+        }
+        // Undo is an explicit action now, not a third tap — see
+        // `TwoMinutePush.undo`.
+        TwoMinutePush.undo(for: task, context: context)
+
+        XCTAssertEqual(TaskItem.twoMinuteRows(on: day(2026, 1, 5), from: [task], context: context).count, 1)
+        XCTAssertTrue(TaskItem.twoMinuteRows(on: day(2026, 1, 6), from: [task], context: context).isEmpty)
+    }
+
+    /// A day with neither is empty — the record lookup failing open would
+    /// put every past miss on every day.
+    func test_rows_unrelatedDayIsEmpty() throws {
+        let task = makeTask()
+        task.createdAt = day(2026, 1, 5)
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+        }
+
+        XCTAssertTrue(TaskItem.twoMinuteRows(on: day(2026, 1, 20), from: [task], context: context).isEmpty)
+    }
+
+    /// **`.missed` is no longer a resting state for a 2-Minute task.**
+    ///
+    /// It exists for the duration of one `cycle` call and is immediately
+    /// converted into a record plus a move. The visible cycle on a live row
+    /// is therefore `.none → .complete → (pushed away)`, with the third
+    /// state living on the other day as history.
+    func test_aLiveRowNeverRestsAtMissed() throws {
+        let task = makeTask()
+        _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+        XCTAssertEqual(task.status, .complete)
+
+        XCTAssertEqual(
+            TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context), .missed,
+            "the cycle still reports it, so callers can react"
+        )
+        XCTAssertEqual(task.status, OccurrenceStatus.none, "but the task does not stay there")
+    }
+
+    /// Completing on the pushed day, then missing again later, re-captures
+    /// the prior state rather than restoring one from two pushes ago. This
+    /// is what `clearPushBookkeeping` is for.
+    func test_aSecondPushAfterCompletionRecapturesPriorState() throws {
+        let task = makeTask()
+        let original = day(2025, 12, 1)
+        task.setStartDate(original)
+
+        for _ in 0..<2 { _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context) }
+        _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)   // complete
+        // Missed again from the day it landed on. One tap, not two:
+        // `.complete` cycles straight to `.missed`.
+        _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 9), missedOn: day(2026, 1, 6), context: context)
+
+        TwoMinutePush.undo(for: task, context: context)
+
+        XCTAssertEqual(
+            task.startDate.map { calendar.startOfDay(for: $0) }, day(2026, 1, 6),
+            "undo restores where it was before THIS push, not the original date from before the first one"
+        )
+    }
 
     // MARK: - One day only, on the calendar
     //
@@ -161,7 +384,7 @@ final class TwoMinutePushTests: XCTestCase {
         task.createdAt = day(2026, 1, 5)
         XCTAssertEqual(task.twoMinuteDisplayDay(), day(2026, 1, 5))
 
-        TwoMinutePush.apply(to: task, planDate: day(2026, 1, 9))
+        TwoMinutePush.apply(to: task, planDate: day(2026, 1, 9), missedOn: day(2026, 1, 5), context: context)
 
         XCTAssertEqual(task.twoMinuteDisplayDay(), day(2026, 1, 9), "it moved")
         XCTAssertNotEqual(task.twoMinuteDisplayDay(), day(2026, 1, 5), "and left where it was")
@@ -172,13 +395,14 @@ final class TwoMinutePushTests: XCTestCase {
     /// row returns to the day it came from.
     func test_undoRestoresTheDisplayDay() throws {
         let planDate = day(2026, 1, 9)
+        let missedDay = day(2026, 1, 5)
         let task = makeTask()
         task.createdAt = day(2026, 1, 5)
 
-        for _ in 0..<2 { _ = TwoMinutePush.cycle(task, planDate: planDate, context: context) }   // -> missed
+        for _ in 0..<2 { _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context) }   // -> missed
         XCTAssertEqual(task.twoMinuteDisplayDay(), planDate)
 
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)   // -> none
+        TwoMinutePush.undo(for: task, context: context)
 
         XCTAssertEqual(task.twoMinuteDisplayDay(), day(2026, 1, 5), "back on its creation day")
     }
@@ -193,7 +417,7 @@ final class TwoMinutePushTests: XCTestCase {
         onFifth.createdAt = day(2026, 1, 5)
         let pushed = makeTask(title: "Pushed to the 9th")
         pushed.createdAt = day(2026, 1, 5)
-        TwoMinutePush.apply(to: pushed, planDate: day(2026, 1, 9))
+        TwoMinutePush.apply(to: pushed, planDate: day(2026, 1, 9), missedOn: day(2026, 1, 5), context: context)
         let all = [onFifth, pushed]
 
         let fifth = TaskItem.twoMinuteTasksVisible(on: day(2026, 1, 5), from: all)
@@ -259,18 +483,19 @@ final class TwoMinutePushTests: XCTestCase {
     /// now depends on nothing but the task itself.
     func test_undoWorksAfterTheScreenIsGone() throws {
         let planDate = day(2026, 1, 6)
+        let missedDay = day(2026, 1, 5)
         let prior = day(2025, 12, 1)
         let task = makeTask()
         task.setStartDate(prior)
 
         // A push made "last session".
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)   // complete
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)   // missed
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context)   // complete
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context)   // missed
         XCTAssertEqual(task.startDate.map { calendar.startOfDay(for: $0) }, planDate)
 
         // Nothing carries over between sessions but the task's own fields —
         // no state object is reconstructed here, deliberately.
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)   // -> none
+        TwoMinutePush.undo(for: task, context: context)
 
         XCTAssertEqual(
             task.startDate.map { calendar.startOfDay(for: $0) }, prior,
@@ -284,32 +509,44 @@ final class TwoMinutePushTests: XCTestCase {
     /// `startDateBeforePush != nil`.
     func test_undoRestoresHavingHadNoStartDate() throws {
         let planDate = day(2026, 1, 6)
+        let missedDay = day(2026, 1, 5)
         let task = makeTask()
         XCTAssertNil(task.startDate)
 
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)   // missed
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context)
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context)   // missed
         XCTAssertNotNil(task.startDate)
 
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)   // -> none
+        TwoMinutePush.undo(for: task, context: context)
 
         XCTAssertNil(task.startDate, "no prior date means clear, not keep the pushed one")
         XCTAssertFalse(task.startDatePicked, "and the card must not show a picked state for a value never chosen")
     }
 
-    /// Completing a pushed task undoes it too — the gate is "not landing on
-    /// `.missed`", not "was `.none`". Same rule the recurring push needed.
-    func test_completingAfterMissing_undoesThePush() throws {
+    /// **REVERSAL — completing a pushed task is NOT an undo.**
+    ///
+    /// This asserted the opposite: that completing after a miss cleared the
+    /// push, because the undo fired on any transition out of `.missed`. Once
+    /// a push resets the task to `.none`, that rule can no longer tell "I
+    /// completed it" from "I changed my mind" — both land on a non-missed
+    /// status.
+    ///
+    /// So completing keeps the pushed start date (the task was done on the
+    /// day it was owed) and keeps the miss record (the miss still happened).
+    /// Only the undo *capture* is dropped, so a later push re-captures
+    /// rather than restoring a date from two pushes ago.
+    func test_completingAPushedTask_keepsThePushAndTheRecord() throws {
         let planDate = day(2026, 1, 6)
+        let missedDay = day(2026, 1, 5)
         let task = makeTask()
-        for _ in 0..<2 { _ = TwoMinutePush.cycle(task, planDate: planDate, context: context) }   // -> missed
+        for _ in 0..<2 { _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context) }   // -> missed, pushes
         XCTAssertTrue(task.hasOutstandingTwoMinutePush)
 
-        _ = TwoMinutePush.cycle(task, planDate: planDate, context: context)   // -> none
-        XCTAssertEqual(TwoMinutePush.cycle(task, planDate: planDate, context: context), .complete)
+        XCTAssertEqual(TwoMinutePush.cycle(task, planDate: planDate, missedOn: missedDay, context: context), .complete)
 
-        XCTAssertNil(task.startDate, "a completed task carries no leftover push")
-        XCTAssertFalse(task.hasOutstandingTwoMinutePush)
+        XCTAssertEqual(task.startDate.map { calendar.startOfDay(for: $0) }, planDate, "done on the day it was owed")
+        XCTAssertEqual(try context.fetch(FetchDescriptor<TaskMissRecord>()).count, 1, "the miss still happened")
+        XCTAssertFalse(task.hasOutstandingTwoMinutePush, "but there is nothing left to reverse")
     }
 
     // MARK: - The expired-push sweep
@@ -325,7 +562,7 @@ final class TwoMinutePushTests: XCTestCase {
     /// these fixtures set the real marker and the hole closes for free.
     func test_clearsAPushedDateOnceItHasPassed() throws {
         let task = makeTask()
-        TwoMinutePush.apply(to: task, planDate: day(2026, 1, 6))
+        TwoMinutePush.apply(to: task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
         XCTAssertTrue(task.hasOutstandingTwoMinutePush)
 
         TwoMinutePush.clearExpiredPushes(on: [task], asOf: day(2026, 1, 8))
@@ -340,7 +577,7 @@ final class TwoMinutePushTests: XCTestCase {
     /// because the marker no longer rides on the status.
     func test_clearsAPushedDate_evenWhenTheStatusIsNoLongerMissed() throws {
         let task = makeTask()
-        TwoMinutePush.apply(to: task, planDate: day(2026, 1, 6))
+        TwoMinutePush.apply(to: task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
         task.status = .none   // complete-then-uncomplete collapses it
 
         TwoMinutePush.clearExpiredPushes(on: [task], asOf: day(2026, 1, 8))
@@ -351,7 +588,7 @@ final class TwoMinutePushTests: XCTestCase {
     /// Today is not past — a task pushed to today is doing its job.
     func test_leavesTodaysPushAlone() throws {
         let task = makeTask()
-        TwoMinutePush.apply(to: task, planDate: day(2026, 1, 6))
+        TwoMinutePush.apply(to: task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
 
         TwoMinutePush.clearExpiredPushes(on: [task], asOf: day(2026, 1, 6))
 
