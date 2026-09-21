@@ -2486,6 +2486,45 @@ final class ScheduleReviewViewModel {
     /// view. Same completion-record source, same has-no-live-block filter
     /// as before extraction — see that property's own doc comment for why
     /// `TaskCompletionRecord` rather than `allTasks` directly.
+    /// The Today step's completed rows — **the union of what the records
+    /// currently say and what this session has already shown.**
+    ///
+    /// `sessionTaskIDs` is why the row survives being cycled off
+    /// `.complete`: doing so calls `TaskCompletionRecord.remove`, so a row
+    /// built only from records would delete its own source and disappear
+    /// mid-cycle. Holding the ids for the length of the review keeps the row
+    /// on screen, at its index, through all three states. Same frozen-
+    /// identity/live-status split as `HabitReviewOccurrence`.
+    static func completedTaskReviewRows(
+        sessionSortTimes: [UUID: Date],
+        tasks: [TaskItem],
+        context: ModelContext,
+        completedSince: Date?
+    ) -> [CompletedTaskReviewRow] {
+        let byID = Dictionary(tasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var rows: [UUID: CompletedTaskReviewRow] = [:]
+
+        for record in completedTasksWithNoBlock(tasks: tasks, context: context, completedSince: completedSince) {
+            rows[record.taskID] = CompletedTaskReviewRow(
+                taskID: record.taskID, title: record.title, task: byID[record.taskID],
+                // **The session's time wins over the record's.** Cycling
+                // back to `.complete` writes a *new* record stamped `.now`,
+                // so reading `record.completedAt` every rebuild moved the row
+                // to the end of the list on its third transition. Found by
+                // the all-three-transitions test, not by inspection.
+                completedAt: sessionSortTimes[record.taskID] ?? record.completedAt
+            )
+        }
+        // Anything this session already showed, whose record has since been
+        // removed by cycling it back. A live task is required — with none
+        // there is nothing to render or to cycle.
+        for (id, sortTime) in sessionSortTimes where rows[id] == nil {
+            guard let task = byID[id], !task.isRecurring, (task.scheduledBlocks ?? []).isEmpty else { continue }
+            rows[id] = CompletedTaskReviewRow(taskID: id, title: task.title, task: task, completedAt: sortTime)
+        }
+        return rows.values.sorted { ($0.completedAt, $0.taskID.uuidString) < ($1.completedAt, $1.taskID.uuidString) }
+    }
+
     static func completedTasksWithNoBlock(tasks: [TaskItem], context: ModelContext, completedSince: Date?) -> [TaskCompletionRecord] {
         let since = NightlyReviewCompletionState.completedSinceBound(closedDay: completedSince)
         let records = (try? context.fetch(FetchDescriptor<TaskCompletionRecord>(

@@ -1599,9 +1599,9 @@ final class TaskMissRecordTests: XCTestCase {
 
     /// Builds what the Today step would show for a set of completion
     /// records, the same way `NightlyReviewView.unfilteredReviewItems` does.
-    private func todayItems(for tasks: [TaskItem], twoMinuteIDs: Set<UUID>) -> [ReviewItem] {
+    private func todayItems(for tasks: [TaskItem], twoMinuteIDs: Set<UUID>, sessionIDs: [UUID: Date] = [:]) -> [ReviewItem] {
         ScheduleReviewViewModel
-            .completedTasksWithNoBlock(tasks: tasks, context: context, completedSince: nil)
+            .completedTaskReviewRows(sessionSortTimes: sessionIDs, tasks: tasks, context: context, completedSince: nil)
             .map { .completedTask($0, isTwoMinuteTask: twoMinuteIDs.contains($0.taskID)) }
     }
 
@@ -1675,7 +1675,7 @@ final class TaskMissRecordTests: XCTestCase {
         // Stands in for a future `reviewItems` that does read miss records.
         let hypothetical: [ReviewItem] = [
             .completedTask(
-                TaskCompletionRecord(taskID: task.id, title: task.title, createdAt: reviewDate, completedAt: reviewDate, pushedCount: 0),
+                CompletedTaskReviewRow(taskID: task.id, title: task.title, task: task, completedAt: reviewDate),
                 isTwoMinuteTask: true
             )
         ]
@@ -1811,11 +1811,127 @@ final class TaskMissRecordTests: XCTestCase {
         _ = task.cycleRecurringOccurrence(on: reviewDate, context: context, calendar: calendar)
 
         let record = try XCTUnwrap(try context.fetch(FetchDescriptor<TaskCompletionRecord>()).first)
-        let rows: [ReviewItem] = [.completedTask(record, isTwoMinuteTask: false)]
+        let rows: [ReviewItem] = [.completedTask(
+            CompletedTaskReviewRow(taskID: record.taskID, title: record.title, task: task, completedAt: record.completedAt),
+            isTwoMinuteTask: false
+        )]
 
         XCTAssertEqual(
             ReviewAnswerLedger().unanswered(rows).count, 1,
             "an empty ledger filters nothing — the duplicate was never the ledger's doing"
         )
+    }
+
+    // MARK: - Completed rows on Review Schedule cycle
+
+    /// **The load-bearing one: the row survives its own record being
+    /// removed.**
+    ///
+    /// Cycling off `.complete` calls `TaskCompletionRecord.remove`. A row
+    /// built only from records would therefore delete its own source and
+    /// disappear mid-gesture. The session snapshot is what keeps it.
+    func test_completedRowSurvivesItsRecordBeingRemoved() throws {
+        let task = makeTask(title: "Triaged in the inbox")
+        task.setCompleted(true, in: context)
+        let session: [UUID: Date] = [task.id: day(2026, 9, 21)]
+
+        XCTAssertEqual(try context.fetch(FetchDescriptor<TaskCompletionRecord>()).count, 1)
+        XCTAssertEqual(
+            ScheduleReviewViewModel.completedTaskReviewRows(
+                sessionSortTimes: session, tasks: [task], context: context, completedSince: nil).count, 1)
+
+        _ = task.cycleCompletion(in: context)   // complete -> missed, record removed
+
+        XCTAssertTrue(
+            try context.fetch(FetchDescriptor<TaskCompletionRecord>()).isEmpty,
+            "the record really is gone — that is the hazard"
+        )
+        let rows = ScheduleReviewViewModel.completedTaskReviewRows(
+            sessionSortTimes: session, tasks: [task], context: context, completedSince: nil)
+        XCTAssertEqual(rows.count, 1, "and the row is still here")
+        XCTAssertEqual(rows.first?.status, .missed, "reading its live status, not the vanished record's")
+    }
+
+    /// The row holds its index through **all three** transitions, not just
+    /// the first.
+    func test_completedRowHoldsItsIndexThroughEveryTransition() throws {
+        let base = day(2026, 9, 21)
+        let a = makeTask(title: "A"); a.createdAt = base.addingTimeInterval(3600)
+        let b = makeTask(title: "B"); b.createdAt = base.addingTimeInterval(2 * 3600)
+        let c = makeTask(title: "C"); c.createdAt = base.addingTimeInterval(3 * 3600)
+        for (i, t) in [a, b, c].enumerated() {
+            t.setCompleted(true, in: context)
+            if let record = try context.fetch(FetchDescriptor<TaskCompletionRecord>()).first(where: { $0.taskID == t.id }) {
+                record.completedAt = base.addingTimeInterval(TimeInterval(i + 1) * 3600)
+            }
+        }
+        let session: [UUID: Date] = [a.id: base.addingTimeInterval(3600), b.id: base.addingTimeInterval(2 * 3600), c.id: base.addingTimeInterval(3 * 3600)]
+        func identity() -> [UUID] {
+            ScheduleReviewViewModel.completedTaskReviewRows(
+                sessionSortTimes: session, tasks: [a, b, c], context: context, completedSince: nil).map(\.taskID)
+        }
+        let expected = [a.id, b.id, c.id]
+        XCTAssertEqual(identity(), expected)
+
+        for step in ["complete -> missed", "missed -> incomplete", "incomplete -> complete"] {
+            _ = b.cycleCompletion(in: context)
+            XCTAssertEqual(identity(), expected, "moved on \(step)")
+        }
+    }
+
+    /// Cycling back to incomplete re-blocks Next — the row counts as
+    /// outstanding work again.
+    func test_cyclingACompletedRowBackToIncompleteReblocksTheGate() throws {
+        let task = makeTask(title: "Triaged in the inbox")
+        task.setCompleted(true, in: context)
+        let session: [UUID: Date] = [task.id: day(2026, 9, 21)]
+        func gateRow() throws -> ReviewItem {
+            let row = try XCTUnwrap(ScheduleReviewViewModel.completedTaskReviewRows(
+                sessionSortTimes: session, tasks: [task], context: context, completedSince: nil).first)
+            return .completedTask(row, isTwoMinuteTask: false)
+        }
+        XCTAssertFalse(try gateRow().blocksGate(context: context, reviewDate: day(2026, 9, 21)), "complete passes")
+
+        _ = task.cycleCompletion(in: context)   // -> missed
+        XCTAssertFalse(try gateRow().blocksGate(context: context, reviewDate: day(2026, 9, 21)), "missed is an answer too")
+
+        _ = task.cycleCompletion(in: context)   // -> none
+        XCTAssertTrue(
+            try gateRow().blocksGate(context: context, reviewDate: day(2026, 9, 21)),
+            "back to incomplete — Next blocks again"
+        )
+    }
+
+    /// **`forget` is wired here.** Drives complete → incomplete and asserts
+    /// the ledger entry is gone, not merely that the row looks right.
+    func test_cyclingBackToIncompleteForgetsTheLedgerEntry() throws {
+        let task = makeTask(title: "Answered earlier")
+        task.setCompleted(true, in: context)
+
+        // As an earlier step would have left it.
+        var ledger = ReviewAnswerLedger()
+        ledger.record(.task(task.id))
+        XCTAssertTrue(ledger.contains(.task(task.id)))
+
+        // What `cycleCompletedTaskReviewRow` does: shared cycle, forget on `.none`.
+        var next = task.cycleCompletion(in: context)          // -> missed
+        if next == .none { ledger.forget(.task(task.id)) }
+        XCTAssertTrue(ledger.contains(.task(task.id)), "still answered")
+
+        next = task.cycleCompletion(in: context)              // -> none
+        if next == .none { ledger.forget(.task(task.id)) }
+
+        XCTAssertEqual(next, OccurrenceStatus.none)
+        XCTAssertFalse(ledger.contains(.task(task.id)), "the ledger entry is gone, not just the strikethrough")
+    }
+
+    /// A row whose task is gone stays read-only — see
+    /// `OverdueBlocksReviewList.completedTaskRow`'s warning.
+    func test_rowWithNoLiveTaskHasNothingToCycle() {
+        let row = CompletedTaskReviewRow(
+            taskID: UUID(), title: "Deleted since", task: nil, completedAt: day(2026, 9, 21))
+
+        XCTAssertNil(row.task)
+        XCTAssertEqual(row.status, .complete, "the record is the only evidence left and that is what it says")
     }
 }

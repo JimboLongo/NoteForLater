@@ -58,6 +58,18 @@ struct NightlyReviewView: View {
     /// What earlier steps have already answered this session — see
     /// `ReviewAnswerLedger`. Reset with the review, never persisted.
     @State private var answerLedger = ReviewAnswerLedger()
+
+    /// Task ids the Today step has shown as completed rows this session.
+    ///
+    /// Cycling such a row off `.complete` removes its `TaskCompletionRecord`
+    /// — so without this the row would delete its own source and vanish
+    /// under the finger instead of changing state. Same frozen-snapshot
+    /// pattern as `twoMinuteReviewTaskIDs`, and reset with the review.
+    ///
+    /// Maps to the `completedAt` captured when the row was first shown, not
+    /// just the id: re-completing writes a *new* record stamped `.now`, and
+    /// sorting on that moved the row to the end of the list.
+    @State private var todayCompletedTaskSortTimes: [UUID: Date] = [:]
     /// Which habit occurrences the Today step is reviewing, frozen the
     /// moment the step is entered (`runEntryEffects(for: .today)`) rather
     /// than re-derived on every render. Sourced from `ScheduleReviewViewModel
@@ -731,6 +743,16 @@ struct NightlyReviewView: View {
             )
         }
         if next == .today {
+            // Seed the completed-row snapshot from whatever the records say
+            // right now; `completedTaskReviewRows` unions this with them
+            // afterwards, so a row cycled back to incomplete stays put.
+            todayCompletedTaskSortTimes = Dictionary(
+                ScheduleReviewViewModel.completedTasksWithNoBlock(
+                    tasks: allTasks, context: modelContext,
+                    completedSince: NightlyReviewCompletionState.shared.lastClosedReviewDay
+                ).map { ($0.taskID, $0.completedAt) },
+                uniquingKeysWith: { first, _ in first }
+            )
             // Same freeze, same reasoning, for AM/Midday/PM recurring
             // tasks — see `frozenTodayRecurringTaskOccurrences`'s own doc
             // comment. Recurring tasks still gate/display in `.today`
@@ -1182,8 +1204,8 @@ struct NightlyReviewView: View {
     private var unfilteredReviewItems: [ReviewItem] {
         reviewableBlocks.map { .block($0) }
             + openRecurringTaskOccurrencesForReview.map { .recurringTask($0) }
-            + completedTasksWithNoBlock.map { record in
-                .completedTask(record, isTwoMinuteTask: twoMinuteReviewTaskIDs.contains(record.taskID))
+            + completedTaskReviewRows.map { row in
+                .completedTask(row, isTwoMinuteTask: twoMinuteReviewTaskIDs.contains(row.taskID))
             }
             + todayMealSelections.map { selection in
                 // The real backing block's own `startTime` (see
@@ -1213,8 +1235,9 @@ struct NightlyReviewView: View {
     /// `reviewItems`'s own `isTwoMinuteTask` flag is what keeps it sorted
     /// to the front regardless, via `twoMinuteReviewTaskIDs` rather than
     /// this task's own, possibly-already-gone `shelf`).
-    private var completedTasksWithNoBlock: [TaskCompletionRecord] {
-        ScheduleReviewViewModel.completedTasksWithNoBlock(
+    private var completedTaskReviewRows: [CompletedTaskReviewRow] {
+        ScheduleReviewViewModel.completedTaskReviewRows(
+            sessionSortTimes: todayCompletedTaskSortTimes,
             tasks: allTasks, context: modelContext,
             completedSince: NightlyReviewCompletionState.shared.lastClosedReviewDay
         )
@@ -1250,10 +1273,8 @@ struct NightlyReviewView: View {
                     cycleRecurringTaskReviewOccurrence(block: block)
                 case .block(let block):
                     todayViewModel.cycleBlockCompletion(block)
-                case .completedTask:
-                    // Never actually reached — `completedTaskRow` has no
-                    // tap gesture at all (no live model to toggle back).
-                    break
+                case .completedTask(let row, _):
+                    cycleCompletedTaskReviewRow(row)
                 }
             }, scrollTarget: $scrollToReviewItemID)
         } else {
@@ -1297,6 +1318,28 @@ struct NightlyReviewView: View {
     /// path (see the spec's "What actually protects the untimed path");
     /// freezing that call too would remove the filter's protection, not
     /// just its display twitchiness.
+    /// Cycles a completed row through the shared three-state cycle —
+    /// `TaskItem.cycleCompletion`, the same one every other surface uses.
+    /// No second cycle lives on this step.
+    ///
+    /// The ledger entry goes with it: completing here records, cycling back
+    /// to `.none` forgets, or a later step would keep hiding a row that is
+    /// no longer answered.
+    private func cycleCompletedTaskReviewRow(_ row: CompletedTaskReviewRow) {
+        guard let task = row.task else { return }
+        let next = task.cycleCompletion(in: modelContext)
+        // **Forgets, never records.** The ledger hides things answered on an
+        // *earlier* step, and Today is the last step that shows these — so
+        // recording here would only make the row filter itself out of the
+        // list it is being tapped in. Forgetting still matters: it clears any
+        // entry an earlier step left, so a row cycled back to incomplete is
+        // genuinely unanswered again rather than merely looking it.
+        if next == .none {
+            answerLedger.forget(.task(task.id))
+        }
+        ScheduleDirtyState.shared.isDirty = true
+    }
+
     /// `.none` means the answer was taken back, so the ledger entry goes
     /// with it — otherwise the row stays hidden on later steps while reading
     /// as unanswered on its own.

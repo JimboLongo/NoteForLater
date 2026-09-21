@@ -35,6 +35,36 @@ struct HabitReviewOccurrence: Identifiable {
 /// completed task that never had (or no longer has) a `ScheduledBlock` at
 /// all — so all three kinds can be grouped by day and sorted together by
 /// time instead of living in separate sections.
+/// A task completion shown on the Today step with no live `ScheduledBlock`
+/// behind it.
+///
+/// **Identified by `taskID`, not by the completion record.** Cycling the row
+/// off `.complete` calls `TaskCompletionRecord.remove`, so a record-keyed row
+/// would delete its own source mid-cycle and vanish. Keying on the task — and
+/// keeping the row alive for the session via
+/// `NightlyReviewView.todayCompletedTaskIDs` — is what lets it hold its index
+/// through all three states.
+///
+/// Same stand-in shape as `HabitReviewOccurrence`: a frozen identity with a
+/// live status read off the model behind it.
+struct CompletedTaskReviewRow: Identifiable {
+    let taskID: UUID
+    let title: String
+    /// `nil` once the task is gone — the record is then all that is left, and
+    /// the row is read-only. See `OverdueBlocksReviewList.completedTaskRow`.
+    let task: TaskItem?
+    /// Captured when the row is first built, so cycling cannot move the row
+    /// by changing what it sorts on.
+    let completedAt: Date
+
+    var id: String { "completedTask-\(taskID)" }
+
+    /// `.complete` is the right fallback for a task that no longer exists:
+    /// the completion record is the only evidence left and that is what it
+    /// says.
+    var status: OccurrenceStatus { task?.status ?? .complete }
+}
+
 enum ReviewItem: Identifiable {
     case block(ScheduledBlock)
     case habit(HabitReviewOccurrence)
@@ -67,7 +97,7 @@ enum ReviewItem: Identifiable {
     /// of its day (see `sortTime`) and because the filter is applied by the
     /// caller, not here — this enum cannot reach the session snapshot that
     /// would tell it, especially once the live task is gone.
-    case completedTask(TaskCompletionRecord, isTwoMinuteTask: Bool)
+    case completedTask(CompletedTaskReviewRow, isTwoMinuteTask: Bool)
     /// The meal picked during Nightly Review's Meals step — never has
     /// its own `ScheduledBlock` represented here (`NightlyReviewView
     /// .reviewableBlocks` excludes it deliberately), even though a real,
@@ -86,7 +116,7 @@ enum ReviewItem: Identifiable {
         case .block(let block): return "block-\(block.id)"
         case .habit(let occurrence): return "habit-\(occurrence.id)"
         case .recurringTask(let occurrence): return "recurringTask-\(occurrence.id)"
-        case .completedTask(let record, _): return "completedTask-\(record.id)"
+        case .completedTask(let row, _): return row.id
         case .meal(let selection, _): return "meal-\(selection.id)"
         }
     }
@@ -115,8 +145,8 @@ enum ReviewItem: Identifiable {
             return .habitOccurrence(habitID: occurrence.habit.id, index: occurrence.index)
         case .recurringTask(let occurrence):
             return .task(occurrence.task.id)
-        case .completedTask(let record, _):
-            return .task(record.taskID)
+        case .completedTask(let row, _):
+            return .task(row.taskID)
         case .meal:
             return nil
         }
@@ -162,7 +192,12 @@ enum ReviewItem: Identifiable {
             // `status` now, same as every other row here.
             return block.status == .none
         case .meal(let selection, _): return selection.status == .none
-        case .completedTask: return false
+        case .completedTask(let row, _):
+            // Cycling one back to incomplete makes it outstanding work
+            // again, exactly like every other row here. It read `false`
+            // unconditionally while the row was non-interactive and could
+            // only ever be complete.
+            return row.status == .none
         }
     }
 
@@ -176,7 +211,7 @@ enum ReviewItem: Identifiable {
         case .block(let block): return calendar.startOfDay(for: block.date)
         case .habit(let occurrence): return calendar.startOfDay(for: occurrence.targetTime)
         case .recurringTask(let occurrence): return calendar.startOfDay(for: occurrence.targetTime)
-        case .completedTask(let record, _): return calendar.startOfDay(for: record.completedAt)
+        case .completedTask(let row, _): return calendar.startOfDay(for: row.completedAt)
         case .meal(_, let targetTime): return calendar.startOfDay(for: targetTime)
         }
     }
@@ -197,11 +232,11 @@ enum ReviewItem: Identifiable {
             return block.startTime
         case .habit(let occurrence): return occurrence.targetTime
         case .recurringTask(let occurrence): return occurrence.targetTime
-        case .completedTask(let record, let isTwoMinuteTask):
+        case .completedTask(let row, let isTwoMinuteTask):
             if isTwoMinuteTask {
-                return Calendar.current.startOfDay(for: record.completedAt)
+                return Calendar.current.startOfDay(for: row.completedAt)
             }
-            return record.completedAt
+            return row.completedAt
         case .meal(_, let targetTime): return targetTime
         }
     }
@@ -343,8 +378,8 @@ struct OverdueBlocksReviewList: View {
             habitRow(occurrence)
         case .recurringTask(let occurrence):
             recurringTaskRow(occurrence)
-        case .completedTask(let record, _):
-            completedTaskRow(record)
+        case .completedTask(let row, _):
+            completedTaskRow(row, item: item)
         case .meal(let selection, let targetTime):
             mealRow(selection, targetTime: targetTime)
         }
@@ -468,20 +503,36 @@ struct OverdueBlocksReviewList: View {
     /// Read-only — no `onTapGesture` at all. `record`'s underlying task
     /// may well no longer exist (see `ReviewItem.completedTask`), so
     /// there's nothing this row could toggle back even if it wanted to.
-    private func completedTaskRow(_ record: TaskCompletionRecord) -> some View {
+    /// ⚠️ **Read-only when `row.task` is nil, deliberately — do not "fix"
+    /// this into being tappable.**
+    ///
+    /// With no live task there is nothing to cycle: the completion record is
+    /// the only thing left, and cycling is defined on `TaskItem`. Worse,
+    /// driving the cycle off the record would delete the record
+    /// (`TaskCompletionRecord.remove`) and so delete the row's own source
+    /// mid-gesture — the row would vanish under the finger rather than
+    /// change state. The live-task path avoids that only because
+    /// `NightlyReviewView.todayCompletedTaskIDs` keeps the row alive after
+    /// its record is gone.
+    private func completedTaskRow(_ row: CompletedTaskReviewRow, item: ReviewItem) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            selectionCircle(isSelected: true)
+            habitSelectionCircle(status: row.status)
                 .padding(.vertical, 4)
             VStack(alignment: .leading) {
-                Text("Completed")
+                Text(row.status == .complete ? "Completed" : "Not completed")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text(record.title)
-                    .strikethrough(true)
+                Text(row.title)
+                    .strikethrough(row.status == .complete)
             }
             Spacer()
         }
-        .opacity(0.5)
+        .contentShape(Rectangle())
+        .opacity(row.status == .none ? 1 : 0.5)
+        .onTapGesture {
+            guard row.task != nil else { return }
+            onToggle(item)
+        }
     }
 
     /// Same fill/icon mapping `HabitsView.fillColor`/`occurrenceIcon` and
