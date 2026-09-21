@@ -876,4 +876,66 @@ final class TaskMissRecordTests: XCTestCase {
 
         XCTAssertEqual(TaskMissRecord.records(on: day(2026, 1, 5), in: context).count, 1, "still on the day it happened")
     }
+
+    // MARK: - The calendar's own choice of date
+
+    /// **The call site's date, not just the rule.** The calendar row used
+    /// to compute `ChooseDayPlanning.planDate` inline, which before noon
+    /// resolves to *today* — so marking today's row missed wrote
+    /// `startDate = today`, the day the task was already on, and nothing
+    /// moved. Identical to the recurring bug, in an independently written
+    /// second copy of "the day being planned".
+    ///
+    /// Every other test in this file passes `planDate` explicitly, so none
+    /// of them could see it: the rule was covered, the thing choosing its
+    /// input was not. Sabotaging the call site's date produced **0
+    /// failures** across the whole suite.
+    ///
+    /// The fix routes it through the same `calendarPushDay` the recurring
+    /// row uses, so this walks the noon boundary through that function
+    /// rather than re-deriving a floor here.
+    func test_calendarPush_neverLandsOnTheDayBeingMarked() throws {
+        let today = day(2026, 9, 21)
+
+        for hour in [0, 8, 10, 11, 12, 13, 18, 23] {
+            let now = calendar.date(byAdding: .hour, value: hour, to: today)!
+            let planDate = DayTimelineGridView.calendarPushDay(missedOn: today, calendar: calendar, now: now)
+            let task = makeTask(title: "Tap at \(hour)")
+
+            _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: today, calendar: calendar, context: context)
+            _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: today, calendar: calendar, context: context)
+
+            XCTAssertGreaterThan(
+                calendar.startOfDay(for: try XCTUnwrap(task.startDate)), today,
+                "at \(hour):00 the push landed on the day it was marked — the task never moved"
+            )
+        }
+    }
+
+    /// End to end at 10am, the hour the bug was reported at: the task
+    /// leaves today and the record says where it went.
+    ///
+    /// ⚠️ `TwoMinutePush.apply` also `assertionFailure`s on a degenerate
+    /// pair, deliberately *not* unit-tested — it traps in debug, which is
+    /// the point of it. The property above is the testable guard; the
+    /// assertion is the backstop for a future caller that computes its own
+    /// date again.
+    func test_markingMissedOnTheCalendarAtTenAM_movesToTomorrow() throws {
+        let today = day(2026, 9, 21)
+        let morning = calendar.date(byAdding: .hour, value: 10, to: today)!
+        let planDate = DayTimelineGridView.calendarPushDay(missedOn: today, calendar: calendar, now: morning)
+        let task = makeTask()
+
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: today, calendar: calendar, context: context)
+        _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: today, calendar: calendar, context: context)
+
+        XCTAssertEqual(task.startDate.map { calendar.startOfDay(for: $0) }, day(2026, 9, 22))
+        XCTAssertFalse(
+            task.isEligibleToStart(on: today, calendar: calendar),
+            "gone from today's list — before the fix it stayed, because startDate was today"
+        )
+        let records = TaskMissRecord.records(on: today, in: context)
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(calendar.startOfDay(for: try XCTUnwrap(records.first).pushedToDay), day(2026, 9, 22))
+    }
 }

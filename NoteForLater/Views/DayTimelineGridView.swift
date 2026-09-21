@@ -902,13 +902,18 @@ struct DayTimelineGridView: View {
                 // — see `TwoMinutePush.cycle`. Marking missed pushes here
                 // too now; see `twoMinuteStatusCircle` for why that became
                 // safe.
+                // Same `calendarPushDay` the recurring row uses — the
+                // planning day floored at the day after the miss. This
+                // computed `ChooseDayPlanning.planDate` inline instead,
+                // which before noon resolves to *today*: marking today's
+                // row pushed the task to the day it was already on, so
+                // nothing happened. Identical bug to the recurring one,
+                // still here because this push was written before that
+                // floor existed and each surface was deciding "the day
+                // being planned" for itself.
                 TwoMinutePush.cycle(
                     task,
-                    planDate: ChooseDayPlanning.planDate(
-                        forPlanning: ChooseDayPlanning.defaultPlanningChoice(now: .now, calendar: Calendar.current),
-                        now: .now,
-                        calendar: Calendar.current
-                    ),
+                    planDate: Self.calendarPushDay(missedOn: targetDate, calendar: Calendar.current),
                     // The day on screen is the day the miss belongs to —
                     // the row is sitting on it.
                     missedOn: targetDate,

@@ -129,12 +129,27 @@ enum TwoMinutePush {
         calendar: Calendar = .current,
         context: ModelContext
     ) {
+        // **A push must go somewhere later than the miss.** Same guard as
+        // `pushRecurringOccurrenceIfNeeded`, for the same reason: a caller
+        // passing a `planDate` on or before `missedDay` gets a silent
+        // no-op — `startDate` is written to the day the row is already on,
+        // so the task does not move and nothing tells anyone.
+        //
+        // That is exactly how the calendar's own push shipped broken twice,
+        // once for recurring and once here: both derived the destination
+        // from `ChooseDayPlanning.planDate`, which before noon is today.
+        let missedDayStart = calendar.startOfDay(for: missedDay)
+        let planDayStart = calendar.startOfDay(for: planDate)
+        guard planDayStart > missedDayStart else {
+            assertionFailure("planDate (\(planDayStart)) must be after missedDay (\(missedDayStart)) — a push has nowhere to go otherwise")
+            return
+        }
         if !task.hasOutstandingTwoMinutePush {
             task.startDateBeforePush = task.startDate
             task.startDatePickedBeforePush = task.startDatePicked
             task.hasOutstandingTwoMinutePush = true
         }
-        task.setStartDate(calendar.startOfDay(for: planDate), calendar: calendar)
+        task.setStartDate(planDayStart, calendar: calendar)
         // **Back to `.none`.** The miss is carried by the record on the
         // original day now; the task's own status describes the row on the
         // *pushed* day, which is work still to do. Leaving it `.missed`
