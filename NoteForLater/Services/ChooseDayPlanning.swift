@@ -153,4 +153,38 @@ enum ChooseDayPlanning {
         default: return "th"
         }
     }
+
+    /// **Where a miss goes — the one answer, for every surface.**
+    ///
+    /// `planDate` with the default choice ("the day you would be planning
+    /// right now", today before noon and tomorrow after), **floored at the
+    /// day after the miss**.
+    ///
+    /// ⚠️ The floor is the whole point. Without it, marking today's own row
+    /// before noon pushes to *today* — the day the row is already on, so
+    /// nothing moves and nothing says so. That shipped twice, once for
+    /// recurring occurrences and once for 2-Minute tasks, because each
+    /// surface derived "the day being planned" for itself.
+    ///
+    /// **Moved here from `DayTimelineGridView`, and that move is the point.**
+    /// It lived on the calendar as `calendarPushDay` while Nightly Review
+    /// computed `reviewDate + 1` separately. Those agree for a review of
+    /// today and diverge for a back-dated one: reviewing Sept 19 on Sept 21
+    /// pushed to Sept 20, already in the past and therefore invisible. One
+    /// function called from both surfaces is what makes that unrepresentable
+    /// rather than merely fixed once.
+    ///
+    /// `TwoMinutePush.apply` and `pushRecurringOccurrenceIfNeeded` both
+    /// assert on a degenerate pair, so a caller that bypasses this and picks
+    /// its own day cannot fail quietly.
+    static func pushDay(missedOn missedDay: Date, calendar: Calendar, now: Date = .now) -> Date {
+        let planned = planDate(
+            forPlanning: defaultPlanningChoice(now: now, calendar: calendar),
+            now: now,
+            calendar: calendar
+        )
+        let dayAfterMiss = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: missedDay))
+            ?? calendar.startOfDay(for: missedDay)
+        return max(calendar.startOfDay(for: planned), dayAfterMiss)
+    }
 }

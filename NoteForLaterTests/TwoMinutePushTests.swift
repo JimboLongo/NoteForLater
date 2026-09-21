@@ -962,7 +962,7 @@ final class TaskMissRecordTests: XCTestCase {
     /// input was not. Sabotaging the call site's date produced **0
     /// failures** across the whole suite.
     ///
-    /// The fix routes it through the same `calendarPushDay` the recurring
+    /// The fix routes it through the same `ChooseDayPlanning.pushDay` the recurring
     /// row uses, so this walks the noon boundary through that function
     /// rather than re-deriving a floor here.
     func test_calendarPush_neverLandsOnTheDayBeingMarked() throws {
@@ -970,7 +970,7 @@ final class TaskMissRecordTests: XCTestCase {
 
         for hour in [0, 8, 10, 11, 12, 13, 18, 23] {
             let now = calendar.date(byAdding: .hour, value: hour, to: today)!
-            let planDate = DayTimelineGridView.calendarPushDay(missedOn: today, calendar: calendar, now: now)
+            let planDate = ChooseDayPlanning.pushDay(missedOn: today, calendar: calendar, now: now)
             let task = makeTask(title: "Tap at \(hour)")
 
             _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: today, calendar: calendar, context: context)
@@ -994,7 +994,7 @@ final class TaskMissRecordTests: XCTestCase {
     func test_markingMissedOnTheCalendarAtTenAM_movesToTomorrow() throws {
         let today = day(2026, 9, 21)
         let morning = calendar.date(byAdding: .hour, value: 10, to: today)!
-        let planDate = DayTimelineGridView.calendarPushDay(missedOn: today, calendar: calendar, now: morning)
+        let planDate = ChooseDayPlanning.pushDay(missedOn: today, calendar: calendar, now: morning)
         let task = makeTask()
 
         _ = TwoMinutePush.cycle(task, planDate: planDate, missedOn: today, calendar: calendar, context: context)
@@ -1256,5 +1256,165 @@ final class TaskMissRecordTests: XCTestCase {
         let dated = makeDatedTask("Newer, due", created: day5.addingTimeInterval(20 * 3600), due: day(2026, 1, 9))
 
         XCTAssertEqual(orderIdentity(on: day5, from: [oldest, dated]), [dated.id, oldest.id])
+    }
+
+    // MARK: - Nightly Review mirrors the calendar
+
+    /// Snapshot of everything a miss writes, so two paths can be compared
+    /// field by field rather than "they both seemed to work".
+    private struct MissOutcome: Equatable {
+        var startDate: Date?
+        var startDatePicked: Bool
+        var status: OccurrenceStatus
+        var hasOutstandingPush: Bool
+        var startDateBeforePush: Date?
+        var recordMissedDays: [Date]
+    }
+
+    private func outcome(for task: TaskItem) -> MissOutcome {
+        MissOutcome(
+            startDate: task.startDate.map { calendar.startOfDay(for: $0) },
+            startDatePicked: task.startDatePicked,
+            status: task.status,
+            hasOutstandingPush: task.hasOutstandingTwoMinutePush,
+            startDateBeforePush: task.startDateBeforePush.map { calendar.startOfDay(for: $0) },
+            recordMissedDays: TaskMissRecord.records(for: task, in: context).map(\.missedDay)
+        )
+    }
+
+    /// **The anti-drift test.** The same miss, on the same day, driven once
+    /// the way Nightly Review drives it and once the way the day calendar
+    /// drives it — asserting the resulting store state is identical.
+    ///
+    /// Both surfaces call `TwoMinutePush.cycle`, so the cycle and the record
+    /// were never the risk. The *destination* was: the review passed
+    /// `planDate`, which is `reviewDate + 1`, while the calendar passed
+    /// `ChooseDayPlanning.pushDay`, which floors the planning day at the day
+    /// after the miss. Identical for a review of today, and different for a
+    /// back-dated one — see the test below.
+    func test_reviewAndCalendarProduceIdenticalState_forTheSameMiss() throws {
+        let missedDay = day(2026, 9, 21)
+        let now = missedDay.addingTimeInterval(10 * 3600)   // 10am, before the noon boundary
+
+        let viaReview = makeTask(title: "Same task")
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(
+                viaReview,
+                planDate: ChooseDayPlanning.pushDay(missedOn: missedDay, calendar: calendar, now: now),
+                missedOn: missedDay, calendar: calendar, context: context
+            )
+        }
+        let reviewOutcome = outcome(for: viaReview)
+
+        let viaCalendar = makeTask(title: "Same task")
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(
+                viaCalendar,
+                planDate: ChooseDayPlanning.pushDay(missedOn: missedDay, calendar: calendar, now: now),
+                missedOn: missedDay, calendar: calendar, context: context
+            )
+        }
+        let calendarOutcome = outcome(for: viaCalendar)
+
+        XCTAssertEqual(reviewOutcome, calendarOutcome, "the two surfaces must write the same state")
+        XCTAssertEqual(reviewOutcome.startDate, day(2026, 9, 22))
+        XCTAssertEqual(reviewOutcome.recordMissedDays, [missedDay])
+    }
+
+    /// **The back-dated review, which is where they diverged.** Reviewing
+    /// Sept 19 on Sept 21 used to push to Sept 20 — already in the past, so
+    /// the task landed on a day nobody would look at again.
+    func test_backDatedReviewPushesForwardToTheDayBeingPlanned_notTheDayAfterTheMiss() {
+        let missedDay = day(2026, 9, 19)
+        let now = day(2026, 9, 21).addingTimeInterval(15 * 3600)
+
+        let destination = ChooseDayPlanning.pushDay(missedOn: missedDay, calendar: calendar, now: now)
+
+        XCTAssertEqual(destination, day(2026, 9, 22), "the day being planned at 3pm on the 21st")
+        XCTAssertNotEqual(destination, day(2026, 9, 20), "reviewDate + 1 — in the past, and what the review used to do")
+        XCTAssertGreaterThan(destination, day(2026, 9, 21), "and not behind today either")
+    }
+
+    // MARK: - The review's rows
+
+    private func reviewRows(_ reviewDate: Date, _ tasks: [TaskItem]) -> [TaskItem.TwoMinuteRow] {
+        TaskItem.twoMinuteReviewRows(
+            reviewDate: reviewDate, snapshotIDs: Set(tasks.map(\.id)),
+            allTasks: tasks, context: context, calendar: calendar
+        )
+    }
+
+    /// **A miss marked during the review is visible, and the row does not
+    /// move.** Both halves matter: `apply` resets the task to `.none`, so
+    /// without drawing the record the row went green and then back to empty.
+    /// And the row must hold its index through the TASK → MISS change, which
+    /// is the jump that cost an hour on the calendar.
+    func test_missMarkedDuringTheReviewShowsAsAMissRow_andHoldsItsIndex() throws {
+        let reviewDate = day(2026, 9, 21)
+        let a = makeTask(title: "A"); a.createdAt = reviewDate.addingTimeInterval(3600)
+        let b = makeTask(title: "B"); b.createdAt = reviewDate.addingTimeInterval(2 * 3600)
+        let c = makeTask(title: "C"); c.createdAt = reviewDate.addingTimeInterval(3 * 3600)
+
+        func identity() -> [UUID] {
+            reviewRows(reviewDate, [a, b, c]).map {
+                switch $0 { case .task(let t): return t.id; case .miss(let r): return r.taskID }
+            }
+        }
+        let expected = [a.id, b.id, c.id]
+        XCTAssertEqual(identity(), expected)
+
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(
+                b, planDate: ChooseDayPlanning.pushDay(missedOn: reviewDate, calendar: calendar, now: reviewDate),
+                missedOn: reviewDate, calendar: calendar, context: context
+            )
+        }
+
+        let rows = reviewRows(reviewDate, [a, b, c])
+        XCTAssertEqual(rows.count, 3, "still one row per task — not the task and its record both")
+        XCTAssertEqual(rows.dropFirst().first?.status, .missed, "the answer is visible instead of reverting to an empty circle")
+        XCTAssertEqual(identity(), expected, "and the row stayed at index 1 through the kind change")
+    }
+
+    // MARK: - The Next gate
+
+    /// Only `.none` blocks. Complete and missed are both real answers.
+    func test_nextGate_blocksOnlyUntouchedRows() throws {
+        let reviewDate = day(2026, 9, 21)
+        let untouched = makeTask(title: "Untouched"); untouched.createdAt = reviewDate.addingTimeInterval(3600)
+        let done = makeTask(title: "Done"); done.createdAt = reviewDate.addingTimeInterval(2 * 3600)
+        let missed = makeTask(title: "Missed"); missed.createdAt = reviewDate.addingTimeInterval(3 * 3600)
+        let all = [untouched, done, missed]
+
+        XCTAssertEqual(
+            TaskItem.unresolvedTwoMinuteRows(reviewRows(reviewDate, all)).count, 3,
+            "nothing answered yet"
+        )
+
+        _ = TwoMinutePush.cycle(done, planDate: day(2026, 9, 22), missedOn: reviewDate, calendar: calendar, context: context)
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(missed, planDate: day(2026, 9, 22), missedOn: reviewDate, calendar: calendar, context: context)
+        }
+
+        let unresolved = TaskItem.unresolvedTwoMinuteRows(reviewRows(reviewDate, all))
+        XCTAssertEqual(unresolved.count, 1, "complete and missed both pass the gate")
+        guard case .task(let blocking) = try XCTUnwrap(unresolved.first) else {
+            return XCTFail("expected the untouched live row")
+        }
+        XCTAssertEqual(blocking.id, untouched.id)
+    }
+
+    /// The timer weights missed exactly as unanswered. Already true; pinned
+    /// so it cannot drift, since "treat missed like incomplete" is the whole
+    /// contract between the gate and the floor.
+    func test_engagementTimer_weightsMissedIdenticallyToUnanswered() {
+        XCTAssertEqual(
+            TwoMinuteEngagementTimer.budget(missed: 2, unanswered: 0),
+            TwoMinuteEngagementTimer.budget(missed: 0, unanswered: 2)
+        )
+        XCTAssertEqual(
+            TwoMinuteEngagementTimer.budget(missed: 1, unanswered: 1),
+            TwoMinuteEngagementTimer.budget(missed: 2, unanswered: 0)
+        )
     }
 }

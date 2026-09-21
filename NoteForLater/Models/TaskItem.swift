@@ -774,6 +774,15 @@ final class TaskItem {
             }
         }
 
+        /// **The one place rows get ordered**, for every surface. The day
+        /// calendar and Nightly Review both call this rather than sorting
+        /// their own lists, so a row cannot sit in one order on one screen
+        /// and another order on the other.
+        static func sorted(_ rows: [TwoMinuteRow], tasks: [TaskItem]) -> [TwoMinuteRow] {
+            let byID = Dictionary(tasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            return rows.sorted { sortKey($0, in: byID) < sortKey($1, in: byID) }
+        }
+
         static func sortKey(_ row: TwoMinuteRow, in tasksByID: [UUID: TaskItem]) -> SortKey {
             switch row {
             case .task(let task):
@@ -812,6 +821,53 @@ final class TaskItem {
         }
     }
 
+    /// Every 2-Minute row **Nightly Review's step** shows, in one order.
+    ///
+    /// The calendar's sibling is `twoMinuteRows(on:from:context:)`. They
+    /// differ in what they select — the calendar is day-scoped, this is a
+    /// frozen snapshot plus the backlog — and agree on everything else,
+    /// including the order, via `TwoMinuteRow.sorted`.
+    ///
+    /// **A task with a record for `reviewDate` is drawn as that record**,
+    /// not as itself. That is what makes a miss visible here. `apply` resets
+    /// the task to `.none` because the miss is carried by the record; on the
+    /// calendar that reads correctly because the task leaves the day and the
+    /// record stays behind, but the review pins the task row via its
+    /// snapshot, so without this the row went green and then back to an
+    /// empty circle and the answer vanished.
+    ///
+    /// `static` and free of any view **specifically so the Next gate is
+    /// reachable from a test**. Extracting first is the only thing that has
+    /// worked on this failure in this codebase: a rule tested beside its
+    /// call site, with the call site left in a view, has come back clean
+    /// under sabotage three separate times.
+    static func twoMinuteReviewRows(
+        reviewDate: Date,
+        snapshotIDs: Set<UUID>,
+        allTasks: [TaskItem],
+        context: ModelContext,
+        calendar: Calendar = .current
+    ) -> [TwoMinuteRow] {
+        let backlog = TaskMissRecord
+            .actionableRecords(before: reviewDate, tasks: allTasks, in: context, calendar: calendar)
+            .map { TwoMinuteRow.miss($0.record) }
+        let today = TaskMissRecord.records(on: reviewDate, in: context, calendar: calendar)
+            .filter { snapshotIDs.contains($0.taskID) }
+        let missedToday = Set(today.map(\.taskID))
+        let live = allTasks
+            .filter { snapshotIDs.contains($0.id) && !missedToday.contains($0.id) }
+            .map { TwoMinuteRow.task($0) }
+        return TwoMinuteRow.sorted(backlog + today.map { TwoMinuteRow.miss($0) } + live, tasks: allTasks)
+    }
+
+    /// The rows that block Next — **`.none` only**, the same shape
+    /// `unresolvedGateReviewItems` and `unresolvedHabitOccurrencesForGate`
+    /// already use. A miss row is never `.none`, so complete and missed are
+    /// both real answers and only an untouched row blocks.
+    static func unresolvedTwoMinuteRows(_ rows: [TwoMinuteRow]) -> [TwoMinuteRow] {
+        rows.filter { $0.status == .none }
+    }
+
     /// Every 2-Minute row for `day` — live tasks and miss records together,
     /// in **one flat order**.
     ///
@@ -840,10 +896,9 @@ final class TaskItem {
         context: ModelContext,
         calendar: Calendar = .current
     ) -> [TwoMinuteRow] {
-        let byID = Dictionary(tasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let rows = TaskMissRecord.records(on: day, in: context, calendar: calendar).map { TwoMinuteRow.miss($0) }
             + twoMinuteTasksVisible(on: day, from: tasks, calendar: calendar).map { TwoMinuteRow.task($0) }
-        return rows.sorted { TwoMinuteRow.sortKey($0, in: byID) < TwoMinuteRow.sortKey($1, in: byID) }
+        return TwoMinuteRow.sorted(rows, tasks: tasks)
     }
 
     func isEligibleToStart(on date: Date, calendar: Calendar = .current) -> Bool {

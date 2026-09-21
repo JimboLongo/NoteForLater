@@ -451,6 +451,7 @@ struct NightlyReviewView: View {
                             (step == .today && !unresolvedGateReviewItems.isEmpty)
                             || (step == .habits && !unresolvedHabitOccurrencesForGate.isEmpty)
                             || (step == .twoMinuteTasks && !twoMinuteCanProceed)
+                            || (step == .twoMinuteTasks && !unresolvedTwoMinuteRows.isEmpty)
                         )
                 }
             }
@@ -1470,19 +1471,22 @@ struct NightlyReviewView: View {
     /// Unresolved counts over the step's own frozen list — live, so the
     /// timer shortens the moment something is completed.
     private var twoMinuteUnresolvedCounts: (missed: Int, unanswered: Int) {
-        let tasks = twoMinuteReviewTasks
-        // A carried-over miss counts as missed. It is unresolved work the
-        // step is showing, and the floor exists to make you sit with
-        // exactly that — see `TwoMinuteEngagementTimer`, where missed
-        // counts in full precisely because it is a decision rather than a
-        // completion. Completing one drops it from `twoMinuteMissRecords`,
-        // so the wait shortens immediately, same as any other row.
+        // **Derived from the rows the step actually draws**, so the timer
+        // and the list can never disagree about what is outstanding. It used
+        // to count `twoMinuteReviewTasks` plus `twoMinuteMissRecords`
+        // separately, which double-counted nothing today but would have the
+        // moment a task could appear as both a live row and a record — which
+        // is exactly what showing today's misses introduced.
         //
-        // A live row can no longer rest at `.missed` (see
-        // `TwoMinutePush.apply`), so the task-side `.missed` count is now
-        // only ever tasks missed outside this step.
-        return (tasks.filter { $0.status == .missed }.count + twoMinuteMissRecords.count,
-                tasks.filter { $0.status == .none }.count)
+        // A miss counts as missed. It is unresolved work the step is
+        // showing, and the floor exists to make you sit with exactly that —
+        // see `TwoMinuteEngagementTimer`, where missed counts in full
+        // precisely because it is a decision rather than a completion.
+        // Completing one drops its row, so the wait shortens immediately,
+        // same as any other row.
+        let rows = twoMinuteRows
+        return (rows.filter { $0.status == .missed }.count,
+                rows.filter { $0.status == .none }.count)
     }
 
     private var twoMinuteCanProceed: Bool {
@@ -1512,6 +1516,22 @@ struct NightlyReviewView: View {
         TaskMissRecord.actionableRecords(before: reviewDate, tasks: allTasks, in: modelContext)
     }
 
+    /// Every 2-Minute row this step shows — see
+    /// `TaskItem.twoMinuteReviewRows`, which owns the rule so that it and
+    /// the Next gate below are both reachable from a test.
+    private var twoMinuteRows: [TaskItem.TwoMinuteRow] {
+        TaskItem.twoMinuteReviewRows(
+            reviewDate: reviewDate,
+            snapshotIDs: twoMinuteReviewTaskIDs,
+            allTasks: allTasks,
+            context: modelContext
+        )
+    }
+
+    private var unresolvedTwoMinuteRows: [TaskItem.TwoMinuteRow] {
+        TaskItem.unresolvedTwoMinuteRows(twoMinuteRows)
+    }
+
     @ViewBuilder
     private var twoMinuteTasksStep: some View {
         if twoMinuteShelf == nil {
@@ -1520,7 +1540,7 @@ struct NightlyReviewView: View {
             } description: {
                 Text("Mark a shelf as your permanent 2-Minute Task shelf (from its settings) to use this step.")
             }
-        } else if twoMinuteReviewTasks.isEmpty && twoMinuteMissRecords.isEmpty {
+        } else if twoMinuteRows.isEmpty {
             ContentUnavailableView {
                 Label("All Clear", systemImage: "checkmark.circle")
             } description: {
@@ -1529,11 +1549,18 @@ struct NightlyReviewView: View {
         } else {
             List {
                 Section {
-                    ForEach(twoMinuteMissRecords, id: \.record.id) { entry in
-                        twoMinuteMissRow(entry.record, task: entry.task)
-                    }
-                    ForEach(twoMinuteReviewTasks) { task in
-                        twoMinuteTaskRow(task)
+                    // One list, one order — see `twoMinuteRows`. Grouping
+                    // misses ahead of live rows is what made rows jump on
+                    // the calendar when a tap changed their kind.
+                    ForEach(twoMinuteRows) { row in
+                        switch row {
+                        case .miss(let record):
+                            if let task = allTasks.first(where: { $0.id == record.taskID }) {
+                                twoMinuteMissRow(record, task: task)
+                            }
+                        case .task(let task):
+                            twoMinuteTaskRow(task)
+                        }
                     }
                 } footer: {
                     Text("Knock these out right now and check them off. Anything still unchecked goes to the very top of \(planRelativeDayLabel.lowercased())'s schedule — ahead of everything else, habits included.")
@@ -1581,14 +1608,26 @@ struct NightlyReviewView: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            // One shared owner for both surfaces — see `TwoMinutePush.cycle`.
-            // Pushes to `planDate`, the day this step's own header says is
-            // being planned, rather than recomputing `reviewDate + 1`
-            // locally: catching up several days late used to land a miss on
-            // the day after the miss, still in the past and invisible.
-            // `missedOn: reviewDate` — the day being reviewed is the day
-            // the miss belongs to, which is not the day it is pushed to.
-            TwoMinutePush.cycle(task, planDate: planDate, missedOn: reviewDate, context: modelContext)
+            // One shared owner for both surfaces — see `TwoMinutePush.cycle`
+            // — and now one shared *destination* too.
+            //
+            // REVERSAL: this passed `planDate`, and its comment claimed that
+            // was "the day this step's own header says is being planned,
+            // rather than recomputing `reviewDate + 1` locally". The comment
+            // was false: `planDate` *is* `reviewDate + 1`. For a review of
+            // today the two agree; for a back-dated one they do not, and a
+            // miss landed on the day after the miss — still in the past, and
+            // invisible. The calendar had a floor for exactly this and the
+            // review never got it.
+            //
+            // `missedOn: reviewDate` — the day being reviewed is the day the
+            // miss belongs to, which is not the day it is pushed to.
+            TwoMinutePush.cycle(
+                task,
+                planDate: ChooseDayPlanning.pushDay(missedOn: reviewDate, calendar: Calendar.current),
+                missedOn: reviewDate,
+                context: modelContext
+            )
             ScheduleDirtyState.shared.isDirty = true
         }
         .opacity(task.status == .none ? 1 : 0.5)

@@ -595,13 +595,13 @@ final class RecurringTaskCycleTests: XCTestCase {
     /// exercised the call site's own choice of date. That is the same
     /// call-site gap this session has hit repeatedly: the rule was covered,
     /// the thing that picks its input was not.
-    func test_calendarPushDay_isAlwaysAfterTheDayBeingMarked() {
+    func test_pushDay_isAlwaysAfterTheDayBeingMarked() {
         let today = day(2026, 9, 21)
         // Across the whole day, including the noon boundary the planning
         // default turns on.
         for hour in [0, 8, 10, 11, 12, 13, 18, 23] {
             let now = calendar.date(byAdding: .hour, value: hour, to: today)!
-            let destination = DayTimelineGridView.calendarPushDay(missedOn: today, calendar: calendar, now: now)
+            let destination = ChooseDayPlanning.pushDay(missedOn: today, calendar: calendar, now: now)
             XCTAssertGreaterThan(
                 destination, today,
                 "at \(hour):00 the push landed on the day it was marked — nothing would happen"
@@ -612,12 +612,12 @@ final class RecurringTaskCycleTests: XCTestCase {
     /// A miss marked on a *past* day still comes forward to the day being
     /// planned, rather than to the day after the miss. That is the whole
     /// point of using the planning day rather than `missedDay + 1`.
-    func test_calendarPushDay_bringsAnOldMissForward() {
+    func test_pushDay_bringsAnOldMissForward() {
         let today = day(2026, 9, 21)
         let lastWeek = day(2026, 9, 14)
         let afternoon = calendar.date(byAdding: .hour, value: 15, to: today)!
 
-        let destination = DayTimelineGridView.calendarPushDay(missedOn: lastWeek, calendar: calendar, now: afternoon)
+        let destination = ChooseDayPlanning.pushDay(missedOn: lastWeek, calendar: calendar, now: afternoon)
 
         XCTAssertEqual(destination, day(2026, 9, 22), "the day being planned at 3pm is tomorrow")
         XCTAssertNotEqual(destination, day(2026, 9, 15), "not the day after the miss — that is the walk this replaced")
@@ -625,11 +625,11 @@ final class RecurringTaskCycleTests: XCTestCase {
 
     /// The floor only binds when the planning day would be too early; after
     /// noon on today's row it is already tomorrow and passes through.
-    func test_calendarPushDay_floorOnlyBindsWhenNeeded() {
+    func test_pushDay_floorOnlyBindsWhenNeeded() {
         let today = day(2026, 9, 21)
 
-        let morning = DayTimelineGridView.calendarPushDay(missedOn: today, calendar: calendar, now: calendar.date(byAdding: .hour, value: 10, to: today)!)
-        let afternoon = DayTimelineGridView.calendarPushDay(missedOn: today, calendar: calendar, now: calendar.date(byAdding: .hour, value: 15, to: today)!)
+        let morning = ChooseDayPlanning.pushDay(missedOn: today, calendar: calendar, now: calendar.date(byAdding: .hour, value: 10, to: today)!)
+        let afternoon = ChooseDayPlanning.pushDay(missedOn: today, calendar: calendar, now: calendar.date(byAdding: .hour, value: 15, to: today)!)
 
         XCTAssertEqual(morning, day(2026, 9, 22), "floored up from today")
         XCTAssertEqual(afternoon, day(2026, 9, 22), "already tomorrow, unchanged")
@@ -649,12 +649,12 @@ final class RecurringTaskCycleTests: XCTestCase {
 
         _ = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(
             task: task, on: today,
-            plannedDay: DayTimelineGridView.calendarPushDay(missedOn: today, calendar: calendar, now: morning),
+            plannedDay: ChooseDayPlanning.pushDay(missedOn: today, calendar: calendar, now: morning),
             context: context, calendar: calendar
         )
         let missed = ScheduleReviewViewModel.cycleRecurringOccurrenceReconcilingPush(
             task: task, on: today,
-            plannedDay: DayTimelineGridView.calendarPushDay(missedOn: today, calendar: calendar, now: morning),
+            plannedDay: ChooseDayPlanning.pushDay(missedOn: today, calendar: calendar, now: morning),
             context: context, calendar: calendar
         )
 
