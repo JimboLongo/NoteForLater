@@ -1594,4 +1594,162 @@ final class TaskMissRecordTests: XCTestCase {
             ScheduleReviewViewModel.unresolvedGateMessage(unresolvedHabitCount: 0, unresolvedRecurringTaskCount: 2)
         )
     }
+
+    // MARK: - Nothing answered on an earlier step reappears on a later one
+
+    /// Builds what the Today step would show for a set of completion
+    /// records, the same way `NightlyReviewView.unfilteredReviewItems` does.
+    private func todayItems(for tasks: [TaskItem], twoMinuteIDs: Set<UUID>) -> [ReviewItem] {
+        ScheduleReviewViewModel
+            .completedTasksWithNoBlock(tasks: tasks, context: context, completedSince: nil)
+            .map { .completedTask($0, isTwoMinuteTask: twoMinuteIDs.contains($0.taskID)) }
+    }
+
+    /// **Two steps in sequence — the only shape that can see this bug.**
+    ///
+    /// Completing a 2-minute task on its own step writes a
+    /// `TaskCompletionRecord`, and the Today step sources
+    /// `completedTasksWithNoBlock` from exactly those records. A 2-minute
+    /// task never has a block, so every such completion reappeared one step
+    /// later. Every test of either step in isolation stayed green
+    /// throughout — which is how 707 green tests shipped it.
+    func test_completingOnTheTwoMinuteStep_doesNotReappearOnToday() throws {
+        let reviewDate = day(2026, 9, 21)
+        let task = makeTask(title: "Water the plant")
+        var ledger = ReviewAnswerLedger()
+
+        let next = TwoMinutePush.cycle(
+            task, planDate: ChooseDayPlanning.pushDay(missedOn: reviewDate, calendar: calendar, now: reviewDate),
+            missedOn: reviewDate, calendar: calendar, context: context
+        )
+        XCTAssertEqual(next, .complete)
+        ledger.record(.task(task.id))
+
+        let unfiltered = todayItems(for: [task], twoMinuteIDs: [task.id])
+        XCTAssertEqual(unfiltered.count, 1, "the record really does reach Today — this is the duplicate")
+        XCTAssertTrue(
+            ledger.unanswered(unfiltered).isEmpty,
+            "already answered one step earlier, so Today must not ask again"
+        )
+    }
+
+    /// Taking the answer back must un-hide it, or the row is invisible on
+    /// later steps while reading as unanswered on its own.
+    func test_undoingAnAnswerRestoresItToLaterSteps() throws {
+        let task = makeTask(title: "Water the plant")
+        var ledger = ReviewAnswerLedger()
+        ledger.record(.task(task.id))
+        task.setCompleted(true, in: context)
+        XCTAssertTrue(ledger.unanswered(todayItems(for: [task], twoMinuteIDs: [task.id])).isEmpty)
+
+        ledger.forget(.task(task.id))
+
+        XCTAssertEqual(
+            ledger.unanswered(todayItems(for: [task], twoMinuteIDs: [task.id])).count, 1,
+            "un-answered, so later steps show it again"
+        )
+    }
+
+    /// **Missed is invisible on Today by rule now, not by accident.**
+    ///
+    /// It was invisible only because a miss writes a `TaskMissRecord` and
+    /// `reviewItems` never reads that type. This pins the rule: a missed
+    /// 2-minute task is *answered*, so its key is in the ledger and the
+    /// filter drops it however it might later come to be represented.
+    func test_missedOnTheTwoMinuteStep_isAnsweredNotMerelyUnrepresented() throws {
+        let reviewDate = day(2026, 9, 21)
+        let task = makeTask(title: "Water the plant")
+        var ledger = ReviewAnswerLedger()
+
+        for _ in 0..<2 {
+            let next = TwoMinutePush.cycle(
+                task, planDate: ChooseDayPlanning.pushDay(missedOn: reviewDate, calendar: calendar, now: reviewDate),
+                missedOn: reviewDate, calendar: calendar, context: context
+            )
+            if next != .none { ledger.record(.task(task.id)) }
+        }
+
+        XCTAssertEqual(TaskMissRecord.records(for: task, in: context).count, 1, "it really was missed")
+        XCTAssertTrue(ledger.contains(.task(task.id)), "and the ledger says so, whatever row kind represents it")
+
+        // Stands in for a future `reviewItems` that does read miss records.
+        let hypothetical: [ReviewItem] = [
+            .completedTask(
+                TaskCompletionRecord(taskID: task.id, title: task.title, createdAt: reviewDate, completedAt: reviewDate, pushedCount: 0),
+                isTwoMinuteTask: true
+            )
+        ]
+        XCTAssertTrue(
+            ledger.unanswered(hypothetical).isEmpty,
+            "a later representation of the same answer is still a duplicate"
+        )
+    }
+
+    /// **The habit route, closed structurally rather than by the store
+    /// happening to hold no habit blocks.**
+    func test_habitAnsweredOnTheHabitsStep_filtersItsBlockOnToday() throws {
+        let habit = Habit(name: "Brush teeth")
+        context.insert(habit)
+        let start = day(2026, 9, 21).addingTimeInterval(8 * 3600)
+        let block = ScheduledBlock(
+            date: day(2026, 9, 21), startTime: start, endTime: start.addingTimeInterval(600),
+            task: nil, habit: habit, habitOccurrenceIndex: 1
+        )
+        context.insert(block)
+
+        var ledger = ReviewAnswerLedger()
+        XCTAssertFalse(ledger.unanswered([.block(block)]).isEmpty, "unanswered, so it shows")
+
+        ledger.record(.habitOccurrence(habitID: habit.id, index: 1))
+
+        XCTAssertTrue(
+            ledger.unanswered([.block(block)]).isEmpty,
+            "the block keys as the occurrence, so answering the habit covers it"
+        )
+    }
+
+    /// A *different* occurrence of the same habit is not answered by it.
+    func test_answeringOneHabitOccurrenceDoesNotFilterAnother() throws {
+        let habit = Habit(name: "Brush teeth")
+        context.insert(habit)
+        let start = day(2026, 9, 21).addingTimeInterval(20 * 3600)
+        let second = ScheduledBlock(
+            date: day(2026, 9, 21), startTime: start, endTime: start.addingTimeInterval(600),
+            task: nil, habit: habit, habitOccurrenceIndex: 1
+        )
+        context.insert(second)
+
+        var ledger = ReviewAnswerLedger()
+        ledger.record(.habitOccurrence(habitID: habit.id, index: 0))
+
+        XCTAssertFalse(ledger.unanswered([.block(second)]).isEmpty, "index 1 is its own occurrence")
+    }
+
+    /// **The Inbox opt-out, pinned so nobody "fixes" it.** Inbox is triage;
+    /// seeing the item land on the schedule is the confirmation the triage
+    /// took. Nothing records Inbox completions, so the ledger cannot filter
+    /// them.
+    func test_inboxCompletionsAreDeliberatelyEchoedOnToday() throws {
+        let task = makeTask(title: "Triaged in the inbox")
+        task.setCompleted(true, in: context)
+
+        let ledger = ReviewAnswerLedger()
+
+        let items = todayItems(for: [task], twoMinuteIDs: [])
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(
+            ledger.unanswered(items).count, 1,
+            "still echoed — see ReviewAnswerLedger.inboxCompletionsAreEchoedOnToday"
+        )
+        XCTAssertTrue(ReviewAnswerLedger.inboxCompletionsAreEchoedOnToday)
+    }
+
+    /// Meals have no earlier-step counterpart, so they can never be filtered
+    /// by accident.
+    func test_mealsHaveNoAnsweredKey() throws {
+        let selection = MealSelection(recipeID: UUID(), recipeTitle: "Chili", date: day(2026, 9, 21))
+        context.insert(selection)
+
+        XCTAssertNil(ReviewItem.meal(selection, targetTime: day(2026, 9, 21)).answeredKey)
+    }
 }

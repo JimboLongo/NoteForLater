@@ -55,6 +55,9 @@ struct NightlyReviewView: View {
     /// checking a task off leaves it in the list, strikethrough, instead of
     /// yanking it out from under the user mid-review.
     @State private var twoMinuteReviewTaskIDs: Set<UUID> = []
+    /// What earlier steps have already answered this session — see
+    /// `ReviewAnswerLedger`. Reset with the review, never persisted.
+    @State private var answerLedger = ReviewAnswerLedger()
     /// Which habit occurrences the Today step is reviewing, frozen the
     /// moment the step is entered (`runEntryEffects(for: .today)`) rather
     /// than re-derived on every render. Sourced from `ScheduleReviewViewModel
@@ -1171,6 +1174,12 @@ struct NightlyReviewView: View {
     /// it (both are general-purpose, not owned outright by this step), it
     /// just never gets produced from here anymore.
     private var reviewItems: [ReviewItem] {
+        answerLedger.unanswered(unfilteredReviewItems)
+    }
+
+    /// Everything this step *could* show, before the one duplicate filter —
+    /// see `reviewItems`.
+    private var unfilteredReviewItems: [ReviewItem] {
         reviewableBlocks.map { .block($0) }
             + openRecurringTaskOccurrencesForReview.map { .recurringTask($0) }
             + completedTasksWithNoBlock.map { record in
@@ -1288,6 +1297,29 @@ struct NightlyReviewView: View {
     /// path (see the spec's "What actually protects the untimed path");
     /// freezing that call too would remove the filter's protection, not
     /// just its display twitchiness.
+    /// `.none` means the answer was taken back, so the ledger entry goes
+    /// with it — otherwise the row stays hidden on later steps while reading
+    /// as unanswered on its own.
+    private func recordTwoMinuteAnswer(_ task: TaskItem, next: OccurrenceStatus) {
+        if next == .none {
+            answerLedger.forget(.task(task.id))
+        } else {
+            answerLedger.record(.task(task.id))
+        }
+    }
+
+    /// Habits route through the ledger like everything else, rather than
+    /// relying on habit-backed `ScheduledBlock`s not existing. See
+    /// `ReviewItem.answeredKey`.
+    private func recordHabitAnswer(_ occurrence: HabitReviewOccurrence, next: OccurrenceStatus) {
+        let key = ReviewAnswerKey.habitOccurrence(habitID: occurrence.habit.id, index: occurrence.index)
+        if next == .none {
+            answerLedger.forget(key)
+        } else {
+            answerLedger.record(key)
+        }
+    }
+
     private var openHabitOccurrencesForReview: [HabitReviewOccurrence] {
         // Read for the same reason as in
         // `openRecurringTaskOccurrencesForReview` — this is the list whose
@@ -1325,6 +1357,12 @@ struct NightlyReviewView: View {
         let calendar = Calendar.current
         let day = calendar.startOfDay(for: occurrence.targetTime)
         occurrence.habit.cycleOccurrence(occurrence.index, on: day, context: modelContext, calendar: calendar)
+        // Answered here, so a habit-backed block cannot ask again on the
+        // Today step — see `recordHabitAnswer`.
+        recordHabitAnswer(
+            occurrence,
+            next: occurrence.habit.occurrenceStatus(occurrence.index, on: day, context: modelContext, calendar: calendar)
+        )
         // Belt to the relationship's braces — see
         // `habitOccurrenceRefreshTick`. Redundant today and deliberately so:
         // it is what keeps this row redrawing if `HabitLog.habit` ever stops
@@ -1640,12 +1678,18 @@ struct NightlyReviewView: View {
             //
             // `missedOn: reviewDate` — the day being reviewed is the day the
             // miss belongs to, which is not the day it is pushed to.
-            TwoMinutePush.cycle(
+            let next = TwoMinutePush.cycle(
                 task,
                 planDate: ChooseDayPlanning.pushDay(missedOn: reviewDate, calendar: Calendar.current),
                 missedOn: reviewDate,
                 context: modelContext
             )
+            // Answered here, so it does not ask again on a later step —
+            // see `ReviewAnswerLedger`. Both answers record: missed happens
+            // not to reach the Today step today, but only because a miss
+            // writes a `TaskMissRecord` and `reviewItems` does not read
+            // that. Recording it makes the rule the reason.
+            recordTwoMinuteAnswer(task, next: next)
             ScheduleDirtyState.shared.isDirty = true
         }
         .opacity(task.status == .none ? 1 : 0.5)
@@ -1688,8 +1732,10 @@ struct NightlyReviewView: View {
             switch TaskItem.missRowAction(for: record, reviewDate: reviewDate) {
             case .undoPush:
                 TwoMinutePush.undo(record, for: task, context: modelContext)
+                answerLedger.forget(.task(task.id))
             case .completeFromRecord:
                 TwoMinutePush.completeFromRecord(record, task: task, context: modelContext)
+                answerLedger.record(.task(task.id))
             }
             ScheduleDirtyState.shared.isDirty = true
         }

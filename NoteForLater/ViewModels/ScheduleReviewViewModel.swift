@@ -2,6 +2,72 @@ import Foundation
 import SwiftData
 import Observation
 
+
+/// Identity of a thing a Nightly Review step can *answer*, independent of
+/// which row kind happened to represent it.
+///
+/// Keying on identity rather than on a row is the whole point: the same task
+/// is a live 2-Minute row on one step and a `TaskCompletionRecord` on
+/// another, and a habit is an occurrence on one step and possibly a
+/// `ScheduledBlock` on another. A key that survives that change is what lets
+/// one predicate cover every step.
+enum ReviewAnswerKey: Hashable {
+    case task(UUID)
+    case habitOccurrence(habitID: UUID, index: Int)
+}
+
+/// **What this review session has already answered.**
+///
+/// Nothing answered on an earlier step reappears on a later one. The steps
+/// do not share a source — the 2-Minute step works in `TaskItem`s, Habits in
+/// `HabitReviewOccurrence`s, the Today step in `ReviewItem`s — so there is
+/// no single list to filter. This is the one thing they *can* share: an
+/// identity, recorded by whichever step answered it and consulted by every
+/// step after.
+///
+/// A new step inherits the behaviour by recording into this, rather than
+/// inheriting the bug and being special-cased out of each later list
+/// afterwards.
+///
+/// **Session-scoped, deliberately.** It answers "did you already deal with
+/// this a moment ago, in this review", which is not a fact about the store
+/// and must not outlive the review.
+///
+/// ⚠️ **The Inbox step deliberately does not record into this.** See
+/// `inboxCompletionsAreEchoedOnToday`.
+struct ReviewAnswerLedger: Equatable {
+    private(set) var answered: Set<ReviewAnswerKey> = []
+
+    /// **The Inbox step's opt-out, named so it reads as a decision.**
+    ///
+    /// A task completed on the Inbox step *does* reappear on Review
+    /// Schedule, and that is chosen, not missed. The Inbox step is triage —
+    /// you are deciding what a captured item even is — so seeing it land on
+    /// the schedule afterwards is the confirmation that the triage took
+    /// effect. The 2-Minute step is the opposite: you answered the task
+    /// itself, so showing it again is a second ask.
+    ///
+    /// Do not "fix" this by recording Inbox completions into the ledger.
+    static let inboxCompletionsAreEchoedOnToday = true
+
+    mutating func record(_ key: ReviewAnswerKey) { answered.insert(key) }
+
+    /// Undoing an answer has to undo its ledger entry too, or the row stays
+    /// hidden on later steps while reading as unanswered on its own.
+    mutating func forget(_ key: ReviewAnswerKey) { answered.remove(key) }
+
+    func contains(_ key: ReviewAnswerKey?) -> Bool {
+        guard let key else { return false }
+        return answered.contains(key)
+    }
+
+    /// The one predicate, applied in one place — see
+    /// `NightlyReviewView.reviewItems`.
+    func unanswered(_ items: [ReviewItem]) -> [ReviewItem] {
+        items.filter { !contains($0.answeredKey) }
+    }
+}
+
 /// Drives the schedule review screen for a single day (default: today, but
 /// navigable to any day) and every interaction the user has with a block:
 /// delete (swipe left), auto-replace (swipe right), long-press to manually

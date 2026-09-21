@@ -44,20 +44,29 @@ enum ReviewItem: Identifiable {
     /// has a real block, so it stays `.block` (see `blockRow`'s own
     /// comment for how that row goes 3-state for a recurring task).
     case recurringTask(ScheduleReviewViewModel.RecurringTaskReviewOccurrence)
-    /// A task completion with no live block to represent it — a 2-Minute
-    /// Task and the older Task Attribute Review "Mark Complete" path both
-    /// leave a task like this, and `ScheduleReviewViewModel
-    /// .purgeCompletedBlocks` deletes it outright once Nightly Review's
-    /// Today step commits. `TaskCompletionRecord` is the durable trace
-    /// that survives the delete. Always shown already-checked and
-    /// non-interactive — there's no live `TaskItem` guaranteed to still
-    /// exist to toggle back. `isTwoMinuteTask` is what pins it to the
-    /// front of its day (see `sortTime`) — supplied by the caller rather
-    /// than derived here, since telling a 2-Minute Task's completion
-    /// apart from an ordinary one needs a same-session snapshot
-    /// (`NightlyReviewView.twoMinuteReviewTaskIDs`) this enum has no way
-    /// to reach on its own, especially once the live task backing this
-    /// record is gone.
+    /// A task completion with no live block to represent it, from the Task
+    /// Attribute Review "Mark Complete" path — `ScheduleReviewViewModel
+    /// .purgeCompletedBlocks` deletes the task outright once Nightly
+    /// Review's Today step commits, and `TaskCompletionRecord` is the
+    /// durable trace that survives that delete. Always shown
+    /// already-checked and non-interactive: there's no live `TaskItem`
+    /// guaranteed to still exist to toggle back.
+    ///
+    /// REVERSAL: this used to name the 2-Minute step as a second producer
+    /// and justified showing its completions here on the grounds that they
+    /// would otherwise be invisible. That was wrong twice over — the
+    /// 2-Minute step displays them perfectly well on its own, and showing
+    /// them again one step later asked the same question twice. They are
+    /// filtered now (see `ReviewAnswerLedger`); a 2-Minute completion no
+    /// longer reaches this case at all.
+    ///
+    /// **Inbox completions still do, deliberately** — see
+    /// `ReviewAnswerLedger.inboxCompletionsAreEchoedOnToday`.
+    ///
+    /// `isTwoMinuteTask` survives because it still pins a row to the front
+    /// of its day (see `sortTime`) and because the filter is applied by the
+    /// caller, not here — this enum cannot reach the session snapshot that
+    /// would tell it, especially once the live task is gone.
     case completedTask(TaskCompletionRecord, isTwoMinuteTask: Bool)
     /// The meal picked during Nightly Review's Meals step — never has
     /// its own `ScheduledBlock` represented here (`NightlyReviewView
@@ -79,6 +88,37 @@ enum ReviewItem: Identifiable {
         case .recurringTask(let occurrence): return "recurringTask-\(occurrence.id)"
         case .completedTask(let record, _): return "completedTask-\(record.id)"
         case .meal(let selection, _): return "meal-\(selection.id)"
+        }
+    }
+
+    /// What this row *is*, for `ReviewAnswerLedger` — the identity a
+    /// different step would have answered it under.
+    ///
+    /// `nil` means the row has no earlier-step counterpart and can never be
+    /// a duplicate: a meal is only ever answered on the Meals step and
+    /// rendered here, and a bare block with neither task nor habit behind it
+    /// has no identity to match on.
+    ///
+    /// **A habit-backed block keys as its occurrence**, not as a block. That
+    /// is what closes the habit route: `reviewableBlocks` does not filter on
+    /// `habit`, so a habit answered on the Habits step would otherwise come
+    /// back here as a `.block`. The store holds zero habit blocks today, but
+    /// that is a fact about one person's data, not about this code.
+    var answeredKey: ReviewAnswerKey? {
+        switch self {
+        case .block(let block):
+            if let habit = block.habit {
+                return .habitOccurrence(habitID: habit.id, index: block.habitOccurrenceIndex)
+            }
+            return block.task.map { .task($0.id) }
+        case .habit(let occurrence):
+            return .habitOccurrence(habitID: occurrence.habit.id, index: occurrence.index)
+        case .recurringTask(let occurrence):
+            return .task(occurrence.task.id)
+        case .completedTask(let record, _):
+            return .task(record.taskID)
+        case .meal:
+            return nil
         }
     }
 
