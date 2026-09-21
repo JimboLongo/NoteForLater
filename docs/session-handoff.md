@@ -689,6 +689,103 @@ alongside it:
 
 ## Shipped — most recent first
 
+### 2-Minute task misses: records, order, and the review/calendar mirror
+
+Commits `63cfe9a`…`bdf8da4`, all pushed. Most recent work.
+
+**Miss records are per-day now, and undo cascades.** `TwoMinutePush.apply`
+guarded on one record per *task*, so missing an already-pushed task inserted
+nothing — the second day's row was simply absent while the first day carried
+the whole chain. It neither overwrote nor deleted; it declined to write.
+Uniqueness moved to per task *per day* (still needed: `apply` leaves the task
+at `.none`, so one row can reach `.missed` twice without an undo between).
+Undoing a record now deletes every later record for that task, because the
+chain is causal — the task was only on Tuesday to be missed because Monday's
+miss put it there. Undoing the earliest restores the pre-chain capture;
+undoing a later one puts the task back on that record's own `missedDay`,
+which needs no new state because the record already says it.
+
+**The capture was being overwritten, silently.** Reaching `.missed` a second
+time passes through `.complete`, which called `clearPushBookkeeping` and
+dropped the captured prior start date; `apply`'s `!hasOutstandingTwoMinutePush`
+gate then re-captured the *pushed* date. Undoing a Monday miss restored
+Tuesday — a real-looking date the user never chose. The clearing is now gated
+on no record being left standing. Worth noting the gate change in `apply`
+turned out **redundant** once the clearing was fixed (sabotaging it back gave
+0 failures); the conditional clearing is the load-bearing half.
+
+**`TaskMissRecord.pushedToDay` deleted as dead state.** Written on every push,
+read by nothing outside tests that asserted it had been written. Its doc
+comment claimed the undo needed it to tell a stale record from a live one; the
+undo never touched it. Deleting it also resolved two rows in the live store
+where the same-day-push bug had left `pushedToDay == missedDay` — **resolved by
+deletion rather than by running a migration over personal data to correct a
+field nothing reads.** Lightweight migration verified empirically against a
+copy of the real device store before shipping, not assumed.
+
+**The ordering bug — and the lesson.** Rows were reported jumping when a
+2-minute task was tapped. **Comparators were hardened twice before anything
+was measured**, on two different wrong theories (unstable sort over tied keys;
+then the row changing *day*). Both were wrong, and the second was written into
+a commit message as the probable explanation. What actually found it: temporary
+`DiagFileLog` instrumentation logging the full ordered row list plus the raw
+input array on every rebuild of the section. The log showed the input order
+identical across all 25 rebuilds and `none → complete` moving nothing — the two
+rows that moved both changed *kind*, and `misses + live` grouping did the rest.
+
+*The lesson: when order is wrong, log the ordered list. Reading comparators
+cannot tell you which of them ran, and a stable comparator over a
+re-partitioned list still reorders.* The fix is one flat order via
+`TwoMinuteRow.sorted`, keyed on the task behind each row so a row's key is
+identical whether drawn live or as a miss.
+
+**A test that passed by luck.** `test_rows_canHoldBothKindsOnOneDay` gave two
+tasks the same `createdAt`. Under misses-first that never mattered; under the
+flat rule the `id` tiebreaker decided, and `id` is a fresh UUID each run — so
+it passed or failed depending on the draw, and it passed the run where it
+should have failed. Any test whose expected order depends on a tiebreaker it
+did not set is flaky by construction. Production was never affected: a real
+task's `id` is stable.
+
+**The review now mirrors the calendar.** Both surfaces already called
+`TwoMinutePush.cycle` — the cycle, record and undo were shared. The
+*destination* was not: the calendar floored the planning day at
+`missedDay + 1`, while the review passed `planDate`, which is literally
+`reviewDate + 1`. **A back-dated review therefore pushed into the past** —
+reviewing Sept 19 on Sept 21 landed the task on Sept 20, a day nobody would
+look at again. The comment above that call claimed it used "the day this
+step's own header says is being planned, rather than recomputing
+`reviewDate + 1` locally", which was false and is what kept the bug invisible.
+`ChooseDayPlanning.pushDay(missedOn:calendar:now:)` is now the only
+implementation, called from both.
+
+*Second lesson, a variant of the call-site gap: a comment asserting that two
+things already agree is not evidence that they do, and is worth checking
+first precisely because it stops anyone else looking.*
+
+**The review's red row was a dead end.** It had a tap handler
+(`completeFromRecord`) — the effect was just invisible: `TwoMinuteRow.status`
+is hardcoded `.missed` for a record, and only the *backlog* list filters on
+completion, so a same-day record stayed put. Now `TaskItem.missRowAction`
+decides, and **the two red rows do opposite things on tap**: tonight's miss
+undoes (mirroring the calendar), a backlog miss completes (the documented "one
+last chance"). Both call `TwoMinutePush`; there is no second undo.
+
+⚠️ **Flagged as a UX question the user may revisit.** Two visually identical
+red rows with opposite verbs is defensible per-row and may not be learnable in
+practice. If it gets revisited, the options are distinguishing them visually or
+collapsing to one verb — collapsing loses the last-chance affordance.
+
+**Live store rows deliberately left untouched** (user will fix by hand):
+- `Poop` — orphaned record whose task is gone. By design; `TaskMissRecord`
+  copies `title`/`taskID` so the row survives deletion.
+- `Let's go` — `startDate` = today with no record and no capture. Cannot be
+  told apart from a user-set "Can Start By".
+- `Try 3` — carries the pre-fix chain bug: missed twice, second miss wrote no
+  record and overwrote the capture. **Its original start date is
+  unrecoverable** — it was overwritten, not lost alongside a copy. The user is
+  setting it by hand rather than having a repair invent one.
+
 ### Task card consolidation and Specific-Time removal (stages 1–4)
 
 Commits `ec584b2`…`62b2c42`, all pushed. This is the most recent work; the
