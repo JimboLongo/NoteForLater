@@ -82,6 +82,40 @@ extension TaskMissRecord {
         return all.sorted { $0.missedDay < $1.missedDay }
     }
 
+    /// The miss records Nightly Review should still offer, oldest first.
+    ///
+    /// **Backlog only, and only while still actionable.** Two filters, each
+    /// for its own reason:
+    ///
+    /// - **Before `reviewDate`.** A miss made during *this* review is
+    ///   already represented by the task's own row further down the list —
+    ///   offering both would be the same task twice, one of them as a
+    ///   "last chance" for something you just decided a second ago.
+    /// - **Task not complete.** The review shows what is owed; a completed
+    ///   task owes nothing. This is the half that makes the calendar and
+    ///   the review disagree *correctly*: the calendar keeps the row as
+    ///   history, the review drops it. Both are true at once.
+    ///
+    /// A record whose task has been deleted is dropped too — there is
+    /// nothing left to complete.
+    static func actionableRecords(
+        before reviewDate: Date,
+        tasks: [TaskItem],
+        in context: ModelContext,
+        calendar: Calendar = .current
+    ) -> [(record: TaskMissRecord, task: TaskItem)] {
+        let reviewDay = calendar.startOfDay(for: reviewDate)
+        let byID = Dictionary(tasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let all = (try? context.fetch(FetchDescriptor<TaskMissRecord>())) ?? []
+        return all
+            .filter { $0.missedDay < reviewDay }
+            .compactMap { record in
+                guard let task = byID[record.taskID], !task.isCompleted else { return nil }
+                return (record, task)
+            }
+            .sorted { $0.record.missedDay < $1.record.missedDay }
+    }
+
     /// The outstanding record for `task`, if any.
     ///
     /// At most one exists at a time: a task cycled missed twice without an

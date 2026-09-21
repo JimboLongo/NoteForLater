@@ -220,6 +220,87 @@ final class TwoMinutePushTests: XCTestCase {
         XCTAssertEqual(task.twoMinuteDisplayDay(), day(2026, 1, 6), "completed on the day it was owed, not the day it was missed")
     }
 
+
+
+
+    // MARK: - What Nightly Review offers
+
+    /// **The two surfaces disagree, correctly — asserted from one state.**
+    ///
+    /// The calendar keeps a handled miss as history; the review drops it,
+    /// because a completed task is no longer owed. Both are true at once,
+    /// which is why this is one test rather than two.
+    func test_handledMiss_staysOnTheCalendar_andLeavesTheReview() throws {
+        let task = makeTask()
+        task.createdAt = day(2026, 1, 5)
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+        }
+        let reviewDate = day(2026, 1, 6)
+
+        // Before completing: offered in the review, present on the calendar.
+        XCTAssertEqual(TaskMissRecord.actionableRecords(before: reviewDate, tasks: [task], in: context).count, 1)
+        XCTAssertEqual(TaskItem.twoMinuteRows(on: day(2026, 1, 5), from: [task], context: context).count, 1)
+
+        let record = try XCTUnwrap(TaskMissRecord.record(for: task, in: context))
+        TwoMinutePush.completeFromRecord(record, task: task, context: context)
+
+        XCTAssertTrue(
+            TaskMissRecord.actionableRecords(before: reviewDate, tasks: [task], in: context).isEmpty,
+            "the review shows what is owed, and a completed task owes nothing"
+        )
+        XCTAssertEqual(
+            TaskItem.twoMinuteRows(on: day(2026, 1, 5), from: [task], context: context).count, 1,
+            "the calendar keeps it — the miss still happened"
+        )
+    }
+
+    /// **Backlog only.** A miss made during *this* review is already
+    /// represented by the task's own row further down the same list;
+    /// offering both would be the same task twice, one of them as a "last
+    /// chance" for something decided seconds ago.
+    func test_actionableRecords_excludeAMissMadeDuringThisReview() throws {
+        let task = makeTask()
+        let reviewDate = day(2026, 1, 5)
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: reviewDate, context: context)
+        }
+
+        XCTAssertTrue(
+            TaskMissRecord.actionableRecords(before: reviewDate, tasks: [task], in: context).isEmpty,
+            "today's own miss is not backlog"
+        )
+        XCTAssertEqual(
+            TaskMissRecord.actionableRecords(before: day(2026, 1, 6), tasks: [task], in: context).count, 1,
+            "but it is backlog tomorrow"
+        )
+    }
+
+    /// A record whose task has been deleted is dropped — there is nothing
+    /// left to complete. The record still renders on the calendar, which is
+    /// what the copied title is for.
+    func test_actionableRecords_dropARecordWhoseTaskIsGone() throws {
+        let task = makeTask()
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(task, planDate: day(2026, 1, 6), missedOn: day(2026, 1, 5), context: context)
+        }
+        context.delete(task)
+
+        XCTAssertTrue(TaskMissRecord.actionableRecords(before: day(2026, 1, 6), tasks: [], in: context).isEmpty)
+    }
+
+    /// Oldest first — the review works down the backlog in the order it
+    /// accumulated.
+    func test_actionableRecords_areOldestFirst() throws {
+        let older = makeTask(title: "Older")
+        let newer = makeTask(title: "Newer")
+        context.insert(TaskMissRecord(taskID: older.id, title: older.title, missedDay: day(2026, 1, 2), pushedToDay: day(2026, 1, 3)))
+        context.insert(TaskMissRecord(taskID: newer.id, title: newer.title, missedDay: day(2026, 1, 4), pushedToDay: day(2026, 1, 5)))
+
+        let offered = TaskMissRecord.actionableRecords(before: day(2026, 1, 6), tasks: [older, newer], in: context)
+        XCTAssertEqual(offered.map(\.record.title), ["Older", "Newer"])
+    }
+
     // MARK: - The mixed row list
 
     /// **The whole point: two rows, on two days, from one push.**
@@ -263,10 +344,13 @@ final class TwoMinutePushTests: XCTestCase {
         XCTAssertEqual(rows.first?.status, .missed, "the record reads as a miss regardless of the task's own status")
     }
 
-    /// Completing from the record leaves the miss row on its day — the
-    /// calendar keeps history. Paired with the review's own behaviour in
-    /// `test_reviewRows_dropAHandledMiss` so the two answers are asserted
-    /// from one state rather than separately.
+    /// A miss row stays a miss whatever became of the task. That day it was
+    /// not done, and completing it later happened on a different day — the
+    /// green belongs there, not here.
+    ///
+    /// Paired with `test_handledMiss_staysOnTheCalendar_andLeavesTheReview`,
+    /// which asserts the other half from the same state: Nightly Review
+    /// stops offering it, because a completed task is no longer owed.
     func test_rows_keepAMissAfterItsTaskIsCompleted() throws {
         let task = makeTask()
         task.createdAt = day(2026, 1, 5)
@@ -277,8 +361,8 @@ final class TwoMinutePushTests: XCTestCase {
         TwoMinutePush.completeFromRecord(record, task: task, context: context)
 
         let fifth = TaskItem.twoMinuteRows(on: day(2026, 1, 5), from: [task], context: context)
-        XCTAssertEqual(fifth.count, 1, "missed Monday stays true after doing it Tuesday")
-        XCTAssertEqual(fifth.first?.status, .missed)
+        XCTAssertEqual(fifth.count, 1, "the day still shows it carried the task")
+        XCTAssertEqual(fifth.first?.status, .missed, "and it stays a miss — that day it was not done")
     }
 
     /// Undo collapses both rows back to one on the original day.

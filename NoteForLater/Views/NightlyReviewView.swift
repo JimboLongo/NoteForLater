@@ -609,7 +609,9 @@ struct NightlyReviewView: View {
         // with habits, since resolved ones would count as "present" but
         // never "clear."
         case .habits: return openHabitOccurrencesForReview.isEmpty
-        case .twoMinuteTasks: return twoMinuteReviewTasks.isEmpty
+        // Backlog misses count: a step holding only carried-over misses
+        // still has something to do, so auto-skip must not walk past it.
+        case .twoMinuteTasks: return twoMinuteReviewTasks.isEmpty && twoMinuteMissRecords.isEmpty
         case .inbox: return attributeReviewSession == nil
         case .atRisk: return atRiskTasks.isEmpty
         case .meals: return allRecipes.isEmpty
@@ -1466,7 +1468,17 @@ struct NightlyReviewView: View {
     /// timer shortens the moment something is completed.
     private var twoMinuteUnresolvedCounts: (missed: Int, unanswered: Int) {
         let tasks = twoMinuteReviewTasks
-        return (tasks.filter { $0.status == .missed }.count,
+        // A carried-over miss counts as missed. It is unresolved work the
+        // step is showing, and the floor exists to make you sit with
+        // exactly that — see `TwoMinuteEngagementTimer`, where missed
+        // counts in full precisely because it is a decision rather than a
+        // completion. Completing one drops it from `twoMinuteMissRecords`,
+        // so the wait shortens immediately, same as any other row.
+        //
+        // A live row can no longer rest at `.missed` (see
+        // `TwoMinutePush.apply`), so the task-side `.missed` count is now
+        // only ever tasks missed outside this step.
+        return (tasks.filter { $0.status == .missed }.count + twoMinuteMissRecords.count,
                 tasks.filter { $0.status == .none }.count)
     }
 
@@ -1488,6 +1500,14 @@ struct NightlyReviewView: View {
             .sorted { $0.createdAt < $1.createdAt }
     }
 
+    /// Misses from earlier days that are still worth offering — see
+    /// `TaskMissRecord.actionableRecords`. Live rather than frozen, unlike
+    /// `twoMinuteReviewTaskIDs`: completing one should remove it, since its
+    /// whole purpose is being the last chance to do the thing.
+    private var twoMinuteMissRecords: [(record: TaskMissRecord, task: TaskItem)] {
+        TaskMissRecord.actionableRecords(before: reviewDate, tasks: allTasks, in: modelContext)
+    }
+
     @ViewBuilder
     private var twoMinuteTasksStep: some View {
         if twoMinuteShelf == nil {
@@ -1496,7 +1516,7 @@ struct NightlyReviewView: View {
             } description: {
                 Text("Mark a shelf as your permanent 2-Minute Task shelf (from its settings) to use this step.")
             }
-        } else if twoMinuteReviewTasks.isEmpty {
+        } else if twoMinuteReviewTasks.isEmpty && twoMinuteMissRecords.isEmpty {
             ContentUnavailableView {
                 Label("All Clear", systemImage: "checkmark.circle")
             } description: {
@@ -1505,6 +1525,9 @@ struct NightlyReviewView: View {
         } else {
             List {
                 Section {
+                    ForEach(twoMinuteMissRecords, id: \.record.id) { entry in
+                        twoMinuteMissRow(entry.record, task: entry.task)
+                    }
                     ForEach(twoMinuteReviewTasks) { task in
                         twoMinuteTaskRow(task)
                     }
@@ -1565,6 +1588,52 @@ struct NightlyReviewView: View {
             ScheduleDirtyState.shared.isDirty = true
         }
         .opacity(task.status == .none ? 1 : 0.5)
+    }
+
+    /// A miss carried over from an earlier day — one last chance to do it
+    /// before this review closes.
+    ///
+    /// ⚠️ **Tapping this COMPLETES the task. On the calendar, tapping the
+    /// same row kind UNDOES the push instead. That is deliberate — see
+    /// `DayTimelineGridView.twoMinuteRowView` for the full reasoning.**
+    ///
+    /// In short: here you are closing a day out, so the useful verb is "do
+    /// it"; there you are looking at a day and putting the task back on it,
+    /// so the useful verb is "undo". Both directions live in
+    /// `TwoMinutePush`, and each surface picks one rather than implementing
+    /// it, which is what keeps this an intentional split rather than two
+    /// copies of one rule drifting apart.
+    ///
+    /// The record survives being completed — the miss still happened. It
+    /// simply stops appearing *here*, because a completed task is no longer
+    /// owed, while the calendar goes on showing it as history.
+    private func twoMinuteMissRow(_ record: TaskMissRecord, task: TaskItem) -> some View {
+        HStack(spacing: 12) {
+            twoMinuteSelectionCircle(status: .missed)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(missedDayLabel(record.missedDay))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(record.title)
+            }
+            Spacer()
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            TwoMinutePush.completeFromRecord(record, task: task, context: modelContext)
+            ScheduleDirtyState.shared.isDirty = true
+        }
+        .opacity(0.65)
+    }
+
+    /// "Missed Friday" / "Missed Sep 12" — the day the miss belongs to,
+    /// which is never today (see `actionableRecords`' backlog filter).
+    private func missedDayLabel(_ day: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInYesterday(day) { return "Missed yesterday" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = calendar.isDate(day, equalTo: .now, toGranularity: .weekOfYear) ? "EEEE" : "MMM d"
+        return "Missed \(formatter.string(from: day))"
     }
 
     /// Same three-state rendering `OverdueBlocksReviewList

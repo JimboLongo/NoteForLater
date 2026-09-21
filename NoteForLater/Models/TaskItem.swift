@@ -743,9 +743,17 @@ final class TaskItem {
             }
         }
 
-        /// What the row's circle draws. A miss record is always `.missed` —
-        /// that is the whole of what it says. The task's own status can be
-        /// anything, including `.complete` for one finished on this day.
+        /// What the row's circle draws.
+        ///
+        /// **A miss row is always `.missed`, whatever became of the task.**
+        /// That is the whole of what the record says: on this day, it was
+        /// not done. Completing it later happened on a *different* day, and
+        /// that day's row is where the green belongs — a miss row turning
+        /// green would claim the day carried a completion it did not.
+        ///
+        /// The task's own row is unconstrained by this and can read
+        /// anything, including `.complete` for one finished on the day it
+        /// landed.
         var status: OccurrenceStatus {
             switch self {
             case .task(let task): return task.status
