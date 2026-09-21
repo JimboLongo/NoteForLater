@@ -1752,4 +1752,70 @@ final class TaskMissRecordTests: XCTestCase {
 
         XCTAssertNil(ReviewItem.meal(selection, targetTime: day(2026, 9, 21)).answeredKey)
     }
+
+    // MARK: - A recurring completion is one row, not two
+
+    private func makeRecurring(_ title: String, anchor: Date) -> TaskItem {
+        let shelf = Shelf(name: "Recurring"); shelf.isRecurringTasks = true
+        context.insert(shelf)
+        let task = TaskItem(title: title, shelf: shelf)
+        context.insert(task)
+        task.setRecurring(true, calendar: calendar)
+        task.setStartDate(anchor, calendar: calendar)
+        return task
+    }
+
+    /// **The duplicate, reproduced.** Completing a recurring occurrence on
+    /// the Review Schedule step writes a `RecurringTaskLog` *and* a
+    /// `TaskCompletionRecord`. The occurrence renders as `.recurringTask`;
+    /// the record used to render again as `.completedTask`, because an
+    /// untimed recurring task has no block and `completedTasksWithNoBlock`
+    /// keeps exactly those.
+    ///
+    /// Pre-dates the answer ledger by nine days and is unrelated to it — see
+    /// `test_theLedgerDoesNotFilterRecurringRows` below for the proof.
+    func test_completingARecurringOccurrence_rendersOneRowNotTwo() throws {
+        let reviewDate = day(2026, 9, 21)
+        let task = makeRecurring("Vitamins", anchor: reviewDate)
+
+        XCTAssertEqual(task.cycleRecurringOccurrence(on: reviewDate, context: context, calendar: calendar), .complete)
+        XCTAssertEqual(
+            try context.fetch(FetchDescriptor<TaskCompletionRecord>()).count, 1,
+            "the completion record is still written — that is not what changed"
+        )
+
+        XCTAssertTrue(
+            ScheduleReviewViewModel.completedTasksWithNoBlock(tasks: [task], context: context, completedSince: nil).isEmpty,
+            "a recurring task has its own row kind, so the generic completed row must stand down"
+        )
+    }
+
+    /// A non-recurring task with no block still gets its completed row —
+    /// the exclusion is scoped, not a blanket suppression.
+    func test_nonRecurringCompletionsStillRender() throws {
+        let task = makeTask(title: "Triaged in the inbox")
+        task.setCompleted(true, in: context)
+
+        XCTAssertEqual(
+            ScheduleReviewViewModel.completedTasksWithNoBlock(tasks: [task], context: context, completedSince: nil).count, 1
+        )
+    }
+
+    /// **The ledger is inert here, proving it is not the cause.** Nothing
+    /// records recurring completions into it, and both rows would key on the
+    /// same `.task` id anyway — so it would have filtered both or neither,
+    /// never the right one.
+    func test_theLedgerDoesNotFilterRecurringRows() throws {
+        let reviewDate = day(2026, 9, 21)
+        let task = makeRecurring("Vitamins", anchor: reviewDate)
+        _ = task.cycleRecurringOccurrence(on: reviewDate, context: context, calendar: calendar)
+
+        let record = try XCTUnwrap(try context.fetch(FetchDescriptor<TaskCompletionRecord>()).first)
+        let rows: [ReviewItem] = [.completedTask(record, isTwoMinuteTask: false)]
+
+        XCTAssertEqual(
+            ReviewAnswerLedger().unanswered(rows).count, 1,
+            "an empty ledger filters nothing — the duplicate was never the ledger's doing"
+        )
+    }
 }

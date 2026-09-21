@@ -2494,6 +2494,23 @@ final class ScheduleReviewViewModel {
         let liveTasksByID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
         return records.filter { record in
             guard let task = liveTasksByID[record.taskID] else { return true }
+            // **A recurring task already has its own row here.** Completing
+            // an occurrence writes a `RecurringTaskLog` *and* a
+            // `TaskCompletionRecord` (`TaskItem.cycleRecurringOccurrence`),
+            // and an untimed recurring task has no block — so without this
+            // it rendered twice on the Today step: once as
+            // `.recurringTask`, once as `.completedTask`.
+            //
+            // Exactly the exclusion `reviewableBlocks` already makes for
+            // meals, for the same reason and with the same wording: the
+            // dedicated row kind is the representation, so the generic one
+            // must stand down.
+            //
+            // Not the ledger's job — that covers the same thing answered on
+            // *different steps*. This is two rows on one step, and the
+            // ledger would filter both (they share a `.task` key) rather
+            // than the right one.
+            guard !task.isRecurring else { return false }
             return (task.scheduledBlocks ?? []).isEmpty
         }
     }
