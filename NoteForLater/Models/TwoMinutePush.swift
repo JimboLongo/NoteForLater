@@ -208,7 +208,6 @@ enum TwoMinutePush {
             taskID: task.id,
             title: task.title,
             missedDay: missedDay,
-            pushedToDay: planDate,
             calendar: calendar
         ))
     }

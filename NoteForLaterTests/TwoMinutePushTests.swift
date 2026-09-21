@@ -148,7 +148,6 @@ final class TwoMinutePushTests: XCTestCase {
         XCTAssertEqual(task.twoMinuteDisplayDay(), day(2026, 1, 6), "the live task moved")
         let onFifth = TaskMissRecord.records(on: day(2026, 1, 5), in: context)
         XCTAssertEqual(onFifth.count, 1, "and the day it was missed on still shows something")
-        XCTAssertEqual(onFifth.first?.pushedToDay, day(2026, 1, 6))
     }
 
     /// The record names the day the miss actually happened, not the last day
@@ -322,8 +321,8 @@ final class TwoMinutePushTests: XCTestCase {
     func test_actionableRecords_areOldestFirst() throws {
         let older = makeTask(title: "Older")
         let newer = makeTask(title: "Newer")
-        context.insert(TaskMissRecord(taskID: older.id, title: older.title, missedDay: day(2026, 1, 2), pushedToDay: day(2026, 1, 3)))
-        context.insert(TaskMissRecord(taskID: newer.id, title: newer.title, missedDay: day(2026, 1, 4), pushedToDay: day(2026, 1, 5)))
+        context.insert(TaskMissRecord(taskID: older.id, title: older.title, missedDay: day(2026, 1, 2)))
+        context.insert(TaskMissRecord(taskID: newer.id, title: newer.title, missedDay: day(2026, 1, 4)))
 
         let offered = TaskMissRecord.actionableRecords(before: day(2026, 1, 6), tasks: [older, newer], in: context)
         XCTAssertEqual(offered.map(\.record.title), ["Older", "Newer"])
@@ -863,22 +862,25 @@ final class TaskMissRecordTests: XCTestCase {
         return task
     }
 
-    /// Both days are normalised to start-of-day, so a record created from a
+    /// `missedDay` is normalised to start-of-day, so a record created from a
     /// mid-afternoon `.now` still matches a day-granular lookup.
-    func test_daysAreNormalisedToStartOfDay() {
+    ///
+    /// UPDATED — this asserted the same of `pushedToDay`, which no longer
+    /// exists. The rule it was really pinning is the normalisation, and that
+    /// still has a field to apply to.
+    func test_missedDayIsNormalisedToStartOfDay() {
         let task = makeTask()
         let afternoon = day(2026, 1, 5).addingTimeInterval(15 * 3600)
-        let record = TaskMissRecord(taskID: task.id, title: task.title, missedDay: afternoon, pushedToDay: afternoon.addingTimeInterval(86400))
+        let record = TaskMissRecord(taskID: task.id, title: task.title, missedDay: afternoon)
 
         XCTAssertEqual(record.missedDay, day(2026, 1, 5))
-        XCTAssertEqual(record.pushedToDay, day(2026, 1, 6))
     }
 
     /// The title is copied rather than read through `taskID`, so the row
     /// still renders after the task is deleted.
     func test_titleSurvivesTheTaskBeingDeleted() throws {
         let task = makeTask(title: "Take the bins out")
-        let record = TaskMissRecord(taskID: task.id, title: task.title, missedDay: day(2026, 1, 5), pushedToDay: day(2026, 1, 6))
+        let record = TaskMissRecord(taskID: task.id, title: task.title, missedDay: day(2026, 1, 5))
         context.insert(record)
         context.delete(task)
 
@@ -890,7 +892,7 @@ final class TaskMissRecordTests: XCTestCase {
     func test_recordsOn_isBoundedToTheSingleDay() throws {
         let task = makeTask()
         for d in [4, 5, 6] {
-            context.insert(TaskMissRecord(taskID: task.id, title: task.title, missedDay: day(2026, 1, d), pushedToDay: day(2026, 1, d + 1)))
+            context.insert(TaskMissRecord(taskID: task.id, title: task.title, missedDay: day(2026, 1, d)))
         }
 
         let fifth = TaskMissRecord.records(on: day(2026, 1, 5), in: context)
@@ -902,7 +904,7 @@ final class TaskMissRecordTests: XCTestCase {
     /// the predicate failing open would put every past miss on every day.
     func test_recordsOn_emptyDayIsEmpty() throws {
         let task = makeTask()
-        context.insert(TaskMissRecord(taskID: task.id, title: task.title, missedDay: day(2026, 1, 5), pushedToDay: day(2026, 1, 6)))
+        context.insert(TaskMissRecord(taskID: task.id, title: task.title, missedDay: day(2026, 1, 5)))
 
         XCTAssertTrue(TaskMissRecord.records(on: day(2026, 1, 9), in: context).isEmpty)
     }
@@ -912,7 +914,7 @@ final class TaskMissRecordTests: XCTestCase {
     func test_recordForTask() throws {
         let missed = makeTask(title: "Missed")
         let untouched = makeTask(title: "Untouched")
-        context.insert(TaskMissRecord(taskID: missed.id, title: missed.title, missedDay: day(2026, 1, 5), pushedToDay: day(2026, 1, 6)))
+        context.insert(TaskMissRecord(taskID: missed.id, title: missed.title, missedDay: day(2026, 1, 5)))
 
         XCTAssertNotNil(TaskMissRecord.record(for: missed, in: context))
         XCTAssertNil(TaskMissRecord.record(for: untouched, in: context))
@@ -923,7 +925,7 @@ final class TaskMissRecordTests: XCTestCase {
     /// day by day, a miss belongs to the day it happened on.
     func test_missedDayNeverMoves() throws {
         let task = makeTask()
-        let record = TaskMissRecord(taskID: task.id, title: task.title, missedDay: day(2026, 1, 5), pushedToDay: day(2026, 1, 6))
+        let record = TaskMissRecord(taskID: task.id, title: task.title, missedDay: day(2026, 1, 5))
         context.insert(record)
 
         // Whatever else happens to the task, the record stays on its day.
@@ -992,7 +994,6 @@ final class TaskMissRecordTests: XCTestCase {
         )
         let records = TaskMissRecord.records(on: today, in: context)
         XCTAssertEqual(records.count, 1)
-        XCTAssertEqual(calendar.startOfDay(for: try XCTUnwrap(records.first).pushedToDay), day(2026, 9, 22))
     }
 
     // MARK: - A chain of misses

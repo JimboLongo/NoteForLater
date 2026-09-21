@@ -52,18 +52,22 @@ final class TaskMissRecord {
     /// `PushedRecurringOccurrence.currentDate`, there is no walk that
     /// advances it. A miss belongs to the day it happened on.
     var missedDay: Date
-    /// Where the task was pushed to. Kept so the undo can tell a stale
-    /// record (whose push has since been changed by something else) from a
-    /// live one, rather than assuming the task's current `startDate` is
-    /// still the one this record created.
-    var pushedToDay: Date
+    // REMOVED: `pushedToDay`, which stored where the task was pushed to.
+    // Its stated purpose was letting the undo tell a stale record from a
+    // live one — but the undo never read it, and neither did anything else.
+    // It was written on every push and read by nothing outside the tests
+    // that asserted it had been written.
+    //
+    // Deleting it also resolves the two rows in the live store where the
+    // same-day-push bug had left `pushedToDay == missedDay`: a field that
+    // does not exist cannot hold a wrong value, so no migration pass over
+    // personal data was needed to fix them.
 
-    init(taskID: UUID, title: String, missedDay: Date, pushedToDay: Date, calendar: Calendar = .current) {
+    init(taskID: UUID, title: String, missedDay: Date, calendar: Calendar = .current) {
         self.id = UUID()
         self.taskID = taskID
         self.title = title
         self.missedDay = calendar.startOfDay(for: missedDay)
-        self.pushedToDay = calendar.startOfDay(for: pushedToDay)
     }
 }
 
