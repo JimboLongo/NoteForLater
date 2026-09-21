@@ -445,6 +445,140 @@ final class RecurringTaskCycleTests: XCTestCase {
         XCTAssertEqual(left.first?.taskID, theirs.id)
     }
 
+    // MARK: - Start date moving forward
+
+    /// **The anchor floor — previously uncovered entirely.**
+    ///
+    /// Sabotaging `hasRecurringOccurrence`'s `day >= anchorDay` guard away
+    /// failed nothing, so the rule that stops occurrences being generated
+    /// before a recurring task starts could have been deleted silently.
+    ///
+    /// For a recurring task, Start Date *is* the anchor: `setStartDate`
+    /// syncs `dueDate` to it, which is what makes moving the start date
+    /// forward take the earlier occurrences with it. Both halves are
+    /// asserted here, because one without the other does nothing.
+    func test_occurrencesBeforeTheStartDateAreNotGenerated() throws {
+        // `makeUntimedTask` is monthly, so a Sep 1 anchor recurs Sep 1,
+        // Oct 1, Nov 1.
+        let task = makeUntimedTask(anchor: day(2026, 9, 1))
+        XCTAssertTrue(task.hasRecurringOccurrence(on: day(2026, 9, 1), calendar: calendar), "sanity: the anchor day")
+        XCTAssertTrue(task.hasRecurringOccurrence(on: day(2026, 10, 1), calendar: calendar), "sanity: a month on")
+
+        task.setStartDate(day(2026, 9, 15))
+
+        XCTAssertEqual(
+            task.dueDate.map { calendar.startOfDay(for: $0) }, day(2026, 9, 15),
+            "start date moves the anchor — this is what the floor then acts on"
+        )
+        XCTAssertFalse(task.hasRecurringOccurrence(on: day(2026, 9, 1), calendar: calendar), "before the start: gone")
+        XCTAssertFalse(task.hasRecurringOccurrence(on: day(2026, 10, 1), calendar: calendar), "and the old pattern with it — the anchor moved")
+        XCTAssertTrue(task.hasRecurringOccurrence(on: day(2026, 9, 15), calendar: calendar), "the start day itself still counts")
+        XCTAssertTrue(task.hasRecurringOccurrence(on: day(2026, 10, 15), calendar: calendar), "and the pattern continues from there")
+
+        // **The assertion that actually exercises the floor.** Aug 15 fits
+        // the monthly pattern exactly — same day of month, a whole number of
+        // months back — so the date math alone says yes. Only the
+        // `day >= anchorDay` guard says no. The assertions above all happen
+        // to fail the pattern for other reasons, so they pass with the floor
+        // removed; this one does not.
+        XCTAssertFalse(
+            task.hasRecurringOccurrence(on: day(2026, 8, 15), calendar: calendar),
+            "a pattern day BEFORE the anchor must not be generated — this is the floor itself"
+        )
+    }
+
+    /// **Only out-of-range push records are cleared.**
+    ///
+    /// A pushed row sitting before the new start date is stranded — it
+    /// places a row on a day the task cannot start, because
+    /// `taskIDs(on:from:)` consults no task dates at all. One at or after
+    /// the new start is still valid and must survive: moving a start date
+    /// forward should not kill a pending push that still points somewhere
+    /// the task can run.
+    func test_clearStranded_removesOnlyRecordsBeforeTheNewStart() throws {
+        let task = makeUntimedTask(anchor: day(2026, 9, 1))
+        let early = PushedRecurringOccurrence(taskID: task.id, originalDate: day(2026, 9, 2), currentDate: day(2026, 9, 5))
+        let onTheDay = PushedRecurringOccurrence(taskID: task.id, originalDate: day(2026, 9, 9), currentDate: day(2026, 9, 15))
+        let later = PushedRecurringOccurrence(taskID: task.id, originalDate: day(2026, 9, 16), currentDate: day(2026, 9, 20))
+        [early, onTheDay, later].forEach(context.insert)
+
+        let cleared = PushedRecurringOccurrence.clearStrandedByStartDate(
+            for: task, newStart: day(2026, 9, 15), in: context, calendar: calendar
+        )
+
+        XCTAssertEqual(cleared, 1)
+        let left = try context.fetch(FetchDescriptor<PushedRecurringOccurrence>())
+        XCTAssertEqual(
+            Set(left.map { calendar.startOfDay(for: $0.currentDate) }),
+            [day(2026, 9, 15), day(2026, 9, 20)],
+            "the start day itself is in range, and a later push is untouched"
+        )
+    }
+
+    /// The test is the day the record *places a row on*, not the day the
+    /// miss happened. A record whose miss predates the new start but whose
+    /// pushed day does not draws a row on a valid day, so it stays.
+    func test_clearStranded_judgesByPushedDayNotByTheMiss() throws {
+        let task = makeUntimedTask(anchor: day(2026, 9, 1))
+        let record = PushedRecurringOccurrence(taskID: task.id, originalDate: day(2026, 9, 2), currentDate: day(2026, 9, 20))
+        context.insert(record)
+
+        let cleared = PushedRecurringOccurrence.clearStrandedByStartDate(
+            for: task, newStart: day(2026, 9, 15), in: context, calendar: calendar
+        )
+
+        XCTAssertEqual(cleared, 0, "the miss is history; the row it draws is on a valid day")
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).count, 1)
+    }
+
+    /// Clearing the start date un-anchors the recurrence entirely, so every
+    /// pushed row is stranded rather than just the early ones.
+    func test_clearStranded_clearingTheStartDateRemovesThemAll() throws {
+        let task = makeUntimedTask(anchor: day(2026, 9, 1))
+        [day(2026, 9, 5), day(2026, 9, 20)].forEach {
+            context.insert(PushedRecurringOccurrence(taskID: task.id, originalDate: day(2026, 9, 2), currentDate: $0))
+        }
+
+        let cleared = PushedRecurringOccurrence.clearStrandedByStartDate(for: task, newStart: nil, in: context, calendar: calendar)
+
+        XCTAssertEqual(cleared, 2)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<PushedRecurringOccurrence>()).isEmpty)
+    }
+
+    /// Another task's records are untouched — the predicate is per-task, and
+    /// a fetch-all-then-delete would pass every other test here.
+    func test_clearStranded_doesNotTouchAnotherTasksRecords() throws {
+        let mine = makeUntimedTask(anchor: day(2026, 9, 1))
+        let theirs = makeUntimedTask(anchor: day(2026, 9, 1))
+        context.insert(PushedRecurringOccurrence(taskID: mine.id, originalDate: day(2026, 9, 2), currentDate: day(2026, 9, 5)))
+        context.insert(PushedRecurringOccurrence(taskID: theirs.id, originalDate: day(2026, 9, 2), currentDate: day(2026, 9, 5)))
+
+        PushedRecurringOccurrence.clearStrandedByStartDate(for: mine, newStart: day(2026, 9, 15), in: context, calendar: calendar)
+
+        let left = try context.fetch(FetchDescriptor<PushedRecurringOccurrence>())
+        XCTAssertEqual(left.count, 1)
+        XCTAssertEqual(left.first?.taskID, theirs.id)
+    }
+
+    /// **`RecurringTaskLog` rows are deliberately left alone**, matching
+    /// what habits do with `HabitLog`: a log row before the start date is
+    /// inert, because no occurrence is generated for that day any more. A
+    /// push record is not inert, which is the whole reason it is treated
+    /// differently.
+    func test_logRowsBeforeTheNewStartAreLeftAsHistory() throws {
+        let task = makeUntimedTask(anchor: day(2026, 9, 1))
+        let log = RecurringTaskLog.logOrCreate(taskID: task.id, on: day(2026, 9, 8), context: context, calendar: calendar)
+        log.status = .complete
+
+        task.setStartDate(day(2026, 9, 15))
+        PushedRecurringOccurrence.clearStrandedByStartDate(for: task, newStart: day(2026, 9, 15), in: context, calendar: calendar)
+
+        XCTAssertEqual(
+            RecurringTaskLog.log(taskID: task.id, on: day(2026, 9, 8), context: context, calendar: calendar)?.status, .complete,
+            "history survives — it is simply unreachable, since nothing generates that occurrence now"
+        )
+    }
+
     // MARK: - Where the calendar sends a miss
 
     /// **The property that was silently violated, and the test that would

@@ -48,6 +48,54 @@ final class PushedRecurringOccurrence {
 }
 
 extension PushedRecurringOccurrence {
+    /// Deletes `task`'s push records that the new start date has put out of
+    /// range, returning how many went.
+    ///
+    /// **Only the out-of-range ones.** A record placing a row on a day at or
+    /// after `newStart` is still valid and is left alone — moving a start
+    /// date forward should not kill a pending push that still points
+    /// somewhere the task can actually run.
+    ///
+    /// The test is `currentDate`, the day the record *places a row on*, not
+    /// `originalDate`. A record whose miss predates the new start but whose
+    /// pushed day does not is kept: the row it draws is on a valid day, and
+    /// `originalDate` is reference only (see this type's own doc comment).
+    ///
+    /// **Why these are cleared when `RecurringTaskLog` rows are not.** A log
+    /// row before the start date is inert — nothing generates an occurrence
+    /// for that day any more (`TaskItem.hasRecurringOccurrence` floors on
+    /// the anchor, which a recurring task's start date moves), so the row is
+    /// simply unreachable, exactly as an orphaned `HabitLog` is after a
+    /// habit's start date moves. A push record is not inert: it *places a
+    /// row by itself*, via `taskIDs(on:from:)`, which consults no task dates
+    /// at all. Left behind it would keep drawing an occurrence on a day the
+    /// task cannot start — and, being unresolved, would also block the task
+    /// from ever being pushed again through the `alreadyPushed` guard.
+    ///
+    /// `nil` for `newStart` means the start date was cleared outright, which
+    /// un-anchors the recurrence entirely — every pushed row is then
+    /// stranded, so all of them go.
+    @discardableResult
+    static func clearStrandedByStartDate(
+        for task: TaskItem,
+        newStart: Date?,
+        in context: ModelContext,
+        calendar: Calendar = .current
+    ) -> Int {
+        let taskID = task.id
+        let records = (try? context.fetch(FetchDescriptor<PushedRecurringOccurrence>(
+            predicate: #Predicate { $0.taskID == taskID }
+        ))) ?? []
+        guard let newStart else {
+            for record in records { context.delete(record) }
+            return records.count
+        }
+        let startDay = calendar.startOfDay(for: newStart)
+        let stranded = records.filter { calendar.startOfDay(for: $0.currentDate) < startDay }
+        for record in stranded { context.delete(record) }
+        return stranded.count
+    }
+
     /// Which tasks a set of push records places on `day`.
     ///
     /// **No `isCompleted` filter, deliberately.** A resolved record still

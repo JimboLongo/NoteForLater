@@ -3725,12 +3725,23 @@ struct TaskReviewCard: View {
             minimumDate: nil
         ) { selectedDate in
             task.setStartDate(selectedDate)
+            // For a recurring task, Start Date *is* the recurrence anchor
+            // (`setStartDate` syncs `dueDate` to it), so occurrences before
+            // it stop being generated on their own. A pushed row does not —
+            // it is placed by its own record, which consults no task dates —
+            // so one now sitting before the start date has to go explicitly.
+            // See `clearStrandedByStartDate` for why log rows are left alone
+            // and these are not.
+            PushedRecurringOccurrence.clearStrandedByStartDate(for: task, newStart: selectedDate, in: modelContext)
             expandedRows.remove(.canStartBy)
         }
 
         if task.startDatePicked {
             Button("Clear", role: .destructive) {
                 task.clearStartDate()
+                // Clearing un-anchors the recurrence entirely, so every
+                // pushed row is stranded rather than just the early ones.
+                PushedRecurringOccurrence.clearStrandedByStartDate(for: task, newStart: nil, in: modelContext)
             }
         }
     }
