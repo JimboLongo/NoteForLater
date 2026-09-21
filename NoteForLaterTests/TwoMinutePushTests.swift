@@ -12,7 +12,7 @@ final class TwoMinutePushTests: XCTestCase {
     override func setUpWithError() throws {
         container = try ModelContainer(
             for: TaskItem.self, ScheduledBlock.self, Shelf.self, Tag.self,
-                TaskCompletionRecord.self, RecurringTaskLog.self,
+                TaskCompletionRecord.self, RecurringTaskLog.self, TaskMissRecord.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
         context = ModelContext(container)
@@ -455,3 +455,104 @@ final class TwoMinuteEngagementTimerTests: XCTestCase {
     }
 }
 
+/// The durable record of a 2-Minute miss — see `TaskMissRecord`.
+///
+/// All new: this model did not exist, so there is nothing here that was
+/// updated rather than written.
+final class TaskMissRecordTests: XCTestCase {
+    private var container: ModelContainer!
+    private var context: ModelContext!
+
+    override func setUpWithError() throws {
+        container = try ModelContainer(
+            for: TaskItem.self, ScheduledBlock.self, Shelf.self, Tag.self,
+                TaskCompletionRecord.self, RecurringTaskLog.self, TaskMissRecord.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        context = ModelContext(container)
+    }
+
+    private var calendar: Calendar { .current }
+    private func day(_ y: Int, _ m: Int, _ d: Int) -> Date {
+        calendar.date(from: DateComponents(year: y, month: m, day: d))!
+    }
+
+    private func makeTask(title: String = "Water the plant") -> TaskItem {
+        let shelf = Shelf(name: "2-Minute Tasks")
+        shelf.isTwoMinuteTasks = true
+        context.insert(shelf)
+        let task = TaskItem(title: title, shelf: shelf)
+        context.insert(task)
+        return task
+    }
+
+    /// Both days are normalised to start-of-day, so a record created from a
+    /// mid-afternoon `.now` still matches a day-granular lookup.
+    func test_daysAreNormalisedToStartOfDay() {
+        let task = makeTask()
+        let afternoon = day(2026, 1, 5).addingTimeInterval(15 * 3600)
+        let record = TaskMissRecord(taskID: task.id, title: task.title, missedDay: afternoon, pushedToDay: afternoon.addingTimeInterval(86400))
+
+        XCTAssertEqual(record.missedDay, day(2026, 1, 5))
+        XCTAssertEqual(record.pushedToDay, day(2026, 1, 6))
+    }
+
+    /// The title is copied rather than read through `taskID`, so the row
+    /// still renders after the task is deleted.
+    func test_titleSurvivesTheTaskBeingDeleted() throws {
+        let task = makeTask(title: "Take the bins out")
+        let record = TaskMissRecord(taskID: task.id, title: task.title, missedDay: day(2026, 1, 5), pushedToDay: day(2026, 1, 6))
+        context.insert(record)
+        context.delete(task)
+
+        XCTAssertEqual(record.title, "Take the bins out", "a copied title is what makes the record renderable on its own")
+    }
+
+    /// The day lookup is bounded to one calendar day in both directions —
+    /// a record on the day before or after must not be picked up.
+    func test_recordsOn_isBoundedToTheSingleDay() throws {
+        let task = makeTask()
+        for d in [4, 5, 6] {
+            context.insert(TaskMissRecord(taskID: task.id, title: task.title, missedDay: day(2026, 1, d), pushedToDay: day(2026, 1, d + 1)))
+        }
+
+        let fifth = TaskMissRecord.records(on: day(2026, 1, 5), in: context)
+        XCTAssertEqual(fifth.count, 1)
+        XCTAssertEqual(fifth.first?.missedDay, day(2026, 1, 5))
+    }
+
+    /// A day with no misses is empty rather than returning everything —
+    /// the predicate failing open would put every past miss on every day.
+    func test_recordsOn_emptyDayIsEmpty() throws {
+        let task = makeTask()
+        context.insert(TaskMissRecord(taskID: task.id, title: task.title, missedDay: day(2026, 1, 5), pushedToDay: day(2026, 1, 6)))
+
+        XCTAssertTrue(TaskMissRecord.records(on: day(2026, 1, 9), in: context).isEmpty)
+    }
+
+    /// Lookup by task finds the outstanding record, and nothing for a task
+    /// that was never missed.
+    func test_recordForTask() throws {
+        let missed = makeTask(title: "Missed")
+        let untouched = makeTask(title: "Untouched")
+        context.insert(TaskMissRecord(taskID: missed.id, title: missed.title, missedDay: day(2026, 1, 5), pushedToDay: day(2026, 1, 6)))
+
+        XCTAssertNotNil(TaskMissRecord.record(for: missed, in: context))
+        XCTAssertNil(TaskMissRecord.record(for: untouched, in: context))
+    }
+
+    /// The record keeps its own `missedDay` — nothing advances it. Unlike
+    /// `PushedRecurringOccurrence.currentDate`, which used to walk forward
+    /// day by day, a miss belongs to the day it happened on.
+    func test_missedDayNeverMoves() throws {
+        let task = makeTask()
+        let record = TaskMissRecord(taskID: task.id, title: task.title, missedDay: day(2026, 1, 5), pushedToDay: day(2026, 1, 6))
+        context.insert(record)
+
+        // Whatever else happens to the task, the record stays on its day.
+        task.setStartDate(day(2026, 2, 20))
+        task.status = .complete
+
+        XCTAssertEqual(TaskMissRecord.records(on: day(2026, 1, 5), in: context).count, 1, "still on the day it happened")
+    }
+}

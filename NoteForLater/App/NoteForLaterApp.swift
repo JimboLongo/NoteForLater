@@ -24,6 +24,7 @@ struct NoteForLaterApp: App {
             Habit.self,
             HabitLog.self,
             TaskCompletionRecord.self,
+            TaskMissRecord.self,
             TagLink.self,
             Recipe.self,
             MealSelection.self,
