@@ -1590,7 +1590,7 @@ struct NightlyReviewView: View {
                     Section {
                         let counts = twoMinuteUnresolvedCounts
                         Label(
-                            "Wait \(Self.formattedRemaining(twoMinuteEngagementTimer.remaining(missed: counts.missed, unanswered: counts.unanswered))) or Complete Them",
+                            "Wait \(Self.formattedRemaining(twoMinuteEngagementTimer.remaining(missed: counts.missed, unanswered: counts.unanswered))) or complete them",
                             systemImage: "timer"
                         )
                         .font(.subheadline)
