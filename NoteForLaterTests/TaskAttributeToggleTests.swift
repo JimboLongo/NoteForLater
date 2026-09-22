@@ -367,16 +367,22 @@ final class TaskAttributeToggleTests: XCTestCase {
     /// defaults that aren't evidence anyone actually chose them). Without
     /// these three checks, a recurring task in this state would silently
     /// never schedule anything instead of prompting to be finished.
-    func test_freshRecurringTask_surfacesStartDateEveryAndTimeAsMissing() {
+    /// UPDATED — Every and Time no longer surface as missing on a fresh
+    /// task, because creation now registers the defaults it displays (see
+    /// `TaskItem.applyCreationDefaults`). Start Date still does, and that is
+    /// the useful half: it has no default, so it is a genuine question and
+    /// must keep being asked.
+    func test_freshRecurringTask_surfacesOnlyStartDateAsMissing() {
         let shelf = Shelf(name: "Recurring Tasks")
         shelf.isRecurringTasks = true
         let task = TaskItem.makeForDirectCapture(title: "Water the garden", shelf: shelf)
 
         let missing = task.missingAttributeNames(consideringShelf: shelf)
 
-        XCTAssertTrue(missing.contains("Start Date"))
-        XCTAssertTrue(missing.contains("Every"))
-        XCTAssertTrue(missing.contains("Time"))
+        XCTAssertTrue(missing.contains("Start Date"), "no default, so still a real question")
+        XCTAssertFalse(missing.contains("Every"))
+        XCTAssertFalse(missing.contains("Time"))
+        XCTAssertFalse(missing.contains("Pattern"))
     }
 
     /// Once all three are actually picked, none of them should still read
@@ -631,16 +637,27 @@ final class TaskAttributeToggleTests: XCTestCase {
     /// "Pattern" — `relativeRecurrenceScope`/`.ordinal` start on real,
     /// storable defaults ("Day of Month, First"), not evidence anyone
     /// actually configured it.
-    func test_freshRelativeDateTask_surfacesPatternAsMissing() {
+    /// UPDATED — Pattern registers at creation now, so a *fresh* relative
+    /// task does not report it. Monthly being the new repeat default is
+    /// precisely why: it makes Pattern a live question immediately, so
+    /// leaving it unregistered would have traded one unanswered row for
+    /// another.
+    ///
+    /// A task predating `applyCreationDefaults` still reports it — the rule
+    /// is unchanged, only what creation writes.
+    func test_relativeDateTask_reportsPatternMissingOnlyWhenUnconfigured() {
         let shelf = Shelf(name: "Recurring Tasks")
         shelf.isRecurringTasks = true
-        let task = TaskItem.makeForDirectCapture(title: "Water the garden", shelf: shelf)
-        task.recurrenceMode = .relativeDate
-        // "Pattern" is only ever asked for a monthly unit now — see
+        let fresh = TaskItem.makeForDirectCapture(title: "Water the garden", shelf: shelf)
+        fresh.recurrenceMode = .relativeDate
+        // "Pattern" is only ever asked for a monthly unit — see
         // `TaskItem.relativeRecurrenceMissing`'s own doc comment.
-        task.recurrenceUnit = .months
+        fresh.recurrenceUnit = .months
 
-        XCTAssertTrue(task.missingAttributeNames(consideringShelf: shelf).contains("Pattern"))
+        XCTAssertFalse(fresh.missingAttributeNames(consideringShelf: shelf).contains("Pattern"))
+
+        fresh.relativeRecurrencePicked = false
+        XCTAssertTrue(fresh.missingAttributeNames(consideringShelf: shelf).contains("Pattern"))
     }
 
     /// Once the pattern is actually touched, it must drop out of the
@@ -1448,5 +1465,104 @@ final class TaskAttributeToggleTests: XCTestCase {
         XCTAssertTrue(TaskReviewCard.durationOptions.contains(2), "≤2 min is how a task reaches the 2-Minute shelf")
         XCTAssertEqual(TaskReviewCard.durationOptions.first, 2, "and it sorts first — it's the shortest")
         XCTAssertEqual(TaskReviewCard.durationOptionLabel(for: 2), "≤2 min")
+    }
+
+    // MARK: - A displayed default is a held default
+
+    /// **The test that would have caught this: create, touch nothing, save,
+    /// assert the model holds the defaults.**
+    ///
+    /// Nothing did. Every existing test either poked a value first or
+    /// asserted the *unregistered* state as correct — which is how five rows
+    /// shipped displaying a default they had never written. The card showed
+    /// "Monthly"/"Midday" while reporting both as Not Selected, and
+    /// re-choosing the option already on screen was the only way to register
+    /// it.
+    func test_freshRecurringTask_savedUntouched_holdsItsDisplayedDefaults() throws {
+        let container = try ModelContainer(
+            for: TaskItem.self, Shelf.self, Tag.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let shelf = Shelf(name: "Recurring Tasks")
+        shelf.isRecurringTasks = true
+        context.insert(shelf)
+
+        let task = TaskItem.makeForDirectCapture(title: "Take vitamins", shelf: shelf)
+        context.insert(task)
+        try context.save()          // no interaction whatsoever
+
+        let saved = try XCTUnwrap(try context.fetch(FetchDescriptor<TaskItem>()).first)
+        XCTAssertEqual(saved.recurrenceShortSummary, "Monthly")
+        XCTAssertTrue(saved.recurrenceIntervalPicked, "Repeat")
+        XCTAssertEqual(saved.recurrenceTimeMode, .midday)
+        XCTAssertTrue(saved.recurrenceTimeModePicked, "Time")
+        XCTAssertTrue(saved.relativeRecurrencePicked, "Pattern")
+        XCTAssertFalse(saved.missingAttributeNames(consideringShelf: shelf).contains("Every"))
+        XCTAssertFalse(saved.missingAttributeNames(consideringShelf: shelf).contains("Time"))
+        XCTAssertFalse(saved.missingAttributeNames(consideringShelf: shelf).contains("Pattern"))
+    }
+
+    /// A 2-Minute-shelf task opens with the wheel on ≤2 **and registered** —
+    /// the same mechanism, with a shelf-supplied default instead of a
+    /// blanket one.
+    func test_twoMinuteShelfTask_savedUntouched_holdsADurationOfTwo() throws {
+        let container = try ModelContainer(
+            for: TaskItem.self, Shelf.self, Tag.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let shelf = Shelf(name: "2-Minute Tasks")
+        shelf.isTwoMinuteTasks = true
+        context.insert(shelf)
+
+        let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
+        context.insert(task)
+        try context.save()
+
+        let saved = try XCTUnwrap(try context.fetch(FetchDescriptor<TaskItem>()).first)
+        XCTAssertEqual(saved.estimatedMinutes, 2)
+        XCTAssertEqual(saved.remainingMinutes, 2)
+        XCTAssertTrue(saved.durationPicked)
+        XCTAssertFalse(saved.missingAttributeNames(consideringShelf: shelf).contains("Duration"))
+    }
+
+    /// **A placeholder default keeps asking.** A shelf that supplies no
+    /// duration leaves `estimatedMinutes` at `0`, which means "unanswered",
+    /// not "zero minutes" — so Duration stays on the missing list.
+    func test_shelfWithNoDefaultDuration_leavesDurationUnregistered() {
+        let shelf = Shelf(name: "Work")
+        shelf.defaultDurationMinutes = 0
+
+        let task = TaskItem.makeForDirectCapture(title: "Write the memo", shelf: shelf)
+
+        XCTAssertEqual(task.estimatedMinutes, 0)
+        XCTAssertFalse(task.durationPicked, "a bare 0 is not an answer")
+        XCTAssertTrue(task.missingAttributeNames(consideringShelf: shelf).contains("Duration"))
+    }
+
+    /// A shelf that *does* supply one registers it — the distinction is the
+    /// shelf's default, not the row.
+    func test_shelfWithADefaultDuration_registersIt() {
+        let shelf = Shelf(name: "Work")
+        shelf.defaultDurationMinutes = 45
+
+        let task = TaskItem.makeForDirectCapture(title: "Write the memo", shelf: shelf)
+
+        XCTAssertEqual(task.estimatedMinutes, 45)
+        XCTAssertTrue(task.durationPicked)
+    }
+
+    /// **Divisible keeps asking, deliberately.** A silent "Not Divisible" is
+    /// the invisible state this codebase keeps getting bitten by — see
+    /// `TaskItem.applyCreationDefaults`.
+    func test_divisibleIsNeverPreAnswered() {
+        let shelf = Shelf(name: "Work")
+        shelf.defaultDurationMinutes = 120
+
+        let task = TaskItem.makeForDirectCapture(title: "Write the memo", shelf: shelf)
+
+        XCTAssertFalse(task.divisiblePicked)
+        XCTAssertTrue(task.missingAttributeNames(consideringShelf: shelf).contains("Divisible"))
     }
 }

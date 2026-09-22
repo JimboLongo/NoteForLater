@@ -28,6 +28,24 @@ import SwiftData
 /// exercises the pulled-out `internal` `select*`/`backfill*` functions
 /// directly, same reasoning as `RecurringTaskCardLayoutTests`.
 final class RepeatsRedesignTests: XCTestCase {
+    /// A task in the state creation *used* to leave: value defaults present,
+    /// picked flags false.
+    ///
+    /// Still a real state — every task created before
+    /// `TaskItem.applyCreationDefaults` existed is in it — and it is what
+    /// the tests using this helper are actually about. They were relying on
+    /// `makeForDirectCapture` to produce it incidentally; now they ask for
+    /// it, which is what they meant all along.
+    private func makeUnconfiguredRecurringTask(title: String = "Water the garden") -> TaskItem {
+        let task = makeRecurringTask(title: title)
+        task.recurrenceIntervalCount = 1
+        task.recurrenceUnit = .days
+        task.recurrenceIntervalPicked = false
+        task.recurrenceTimeModePicked = false
+        task.relativeRecurrencePicked = false
+        return task
+    }
+
     private func makeRecurringTask(title: String = "Water the garden") -> TaskItem {
         let shelf = Shelf(name: "Recurring Tasks")
         shelf.isRecurringTasks = true
@@ -51,7 +69,7 @@ final class RepeatsRedesignTests: XCTestCase {
     /// day" and never touches anything else would previously never mark
     /// `recurrenceIntervalPicked`.
     func test_selectRecurrenceUnit_alreadyDefaultValue_stillMarksPicked() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         XCTAssertEqual(task.recurrenceUnit, .days)
         XCTAssertFalse(task.recurrenceIntervalPicked)
 
@@ -81,7 +99,7 @@ final class RepeatsRedesignTests: XCTestCase {
     }
 
     func test_selectRecurrenceTimeMode_alreadyDefaultValue_stillMarksPicked() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         XCTAssertEqual(task.recurrenceTimeMode, .midday)
         XCTAssertFalse(task.recurrenceTimeModePicked)
 
@@ -145,22 +163,40 @@ final class RepeatsRedesignTests: XCTestCase {
     /// `recurrenceIntervalPicked`/`missingAttributeNames` are what
     /// actually track whether this was confirmed, and neither reading
     /// "Daily" changes: this is a cosmetic pre-fill, not a silent answer.
-    func test_freshRecurringTask_recurrenceShortSummary_isDaily_butStillReportsMissing() {
+    /// UPDATED — this asserted the bug, and the default it asserted has
+    /// also changed.
+    ///
+    /// It pinned "shows Daily, reports Every as missing" — the displayed
+    /// default and the registered state disagreeing, which is exactly the
+    /// defect `TaskItem.applyCreationDefaults` exists to remove. A displayed
+    /// default is now the value. The default itself is Monthly.
+    func test_freshRecurringTask_repeatDefaultsToMonthly_andCountsAsAnswered() {
         let task = makeRecurringTask()
 
-        XCTAssertEqual(task.recurrenceShortSummary, "Daily")
+        XCTAssertEqual(task.recurrenceShortSummary, "Monthly")
+        XCTAssertTrue(task.recurrenceIntervalPicked, "shown means held")
+        XCTAssertFalse(task.missingAttributeNames(consideringShelf: task.shelf).contains("Every"))
+    }
+
+    /// The pre-`applyCreationDefaults` state still reports missing — the
+    /// rule did not change, only what creation writes.
+    func test_unconfiguredRecurringTask_stillReportsEveryAsMissing() {
+        let task = makeUnconfiguredRecurringTask()
+
         XCTAssertFalse(task.recurrenceIntervalPicked)
         XCTAssertTrue(task.missingAttributeNames(consideringShelf: task.shelf).contains("Every"))
     }
 
     /// Same guarantee, for `recurrenceTimeMode`'s new default.
-    func test_freshRecurringTask_recurrenceTimeMode_defaultsToMidday_butStillReportsMissing() {
+    /// UPDATED — same reversal as the Every test above. Midday is still the
+    /// default; it now counts as chosen.
+    func test_freshRecurringTask_timeDefaultsToMidday_andCountsAsAnswered() {
         let task = makeRecurringTask()
 
         XCTAssertEqual(task.recurrenceTimeMode, .midday)
         XCTAssertEqual(task.recurrenceTimeMode.label, "Midday")
-        XCTAssertFalse(task.recurrenceTimeModePicked)
-        XCTAssertTrue(task.missingAttributeNames(consideringShelf: task.shelf).contains("Time"))
+        XCTAssertTrue(task.recurrenceTimeModePicked)
+        XCTAssertFalse(task.missingAttributeNames(consideringShelf: task.shelf).contains("Time"))
     }
 
     // MARK: - Part 2: every old two-mode pattern is still reachable, and evaluates the same
@@ -277,7 +313,7 @@ final class RepeatsRedesignTests: XCTestCase {
     /// `recurrenceUnit` at all — simulated here exactly as real old data
     /// would look, with the flag still at its stored default (`false`).
     func test_migration_existingSpecificDateMonthlyTask_readsAsMissingBeforeBackfill_notAfter() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         task.dueDate = day(2026, 9, 17)
         task.recurrenceUnit = .months
         task.recurrenceMode = .specificDate
@@ -343,7 +379,7 @@ final class RepeatsRedesignTests: XCTestCase {
     /// A daily/weekly task is never affected by the backfill at all —
     /// `relativeRecurrencePicked` isn't checked for it either way.
     func test_migration_nonMonthlyTask_backfillIsANoOp() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         task.dueDate = day(2026, 9, 1)
         task.recurrenceUnit = .days
         task.recurrenceIntervalPicked = true
@@ -360,7 +396,7 @@ final class RepeatsRedesignTests: XCTestCase {
     /// really configured, so it should still correctly read as missing
     /// and prompt the user, same as before this migration existed.
     func test_migration_freshUnconfiguredTask_isNotBackfilled() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         task.recurrenceUnit = .months
         XCTAssertNil(task.dueDate)
 

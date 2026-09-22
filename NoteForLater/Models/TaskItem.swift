@@ -1352,22 +1352,84 @@ final class TaskItem {
     /// elsewhere keeps whatever it already was, not auto-set.
     static func makeForDirectCapture(title: String, shelf: Shelf) -> TaskItem {
         let task = TaskItem(title: title, shelf: shelf)
+        task.applyCreationDefaults(shelf: shelf)
         if shelf.isRecurringTasks {
             task.setRecurring(true)
         }
-        if shelf.isTwoMinuteTasks, shelf.effectiveTracksDuration {
-            task.estimatedMinutes = 2
-            task.remainingMinutes = 2
-            task.durationPicked = true
-            // Divisible is deliberately *not* pre-answered here. At 2
-            // minutes the row doesn't exist and isn't reported missing
-            // (see `divisibleMinimumDurationMinutes`), so there's nothing
-            // to answer — and pre-marking it would mean that raising the
-            // duration to an hour reveals a Divisible row already reading
-            // "Not Divisible", as though it had been chosen. It should
-            // read "Not selected", because it hasn't been.
-        }
         return task
+    }
+
+    /// **Every default this card shows at creation, written here so that
+    /// showing one and holding one are the same act.**
+    ///
+    /// The defect this exists to kill: each of these attributes has a
+    /// *value* (from a stored-property default, so the model really does
+    /// hold it) and a companion `...Picked` flag that decides whether it
+    /// counts as answered. `missingAttributeNames` reads the flag, never the
+    /// value — and nothing wrote the flag at creation. So the card displayed
+    /// "Daily" and "Midday" while reporting both as Not Selected, and
+    /// re-choosing the option already on screen was the only way to register
+    /// it. Five rows had it, not the two that got noticed.
+    ///
+    /// **Adding a new attribute here? Decide which kind of default it is.**
+    ///
+    /// - **A real answer** — a value you would be content to save untouched.
+    ///   Set the value *and* its picked flag, together, unconditionally.
+    ///   Repeat, Time and Pattern are these.
+    /// - **A placeholder** — a value that stands in for "nothing chosen yet"
+    ///   and that the card should keep asking about. Set neither flag nor
+    ///   value here. Duration's bare `0` and Divisible are these.
+    ///
+    /// The distinction is not about how confident the default is; it is
+    /// about whether silently saving it would be a lie about what the user
+    /// decided.
+    ///
+    /// Only ever applied at creation — `InboxViewModel.route` and the cards'
+    /// `onMove` handlers move an *existing* task onto a shelf and
+    /// deliberately do not call this, so nothing a task already holds gets
+    /// overwritten by its new shelf.
+    func applyCreationDefaults(shelf: Shelf?) {
+        // ── Real answers: value and flag together ────────────────────────
+        //
+        // REVERSAL: the repeat default was Daily (count 1, unit `.days`).
+        // Set here rather than by changing `recurrenceUnitRaw`'s stored
+        // default, so it applies to newly created tasks only and cannot
+        // reinterpret an existing row that happens to be missing the column.
+        recurrenceIntervalCount = 1
+        recurrenceUnit = .months
+        recurrenceIntervalPicked = true
+
+        recurrenceTimeMode = .midday
+        recurrenceTimeModePicked = true
+
+        // Monthly makes Pattern a live question immediately, so its default
+        // has to register too — otherwise changing the repeat default would
+        // have traded one unregistered row for another.
+        relativeRecurrencePicked = true
+
+        // ── Placeholders: left alone, so the card keeps asking ───────────
+        //
+        // Divisible's `false` is not an answer, it is the absence of one.
+        // Pre-marking it would mean raising the duration to an hour reveals
+        // a Divisible row already reading "Not Divisible" as though it had
+        // been chosen.
+        //
+        // Duration is a placeholder *unless the shelf supplies a real one*:
+        // a bare `0` means "unanswered" and must keep asking, while a
+        // shelf-derived duration is a genuine answer the shelf made on the
+        // task's behalf.
+        if let shelf, shelf.effectiveTracksDuration, let minutes = Self.shelfDefaultDurationMinutes(shelf) {
+            estimatedMinutes = minutes
+            remainingMinutes = minutes
+            durationPicked = true
+        }
+    }
+
+    /// The duration a shelf supplies for a task created on it, or `nil` when
+    /// it supplies none and Duration stays an open question.
+    static func shelfDefaultDurationMinutes(_ shelf: Shelf) -> Int? {
+        if shelf.isTwoMinuteTasks { return 2 }
+        return shelf.defaultDurationMinutes > 0 ? shelf.defaultDurationMinutes : nil
     }
 
     /// Deletes `task` along with every record keyed to it that plain

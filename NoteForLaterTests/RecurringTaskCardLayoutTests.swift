@@ -11,6 +11,24 @@ import SwiftData
 /// for `NightlyReviewView.Step` — see `TaskReviewCard.isRepeatsConfigured`'s
 /// own doc comment for why it was loosened from `private`.
 final class RecurringTaskCardLayoutTests: XCTestCase {
+    /// A task in the state creation *used* to leave: value defaults present,
+    /// picked flags false.
+    ///
+    /// Still a real state — every task created before
+    /// `TaskItem.applyCreationDefaults` existed is in it — and it is what
+    /// the tests using this helper are actually about. They were relying on
+    /// `makeForDirectCapture` to produce it incidentally; now they ask for
+    /// it, which is what they meant all along.
+    private func makeUnconfiguredRecurringTask(title: String = "Water the garden") -> TaskItem {
+        let task = makeRecurringTask(title: title)
+        task.recurrenceIntervalCount = 1
+        task.recurrenceUnit = .days
+        task.recurrenceIntervalPicked = false
+        task.recurrenceTimeModePicked = false
+        task.relativeRecurrencePicked = false
+        return task
+    }
+
     private func makeRecurringTask(title: String = "Water the garden") -> TaskItem {
         let shelf = Shelf(name: "Recurring Tasks")
         shelf.isRecurringTasks = true
@@ -30,7 +48,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     /// Fresh recurring task: "Every"/"Pattern" never touched — must read
     /// as unconfigured (the row's "Not Selected" state) for both modes.
     func test_repeatsUnconfigured_whenIntervalNeverPicked() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
 
         XCTAssertFalse(TaskReviewCard.isRepeatsConfigured(task: task, shelf: task.shelf))
     }
@@ -38,7 +56,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     /// Specific Date: configured once "Every" is picked — Pattern doesn't
     /// apply to this mode at all, so it must not be required.
     func test_repeatsConfigured_specificDate_onceEveryPicked() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         task.recurrenceIntervalPicked = true
 
         XCTAssertTrue(TaskReviewCard.isRepeatsConfigured(task: task, shelf: task.shelf))
@@ -50,7 +68,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     /// as configured, since `recurrenceMode == .relativeDate` folds
     /// Pattern into this same row now.
     func test_repeatsUnconfigured_relativeDate_intervalPickedButPatternNot() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         task.recurrenceMode = .relativeDate
         // "Pattern" is only ever asked for a monthly unit — see
         // `TaskItem.relativeRecurrenceMissing`'s own doc comment for why
@@ -99,7 +117,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     // MARK: - "Time" row: folds in Duration/Divisible for Specific Time
 
     func test_timeUnconfigured_beforeModePicked() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         XCTAssertFalse(TaskReviewCard.isTimeConfigured(task: task, shelf: task.shelf, segmentOptions: []))
     }
 
@@ -189,7 +207,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     /// since `isRepeatsConfigured`/`isStartsConfigured`/`isTimeConfigured`
     /// are themselves built directly on `missingAttributeNames`.
     func test_unconfiguredTask_stillReportsMissingAttributes() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
 
         let missing = task.missingAttributeNames(consideringShelf: task.shelf)
 
@@ -302,7 +320,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     private let shortSummaryCharacterBudget = 32
 
     func test_shortSummary_specificDate_singleInterval_isJustTheFrequencyWord() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         task.recurrenceIntervalPicked = true
 
         XCTAssertEqual(task.recurrenceShortSummary, "Daily")
@@ -448,7 +466,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     /// Nothing answered yet — must seed the *first* row in display
     /// order, not just any unconfigured one.
     func test_initialExpandedRow_recurring_freshTask_seedsRepeats() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
 
         XCTAssertEqual(TaskReviewCard.initialExpandedRow(task: task, shelf: task.shelf, segmentOptions: []), .repeats)
     }
@@ -465,7 +483,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
 
     /// Repeats and Starts both answered, Time isn't.
     func test_initialExpandedRow_recurring_onlyTimeUnanswered_seedsTime() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         task.recurrenceIntervalPicked = true
         task.startDatePicked = true
 
@@ -504,7 +522,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     /// does — they're refinements of an already-answered Pattern, not
     /// additional gates on it.
     func test_repeatsConfigured_relativeDate_onceScopePicked_positionWeekdayStillAtDefaults() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         task.recurrenceUnit = .months
         task.recurrenceIntervalPicked = true
 
@@ -522,7 +540,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     /// `test_repeatsUnconfigured_relativeDate_intervalPickedButPatternNot`,
     /// which already covers this same shape.
     func test_repeatsUnconfigured_relativeDate_intervalPickedScopeNot_thenScopeAnswers() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         task.recurrenceUnit = .months
         task.recurrenceIntervalPicked = true
 
@@ -543,7 +561,7 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     /// is what lets the row's self-collapse condition become true purely
     /// from accepting a default, with no value change at all.
     func test_selectRecurrenceUnit_withValueAlreadyCurrent_stillMarksPicked() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         task.recurrenceUnit = .days
         XCTAssertFalse(task.recurrenceIntervalPicked)
 
