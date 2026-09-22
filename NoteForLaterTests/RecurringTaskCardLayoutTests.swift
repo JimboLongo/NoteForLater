@@ -715,4 +715,80 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
 
         XCTAssertEqual(rows, [.nextStep, .repeats, .canStartBy, .timeMode, .ends])
     }
+
+    // MARK: - A row that becomes relevant expands
+
+    private func makeDurationTask(minutes: Int) -> TaskItem {
+        let shelf = Shelf(name: "Work")
+        shelf.tracksDuration = true
+        let task = TaskItem.makeForDirectCapture(title: "Write the memo", shelf: shelf)
+        task.nextStepDecided = true
+        task.estimatedMinutes = minutes
+        task.remainingMinutes = minutes
+        return task
+    }
+
+    private func segments(_ task: TaskItem) -> [Int] {
+        TaskItem.validSegmentOptions(for: task.estimatedMinutes)
+    }
+
+    /// **Divisible appears collapsed unless something seeds it.**
+    ///
+    /// It is `.hidden` below the hour floor, so it is not in the set
+    /// `initialExpandedRows` builds at `init` — and nothing added it when it
+    /// later appeared. This is the diff that fixes that.
+    func test_divisibleBecomesRelevant_andIsSeededOpen() {
+        let task = makeDurationTask(minutes: 30)
+        let shelf = task.shelf
+        let before = TaskReviewCard.drawableExpandableRows(task: task, shelf: shelf)
+        XCTAssertFalse(before.contains(.divisible), "below the hour floor it cannot be drawn")
+
+        task.estimatedMinutes = 120
+        task.remainingMinutes = 120
+
+        let after = TaskReviewCard.drawableExpandableRows(task: task, shelf: shelf)
+        XCTAssertTrue(after.contains(.divisible), "now drawable")
+        XCTAssertTrue(
+            TaskReviewCard.newlyRelevantExpandableRows(
+                task: task, shelf: shelf, segmentOptions: segments(task), previouslyDrawable: before
+            ).contains(.divisible),
+            "and seeded open, rather than appearing already collapsed"
+        )
+    }
+
+    /// A row that was drawable all along is not re-seeded — otherwise any
+    /// unrelated edit would blow every collapsed row back open.
+    func test_rowsThatWereAlreadyDrawableAreNotReSeeded() {
+        let task = makeDurationTask(minutes: 120)
+        let shelf = task.shelf
+        let before = TaskReviewCard.drawableExpandableRows(task: task, shelf: shelf)
+
+        task.estimatedMinutes = 240
+        task.remainingMinutes = 240
+
+        XCTAssertTrue(
+            TaskReviewCard.newlyRelevantExpandableRows(
+                task: task, shelf: shelf, segmentOptions: segments(task), previouslyDrawable: before
+            ).isEmpty,
+            "nothing newly appeared, so nothing re-opens"
+        )
+    }
+
+    /// An already-answered row that appears stays shut — an expanded row is
+    /// a question, and there is nothing to ask.
+    func test_anAlreadyAnsweredRowIsNotSeededOpen() {
+        let task = makeDurationTask(minutes: 30)
+        let shelf = task.shelf
+        let before = TaskReviewCard.drawableExpandableRows(task: task, shelf: shelf)
+
+        task.estimatedMinutes = 120
+        task.remainingMinutes = 120
+        task.divisiblePicked = true          // answered before it ever appeared
+
+        XCTAssertFalse(
+            TaskReviewCard.newlyRelevantExpandableRows(
+                task: task, shelf: shelf, segmentOptions: segments(task), previouslyDrawable: before
+            ).contains(.divisible)
+        )
+    }
 }

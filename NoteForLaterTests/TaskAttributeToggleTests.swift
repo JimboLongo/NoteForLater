@@ -222,19 +222,38 @@ final class TaskAttributeToggleTests: XCTestCase {
         XCTAssertEqual(task.estimatedMinutes, 0)
     }
 
-    /// If the shelf doesn't actually track duration at all, the field is
-    /// disabled/greyed on the card (`TaskReviewCard.durationAllowed`) —
-    /// defaulting a value into it anyway would be dead data behind a
-    /// control the user can't even reach normally.
-    func test_twoMinuteShelfNotTrackingDuration_doesNotDefaultIt() {
+    /// REVERSED — **its premise stopped being true.**
+    ///
+    /// This asserted that a 2-Minute shelf with Duration tracking off gets
+    /// no duration default, reasoning that "the field is disabled/greyed on
+    /// the card (`TaskReviewCard.durationAllowed`) — defaulting a value into
+    /// it anyway would be dead data behind a control the user can't even
+    /// reach normally."
+    ///
+    /// That was correct when written. `CardRow.duration` has since gained
+    /// the `durationIsTheDestinationTrigger` exception, which returns
+    /// `.shown` — and its own comment says "`.shown`, not `.greyed`: it has
+    /// to stay *editable*, because raising the duration is the way off this
+    /// shelf." So the control is reachable, `durationAllowed` is true, and
+    /// the data is not dead. What was left was a visible, editable,
+    /// *unanswered* row on the one shelf whose whole identity is a duration
+    /// of ≤2 — which is exactly what was reported from the device.
+    ///
+    /// The old assertion is kept as the live one it became: the row is shown
+    /// and the default registers.
+    func test_twoMinuteShelfNotTrackingDuration_stillDefaultsIt() {
         let shelf = Shelf(name: "2-Minute Tasks")
         shelf.isTwoMinuteTasks = true
         shelf.tracksDuration = false
 
         let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
 
-        XCTAssertFalse(task.durationPicked)
-        XCTAssertEqual(task.estimatedMinutes, 0)
+        XCTAssertEqual(
+            CardRow.duration.visibility(task: task, shelf: shelf), .shown,
+            "the premise: the row is reachable and editable here"
+        )
+        XCTAssertTrue(task.durationPicked)
+        XCTAssertEqual(task.estimatedMinutes, 2)
     }
 
     /// Fail-then-pass target: a 2-Minute task must report Divisible and
@@ -1506,7 +1525,19 @@ final class TaskAttributeToggleTests: XCTestCase {
     /// A 2-Minute-shelf task opens with the wheel on ≤2 **and registered** —
     /// the same mechanism, with a shelf-supplied default instead of a
     /// blanket one.
-    func test_twoMinuteShelfTask_savedUntouched_holdsADurationOfTwo() throws {
+    /// UPDATED FIXTURE — this passed while the device failed.
+    ///
+    /// It built a 2-Minute shelf and left `tracksDuration` at its `true`
+    /// default. The real shelf has it **off**, which is legitimate:
+    /// `Shelf.durationIsTheDestinationTrigger` says the Duration row stays
+    /// visible on that shelf regardless, because a duration of ≤2 is how a
+    /// task gets there. So the default was gated on a flag that reads false
+    /// for exactly the shelf the default exists for.
+    ///
+    /// The path was never wrong — this drives `makeForDirectCapture`, which
+    /// is precisely what `ShelfListView.addTask` calls. The *fixture* was:
+    /// it described a shelf configuration the user does not have.
+    func test_twoMinuteShelfTask_withDurationTrackingOff_stillHoldsADurationOfTwo() throws {
         let container = try ModelContainer(
             for: TaskItem.self, Shelf.self, Tag.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
@@ -1514,6 +1545,7 @@ final class TaskAttributeToggleTests: XCTestCase {
         let context = ModelContext(container)
         let shelf = Shelf(name: "2-Minute Tasks")
         shelf.isTwoMinuteTasks = true
+        shelf.tracksDuration = false        // as the real shelf is configured
         context.insert(shelf)
 
         let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
@@ -1564,5 +1596,33 @@ final class TaskAttributeToggleTests: XCTestCase {
 
         XCTAssertFalse(task.divisiblePicked)
         XCTAssertTrue(task.missingAttributeNames(consideringShelf: shelf).contains("Divisible"))
+    }
+
+    /// The other half of the same shelf: Duration tracking *on*. Both
+    /// configurations must produce the ≤2 default, so neither can be fixed
+    /// by breaking the other.
+    func test_twoMinuteShelfTask_withDurationTrackingOn_alsoHoldsADurationOfTwo() {
+        let shelf = Shelf(name: "2-Minute Tasks")
+        shelf.isTwoMinuteTasks = true
+        shelf.tracksDuration = true
+
+        let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf)
+
+        XCTAssertEqual(task.estimatedMinutes, 2)
+        XCTAssertTrue(task.durationPicked)
+    }
+
+    /// An ordinary shelf with Duration tracking off gets no duration
+    /// default — the exemption is the 2-Minute shelf's alone, not a blanket
+    /// loosening.
+    func test_ordinaryShelfWithDurationTrackingOff_getsNoDurationDefault() {
+        let shelf = Shelf(name: "Reference")
+        shelf.tracksDuration = false
+        shelf.defaultDurationMinutes = 45
+
+        let task = TaskItem.makeForDirectCapture(title: "Read the spec", shelf: shelf)
+
+        XCTAssertEqual(task.estimatedMinutes, 0)
+        XCTAssertFalse(task.durationPicked)
     }
 }

@@ -1418,7 +1418,17 @@ final class TaskItem {
         // a bare `0` means "unanswered" and must keep asking, while a
         // shelf-derived duration is a genuine answer the shelf made on the
         // task's behalf.
-        if let shelf, shelf.effectiveTracksDuration, let minutes = Self.shelfDefaultDurationMinutes(shelf) {
+        // `durationIsTheDestinationTrigger` is why this is not just
+        // `effectiveTracksDuration`. The 2-Minute shelf legitimately has its
+        // Duration toggle **off** — the real store's does — and that flag
+        // already says the Duration row stays visible there regardless,
+        // because a duration of ≤2 is how a task reaches that shelf at all.
+        // Gating the default on `effectiveTracksDuration` alone meant the
+        // row was shown while its default was skipped: two rules about the
+        // same shelf disagreeing.
+        if let shelf,
+           shelf.effectiveTracksDuration || shelf.durationIsTheDestinationTrigger,
+           let minutes = Self.shelfDefaultDurationMinutes(shelf) {
             estimatedMinutes = minutes
             remainingMinutes = minutes
             durationPicked = true

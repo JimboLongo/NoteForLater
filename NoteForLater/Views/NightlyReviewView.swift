@@ -2211,6 +2211,12 @@ struct TaskReviewCard: View {
     /// every actual field write happens in the `selectXxx`/`onSelect`
     /// functions that separately, additionally, mutate this.
     @State private var expandedRows: Set<CardRow> = []
+
+    /// Which expandable rows the card could draw last time this was
+    /// checked — the baseline `newlyRelevantExpandableRows` diffs against,
+    /// so a row appearing mid-edit can be told from one that was always
+    /// there. Session-local, never persisted, same as `expandedRows`.
+    @State private var drawableExpandableRows: Set<CardRow> = []
     /// Captured once this card's edits settle in after appearing (past any
     /// one-time backfill), so the action button can tell "nothing's been
     /// touched" (Skip) apart from "something's actually been edited" (Save
@@ -2524,6 +2530,38 @@ struct TaskReviewCard: View {
     /// falls back to `initialExpandedRow` unchanged — at most one row,
     /// whatever's still unanswered, matching the behavior that already
     /// shipped before this split existed.
+    /// Expandable rows the card can draw *right now* — the same
+    /// `scrollBodyOrder`-derived set `initialExpandedRows` seeds a
+    /// newly-created task from, pulled out so it can be recomputed as the
+    /// task changes.
+    static func drawableExpandableRows(task: TaskItem, shelf: Shelf?) -> Set<CardRow> {
+        Set(CardRow.scrollBodyOrder(task: task, shelf: shelf).filter(\.isExpandable))
+    }
+
+    /// Rows that have **become** drawable since the card opened and are
+    /// still unanswered.
+    ///
+    /// A row hidden at seed time is never in `expandedRows`, so when it
+    /// later appears it appears collapsed — Divisible is the one that shows
+    /// this, since it only exists once the duration clears the hour floor.
+    /// Seeding it open here is the same act `initialExpandedRows` performs
+    /// for a newly-created task, just at the moment the row becomes real
+    /// rather than at `init`.
+    ///
+    /// Already-answered rows are excluded for the same reason
+    /// `initialExpandedRow` skips them: an expanded row is a question, and
+    /// there is nothing to ask.
+    static func newlyRelevantExpandableRows(
+        task: TaskItem,
+        shelf: Shelf?,
+        segmentOptions: [Int],
+        previouslyDrawable: Set<CardRow>
+    ) -> Set<CardRow> {
+        drawableExpandableRows(task: task, shelf: shelf)
+            .subtracting(previouslyDrawable)
+            .filter { !isConfigured($0, task: task, shelf: shelf, segmentOptions: segmentOptions) }
+    }
+
     static func initialExpandedRows(task: TaskItem, shelf: Shelf?, segmentOptions: [Int], isNewlyCreated: Bool) -> Set<CardRow> {
         if isNewlyCreated {
             // Every expandable row the card will actually draw — taken
@@ -2940,6 +2978,9 @@ struct TaskReviewCard: View {
             segmentOptions: TaskItem.validSegmentOptions(for: task.estimatedMinutes),
             isNewlyCreated: isNewlyCreated
         ))
+        _drawableExpandableRows = State(
+            initialValue: Self.drawableExpandableRows(task: task, shelf: task.shelf)
+        )
     }
 
     /// nil until "Has due date" is actually answered either way — see
@@ -3163,6 +3204,19 @@ struct TaskReviewCard: View {
             // is selected and would miss the "No" / untap-"Yes" resets
             // that also write `estimatedMinutes` directly.
             task.remainingMinutes = newValue
+        }
+        // A row that was hidden when the card opened is not in
+        // `expandedRows`, so it would appear collapsed. Duration is what
+        // reveals Divisible (the hour floor), so this rides the same
+        // always-mounted body rather than the Divisible row itself — which,
+        // being hidden, is not in the hierarchy to observe its own arrival.
+        .onChange(of: Self.drawableExpandableRows(task: task, shelf: previewedShelf)) { previous, current in
+            expandedRows.formUnion(Self.newlyRelevantExpandableRows(
+                task: task, shelf: previewedShelf,
+                segmentOptions: TaskItem.validSegmentOptions(for: task.estimatedMinutes),
+                previouslyDrawable: previous
+            ))
+            drawableExpandableRows = current
         }
     }
 
