@@ -59,7 +59,7 @@ final class RecurringTaskCardRenderTests: XCTestCase {
         let shelf = Shelf(name: "Recurring Tasks")
         shelf.isRecurringTasks = true
         context.insert(shelf)
-        let task = TaskItem.makeForDirectCapture(title: "Water the garden", shelf: shelf)
+        let task = TaskItem.makeForDirectCapture(title: "Water the garden", shelf: shelf, now: Self.renderAsOf)
         context.insert(task)
         task.isRecurring = true
         task.recurrenceUnit = .months

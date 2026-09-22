@@ -1350,9 +1350,14 @@ final class TaskItem {
     /// onto either shelf later — `InboxViewModel.route`, or either card's
     /// `onMove` handler — never calls this, so a task moved in from
     /// elsewhere keeps whatever it already was, not auto-set.
-    static func makeForDirectCapture(title: String, shelf: Shelf) -> TaskItem {
+    /// `now` exists so a test or a render fixture can pin the Can Start By
+    /// default — `RecurringTaskCardRenderTests
+    /// .test_everyFixtureDateIsFixed_notDerivedFromTheClock` fails outright
+    /// if a fixture's dates move with the clock, and this default would
+    /// otherwise make every baseline expire overnight.
+    static func makeForDirectCapture(title: String, shelf: Shelf, now: Date = .now) -> TaskItem {
         let task = TaskItem(title: title, shelf: shelf)
-        task.applyCreationDefaults(shelf: shelf)
+        task.applyCreationDefaults(shelf: shelf, now: now)
         if shelf.isRecurringTasks {
             task.setRecurring(true)
         }
@@ -1375,7 +1380,15 @@ final class TaskItem {
     ///
     /// - **A real answer** — a value you would be content to save untouched.
     ///   Set the value *and* its picked flag, together, unconditionally.
-    ///   Repeat, Time and Pattern are these.
+    ///   Repeat, Time, Pattern and Can Start By are these.
+    ///
+    ///   Can Start By joined the group later, and is worth a word because it
+    ///   was previously in neither: it displayed *no* default, so its shown
+    ///   state honestly matched its stored one and there was nothing to fix.
+    ///   Giving it a default is a product decision, not a defect repair —
+    ///   and having made it, it belongs here rather than being rendered and
+    ///   left unheld, which is the whole failure this function exists to
+    ///   prevent.
     /// - **A placeholder** — a value that stands in for "nothing chosen yet"
     ///   and that the card should keep asking about. Set neither flag nor
     ///   value here. Duration's bare `0` and Divisible are these.
@@ -1388,7 +1401,9 @@ final class TaskItem {
     /// `onMove` handlers move an *existing* task onto a shelf and
     /// deliberately do not call this, so nothing a task already holds gets
     /// overwritten by its new shelf.
-    func applyCreationDefaults(shelf: Shelf?) {
+    /// `now` is the creation instant — see the start-date block below for
+    /// what that means when a review session runs past midnight.
+    func applyCreationDefaults(shelf: Shelf?, now: Date = .now, calendar: Calendar = .current) {
         // ── Real answers: value and flag together ────────────────────────
         //
         // REVERSAL: the repeat default was Daily (count 1, unit `.days`).
@@ -1406,6 +1421,28 @@ final class TaskItem {
         // has to register too — otherwise changing the repeat default would
         // have traded one unregistered row for another.
         relativeRecurrencePicked = true
+
+        // **Can Start By defaults to today.** `setStartDate` writes the
+        // value and `startDatePicked` in one call, so it cannot register
+        // half of an answer.
+        //
+        // **Ordering matters and is relied on**: this runs before
+        // `setRecurring(true)` in `makeForDirectCapture`, and
+        // `makeRecurring` anchors `dueDate` off `startDate` when one is
+        // present. Setting the anchor first is what lets a recurring task
+        // come out of creation fully anchored. `setStartDate` would also
+        // sync it directly, but only for a task that is *already* recurring
+        // — which at this point it is not.
+        //
+        // **Which "today" — the creation instant's, not the day being
+        // planned.** A task added at 00:30 during a review session that
+        // began the previous evening gets the *new* calendar day. That is
+        // deliberate: Can Start By means "not before this", and the earliest
+        // you could start is now, which is a fact about the clock rather
+        // than about which day the session is planning. The alternative
+        // would date a task earlier than it existed. Callers that need a
+        // different answer pass `now`.
+        setStartDate(now, calendar: calendar)
 
         // ── Placeholders: left alone, so the card keeps asking ───────────
         //

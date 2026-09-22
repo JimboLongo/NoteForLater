@@ -43,6 +43,8 @@ final class RepeatsRedesignTests: XCTestCase {
         task.recurrenceIntervalPicked = false
         task.recurrenceTimeModePicked = false
         task.relativeRecurrencePicked = false
+        // Can Start By had no default either, before it gained one.
+        task.clearStartDate()
         return task
     }
 

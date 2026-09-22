@@ -26,6 +26,8 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
         task.recurrenceIntervalPicked = false
         task.recurrenceTimeModePicked = false
         task.relativeRecurrencePicked = false
+        // Can Start By had no default either, before it gained one.
+        task.clearStartDate()
         return task
     }
 
@@ -103,8 +105,10 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
 
     // MARK: - "Starts" row
 
+    /// UPDATED FIXTURE — Can Start By is answered at creation now, so an
+    /// *unanswered* one has to be asked for. The rule is unchanged.
     func test_startsUnconfigured_beforeStartDatePicked() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         XCTAssertFalse(TaskReviewCard.isStartsConfigured(task: task, shelf: task.shelf))
     }
 
@@ -474,9 +478,14 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     /// Repeats answered, Starts isn't — must skip past the already-
     /// configured row to the next unconfigured one, not stop at the
     /// first row in the list regardless of its state.
+    /// UPDATED FIXTURE — same reason as `test_startsUnconfigured_…`: the
+    /// subject is "Starts is the only thing left unanswered", which now
+    /// needs constructing rather than being the creation state.
     func test_initialExpandedRow_recurring_repeatsAnsweredStartsNot_seedsStarts() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         task.recurrenceIntervalPicked = true
+        task.recurrenceTimeModePicked = true
+        task.relativeRecurrencePicked = true
 
         XCTAssertEqual(TaskReviewCard.initialExpandedRow(task: task, shelf: task.shelf, segmentOptions: []), .canStartBy)
     }
@@ -603,11 +612,13 @@ final class RecurringTaskCardLayoutTests: XCTestCase {
     /// A reopened, already-saved task with exactly one field left
     /// unanswered opens with only that field expanded — `initialExpandedRows`
     /// wrapping `initialExpandedRow` unchanged, per the earlier requirement.
+    /// UPDATED FIXTURE — as above.
     func test_initialExpandedRows_recurring_existingTask_oneUnanswered_seedsOnlyThatRow() {
-        let task = makeRecurringTask()
+        let task = makeUnconfiguredRecurringTask()
         task.recurrenceIntervalPicked = true
         // Starts left unanswered.
         task.recurrenceTimeModePicked = true
+        task.relativeRecurrencePicked = true
 
         let rows = TaskReviewCard.initialExpandedRows(task: task, shelf: task.shelf, segmentOptions: [], isNewlyCreated: false)
 

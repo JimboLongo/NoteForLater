@@ -135,22 +135,36 @@ final class TaskAttributeToggleTests: XCTestCase {
         XCTAssertFalse(task.isRecurring)
     }
 
-    /// `makeRecurring()` deliberately does *not* seed an anchor anymore —
-    /// a new recurring task starts with Start Date at "Not Selected," so
-    /// it has to be consciously set before this can actually place on
-    /// the calendar (`hasRecurringOccurrence` requires `dueDate`). That
-    /// blank anchor must not read as "missing Due Date" in the attribute
-    /// review queue either — a recurring task is never asked that
-    /// question at all (`dueDateMissing` excludes it outright), so
-    /// nothing here should ever flag it.
-    func test_makeForDirectCapture_leavesAnchorUnset_andDoesNotReportDueDateMissing() {
+    /// REVERSED — **and this one has a real consequence, stated plainly.**
+    ///
+    /// This asserted that a new recurring task starts with Start Date at
+    /// "Not Selected", reasoning that the anchor "has to be consciously set
+    /// before this can actually place on the calendar
+    /// (`hasRecurringOccurrence` requires `dueDate`)". That was a deliberate
+    /// guard against a recurring task silently beginning to place itself.
+    ///
+    /// Can Start By now defaults to today on every task type, which means a
+    /// recurring task **is** anchored the moment it is created and will
+    /// start placing without the anchor being chosen. That is the behaviour
+    /// the old test existed to prevent, and it is the accepted cost of the
+    /// default: the alternative is a row displaying a date it has not
+    /// written, which is the exact defect `applyCreationDefaults` exists to
+    /// remove. `makeRecurring` reads `startDate` and syncs `dueDate` off it,
+    /// so the anchor and the due date arrive together rather than half-set.
+    ///
+    /// The Due Date half of the original still holds and is kept: a
+    /// recurring task is never asked "Has due date" and must never be
+    /// flagged missing one, whatever its anchor is.
+    func test_makeForDirectCapture_anchorsToday_andStillDoesNotReportDueDateMissing() {
         let shelf = Shelf(name: "Recurring Tasks")
         shelf.isRecurringTasks = true
+        let created = Calendar.current.date(from: DateComponents(year: 2026, month: 6, day: 1))!
 
-        let task = TaskItem.makeForDirectCapture(title: "Water the garden", shelf: shelf)
+        let task = TaskItem.makeForDirectCapture(title: "Water the garden", shelf: shelf, now: created)
 
-        XCTAssertNil(task.startDate, "a new recurring task must start with Start Date unset")
-        XCTAssertNil(task.dueDate)
+        XCTAssertEqual(task.startDate, created, "anchored at creation")
+        XCTAssertTrue(task.startDatePicked)
+        XCTAssertNotNil(task.dueDate, "and `makeRecurring` synced the anchor through")
         XCTAssertFalse(task.missingAttributeNames(consideringShelf: shelf).contains("Due Date"), "a recurring task is never asked \"Has due date\" — it must never be flagged missing one")
     }
 
@@ -386,19 +400,17 @@ final class TaskAttributeToggleTests: XCTestCase {
     /// defaults that aren't evidence anyone actually chose them). Without
     /// these three checks, a recurring task in this state would silently
     /// never schedule anything instead of prompting to be finished.
-    /// UPDATED — Every and Time no longer surface as missing on a fresh
-    /// task, because creation now registers the defaults it displays (see
-    /// `TaskItem.applyCreationDefaults`). Start Date still does, and that is
-    /// the useful half: it has no default, so it is a genuine question and
-    /// must keep being asked.
-    func test_freshRecurringTask_surfacesOnlyStartDateAsMissing() {
+    /// UPDATED twice — first Every/Time/Pattern stopped surfacing as
+    /// missing, then Start Date joined them when it gained a default of
+    /// today. A freshly created recurring task is now fully answered.
+    func test_freshRecurringTask_surfacesNothingAsMissing() {
         let shelf = Shelf(name: "Recurring Tasks")
         shelf.isRecurringTasks = true
         let task = TaskItem.makeForDirectCapture(title: "Water the garden", shelf: shelf)
 
         let missing = task.missingAttributeNames(consideringShelf: shelf)
 
-        XCTAssertTrue(missing.contains("Start Date"), "no default, so still a real question")
+        XCTAssertFalse(missing.contains("Start Date"), "defaults to today now, and registers")
         XCTAssertFalse(missing.contains("Every"))
         XCTAssertFalse(missing.contains("Time"))
         XCTAssertFalse(missing.contains("Pattern"))
@@ -1624,5 +1636,97 @@ final class TaskAttributeToggleTests: XCTestCase {
 
         XCTAssertEqual(task.estimatedMinutes, 0)
         XCTAssertFalse(task.durationPicked)
+    }
+
+    // MARK: - Can Start By defaults to today, on every task type
+
+    private let creationDay = Calendar.current.date(from: DateComponents(year: 2026, month: 6, day: 1))!
+
+    /// All three task types, because the ask was explicitly all three and a
+    /// per-type path is exactly what `applyCreationDefaults` exists to avoid.
+    func test_canStartBy_defaultsToToday_onEveryTaskType() {
+        let regular = Shelf(name: "Work")
+        let recurring = Shelf(name: "Recurring Tasks"); recurring.isRecurringTasks = true
+        let twoMinute = Shelf(name: "2-Minute Tasks"); twoMinute.isTwoMinuteTasks = true; twoMinute.tracksDuration = false
+
+        for shelf in [regular, recurring, twoMinute] {
+            let task = TaskItem.makeForDirectCapture(title: "T", shelf: shelf, now: creationDay)
+            XCTAssertEqual(task.startDate, creationDay, shelf.name)
+            XCTAssertTrue(task.startDatePicked, shelf.name)
+            XCTAssertFalse(
+                task.missingAttributeNames(consideringShelf: shelf).contains("Start Date"), shelf.name
+            )
+        }
+    }
+
+    /// **Imported tasks stay out** — structurally, not by a flag.
+    /// `TaskImportService` builds tasks through `TaskItem.init` directly and
+    /// never touches `applyCreationDefaults`, so an imported due date cannot
+    /// be overridden by an anchor-today fallback.
+    func test_importedTasksGetNoCreationDefaults() {
+        let imported = TaskItem(title: "From CSV", dueDate: creationDay)
+
+        XCTAssertNil(imported.startDate, "no anchor stamped over the import")
+        XCTAssertFalse(imported.startDatePicked)
+        XCTAssertEqual(imported.dueDate, creationDay, "the imported due date survives")
+    }
+
+    /// **The 2-minute push machinery is undisturbed.** The capture now holds
+    /// today rather than nil, which is correct — undo restores where the
+    /// task actually was — and the pushed date still wins while the push is
+    /// outstanding.
+    func test_twoMinutePushRoundTrip_withADefaultedStartDate() throws {
+        let container = try ModelContainer(
+            for: TaskItem.self, Shelf.self, Tag.self, TaskMissRecord.self, TaskCompletionRecord.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let shelf = Shelf(name: "2-Minute Tasks"); shelf.isTwoMinuteTasks = true
+        context.insert(shelf)
+        let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf, now: creationDay)
+        context.insert(task)
+        let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: creationDay)!
+
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(task, planDate: tomorrow, missedOn: creationDay, context: context)
+        }
+
+        XCTAssertEqual(task.startDate, tomorrow, "pushed")
+        XCTAssertEqual(task.startDateBeforePush, creationDay, "captured where it actually was, not nil")
+        XCTAssertTrue(task.startDatePickedBeforePush)
+
+        let record = try XCTUnwrap(TaskMissRecord.records(for: task, in: context).first)
+        TwoMinutePush.undo(record, for: task, context: context)
+
+        XCTAssertEqual(task.startDate, creationDay, "restored to the default, not cleared to nil")
+        XCTAssertTrue(task.startDatePicked)
+    }
+
+    /// The display day is unchanged for a fresh 2-minute task — it was
+    /// `createdAt` via the `??` fallback, and is now `startDate` directly.
+    func test_twoMinuteDisplayDayUnchangedByTheDefault() {
+        let shelf = Shelf(name: "2-Minute Tasks"); shelf.isTwoMinuteTasks = true
+        let task = TaskItem.makeForDirectCapture(title: "Water the plant", shelf: shelf, now: creationDay)
+
+        XCTAssertEqual(task.twoMinuteDisplayDay(), creationDay)
+    }
+
+    /// **The after-midnight question, pinned.** A task created at 00:30
+    /// takes the *new* calendar day, not the evening the review session
+    /// began on. Can Start By means "not before this", and the earliest you
+    /// could start is now — a fact about the clock, not about which day is
+    /// being planned. Dating it to the session's day would date the task
+    /// earlier than it existed.
+    func test_taskCreatedAfterMidnight_anchorsToTheNewDay() {
+        let shelf = Shelf(name: "Work")
+        let justAfterMidnight = Calendar.current.date(
+            from: DateComponents(year: 2026, month: 6, day: 2, hour: 0, minute: 30))!
+
+        let task = TaskItem.makeForDirectCapture(title: "Late capture", shelf: shelf, now: justAfterMidnight)
+
+        XCTAssertEqual(
+            task.startDate, Calendar.current.date(from: DateComponents(year: 2026, month: 6, day: 2)),
+            "June 2, not the June 1 evening the session started on"
+        )
     }
 }
