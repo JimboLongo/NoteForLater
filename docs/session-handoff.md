@@ -8,6 +8,52 @@ repeatedly this session — the crash-surface item at the bottom of this file
 exists only because a test actually ran and something broke, not because
 anyone inferred it.
 
+**Look at the artifact before inferring from its statistics.**
+
+Six render baselines failed at once with **62–70% of pixels differing** and
+a max channel delta of 255. That reads as a content regression, and it was
+treated as one. An hour went into pixel statistics: bounding boxes, a
+search across ±1200px for a vertical translation that might align the two
+(the best offset still left 32% differing, "so it cannot be a shift"),
+sampling background pixels to test a light/dark flip, then sweeping five
+non-accessibility Dynamic Type sizes.
+
+Then the two images were opened side by side and the answer was instant:
+**the baselines had been recorded at an accessibility text size**, and a
+`simctl erase` had reset the simulator to `large`. One more sweep — this
+time including the accessibility sizes — found `accessibility-extra-extra-
+extra-large` at zero failures. No baseline needed re-recording; the
+reference had never been lost, only the environment.
+
+*The lesson: when a visual artifact is wrong, look at it. Diff statistics
+describe a picture without showing it, and every inference drawn from them
+above was locally reasonable and globally wrong. Opening the PNG was
+available the whole time and would have cost thirty seconds.*
+
+The second-order lesson is in `RecurringTaskCardRenderTests
+.expectedContentSize` now: the harness already pinned width, scale and
+clock — each after a baseline turned out to be a function of the machine —
+and Dynamic Type was the remaining unpinned input. It now fails loudly with
+the expected value and the exact `simctl` command, rather than surfacing as
+six fake content regressions.
+
+**Never mutate — or construct — the engagement timers from a test.**
+
+`InboxEngagementTimer` and `TwoMinuteEngagementTimer` are main-actor
+isolated `@Observable` classes. Constructing one in a synchronous XCTest,
+or mutating one from any test, corrupts the heap (`pointer being freed was
+not allocated`). XCTest then aborts the bundle mid-run and reports a
+**truncated count with 0 failures** — 109 of 742 on the run that exposed
+this, looking exactly like a pass.
+
+That has now happened three times in one session. The note is therefore
+duplicated at the timers' own construction site in `NightlyReviewView`,
+because a handoff entry demonstrably was not reaching the moment the
+mistake gets made. When a feature needs to bypass a timer, hold the bypass
+in view state and read it *beside* the timer (see `forceSkippedSteps`) —
+that keeps the rule a plain function a test can call without touching an
+`@Observable` at all.
+
 **Sabotage practice — never restore with `git checkout`. Copy the file to
 the scratchpad first and restore from the copy.**
 
