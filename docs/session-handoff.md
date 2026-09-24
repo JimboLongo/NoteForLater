@@ -54,31 +54,52 @@ in view state and read it *beside* the timer (see `forceSkippedSteps`) —
 that keeps the rule a plain function a test can call without touching an
 `@Observable` at all.
 
-**Sabotage practice — never restore with `git checkout`. Copy the file to
-the scratchpad first and restore from the copy.**
+## Sabotage procedure
 
-Sabotage means editing a source file, running the suite to see what goes
-red, then putting the file back. `git checkout <file>` reverts it to HEAD —
-which also discards every *uncommitted* change in that file, including the
-new tests written minutes earlier for the very thing being sabotaged.
-
-This happened twice in one session. Once on `DayTimelineGridView.swift`,
-losing the routing fix being verified; once on `TwoMinutePushTests.swift`,
-losing all seven new ledger tests. Both were caught only by the suite count
-reading lower than expected (707 where 714 was due) — **nothing fails when
-tests go missing.** The suite gets smaller and stays green, exactly the
-silent-loss shape the section below describes for deleted tests.
-
-The workflow that does not have this failure mode:
+**Run these steps in this order, every time. Step 1 is unconditional — it
+runs before you have decided which file you are going to break, and whether
+or not you expect to need it.**
 
 ```
-cp <file> $SCRATCH/x.ok      # before the first sabotage
-... sabotage, run, cp $SCRATCH/x.ok <file> ... # restore from the copy
+# 1. SNAPSHOT FIRST — always, before touching anything.
+cp <every file this sabotage might touch> $SCRATCH/
+
+# 2. Record the baseline count.
+xcodebuild test ... | grep "Executed"      # e.g. 747, 0 failures
+
+# 3. Break one rule.
+# 4. Run. Note the failure count.
+# 5. RESTORE BY COPYING BACK.
+cp $SCRATCH/<file> <file>
+
+# 6. Repeat 3-5 per sabotage.
+# 7. Re-run and confirm the count matches step 2 before believing any number.
 ```
 
-And check the restored suite count matches the pre-sabotage baseline before
-believing any of the numbers. A sabotage count is only meaningful if the
-tests it was measured against still exist.
+**`git checkout <file>` must never appear in a sabotage.** Not as a
+fallback, not "just this once because the file is clean". If step 1 always
+ran, restoring is always a copy back and the question never arises. That
+ordering is the entire fix: it removes the decision rather than asking you
+to make it correctly under time pressure.
+
+**Why this is a procedure and not a warning.** `git checkout <file>` reverts
+to HEAD, discarding every *uncommitted* change in that file — including the
+tests written minutes earlier for the thing being sabotaged. It happened
+**three times in a single session**, the third time hours after the warning
+below had been written into this very file by the same person who then made
+the mistake again. A note that says "don't" was read, agreed with, and not
+followed, because the reach for `git checkout` happens mid-flow and does not
+feel like a decision. Removing the need for it works; reminding does not.
+
+Each occurrence: `DayTimelineGridView.swift` (lost the routing fix under
+test), `TwoMinutePushTests.swift` (lost seven ledger tests),
+`TwoMinutePushTests.swift` again (lost five force-skip tests).
+
+**All three were caught only by the suite count** — 707 where 714 was due,
+742 where 747 was due. **Nothing fails when tests go missing**: the suite
+shrinks and stays green, the same silent-loss shape described below for
+deleted tests. Step 7 exists for exactly this, and is the only thing that
+caught any of them.
 
 **Deletion practice, general — a deletion list is a hypothesis, not an
 inventory. Re-derive every site by reading it at delete time.**
