@@ -9,6 +9,7 @@ import SwiftData
 /// a schedule generates).
 struct TaskStatsView: View {
     @Query(sort: \TaskCompletionRecord.completedAt, order: .reverse) private var records: [TaskCompletionRecord]
+    @Query private var forceSkips: [ForceSkipRecord]
 
     var body: some View {
         List {
@@ -47,6 +48,10 @@ struct TaskStatsView: View {
                         StatRow(label: "Most Pushed Task", value: "—", detail: "Nothing's been pushed yet")
                     }
                     StatRow(label: "Total Pushes Overall", value: "\(totalPushes)")
+                    // Global, and derived from records like every other
+                    // number here — see `ForceSkipRecord`. A force skip has
+                    // no task, so there is no per-task shape for it.
+                    StatRow(label: "Force Skips", value: "\(forceSkips.count)")
                 }
             }
         }

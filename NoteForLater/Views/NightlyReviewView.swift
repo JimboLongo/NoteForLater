@@ -49,6 +49,19 @@ struct NightlyReviewView: View {
     /// single, view-owned instance rather than something
     /// `startAttributeReviewSession()` creates fresh each time it builds
     /// `attributeReviewSession`.
+    // ⚠️ **These timers are main-actor isolated. Never construct one in a
+    // synchronous XCTest, and never mutate one from a test at all.**
+    //
+    // Doing so corrupts the heap — `pointer being freed was not allocated`
+    // — which aborts the bundle mid-run. XCTest then reports a *truncated*
+    // count with **0 failures**, so the suite looks like it passed while
+    // most of it never ran. That has happened three separate times in this
+    // codebase, each time costing an hour before anyone noticed 109 of 742.
+    //
+    // `InboxEngagementTests` shows the safe shape: a test class with no
+    // `ModelContainer` that only reads. The force-skip bypass is held in
+    // `forceSkippedSteps` below — view state — precisely so no test ever
+    // needs to reach for a timer to exercise it.
     @State private var inboxEngagementTimer = InboxEngagementTimer()
     /// Snapshotted the moment the 2-Minute Tasks step is entered (see
     /// `advance()`) rather than computed live off `!task.isCompleted` — so
@@ -142,6 +155,18 @@ struct NightlyReviewView: View {
     /// One budget per review session — see `TwoMinuteEngagementTimer`.
     /// Held here, not in the step, so leaving and returning resumes.
     @State private var twoMinuteEngagementTimer = TwoMinuteEngagementTimer()
+
+    /// Steps whose engagement timer has been deliberately bypassed this
+    /// session — see `ForceSkipRecord`.
+    ///
+    /// **View state, not a flag on the timer.** The first build of this
+    /// mutated the timers directly and crashed the test bundle (see the
+    /// warning above). Holding it here leaves those objects untouched, and
+    /// the rule that reads it is a plain function a test can call.
+    @State private var forceSkippedSteps: Set<Step> = []
+    /// The step a force skip is being confirmed for — non-nil only while
+    /// the dialog is up, so the wording can name it.
+    @State private var forceSkipConfirmation: Step?
     @State private var acknowledgedAtRiskTaskIDs: Set<UUID> = []
     @State private var atRiskTaskCardTarget: TaskItem?
     /// Drives the "X is empty — skipped" auto-skip toast (see
@@ -375,6 +400,19 @@ struct NightlyReviewView: View {
                     }
                 }
             }
+            // **One dialog, both hosts, and the skip never happens on the
+            // long press itself** — only from the confirming button here.
+            .confirmationDialog(
+                forceSkipMessage,
+                isPresented: isConfirmingForceSkip,
+                titleVisibility: .visible
+            ) {
+                Button("Skip the Wait", role: .destructive) {
+                    if let skipStep = forceSkipConfirmation { performForceSkip(skipStep) }
+                    forceSkipConfirmation = nil
+                }
+                Button("Cancel", role: .cancel) { forceSkipConfirmation = nil }
+            }
             .safeAreaInset(edge: .bottom) {
                 navBar
             }
@@ -399,6 +437,10 @@ struct NightlyReviewView: View {
                     shelves: routableInboxShelves,
                     queue: session.queue,
                     engagementTimer: session.engagementTimer,
+                    // The bypass is held here, not in the timer — the sheet
+                    // reads it and asks the parent to record the skip.
+                    isForceSkipped: ForceSkipRecord.isBypassed(Step.inbox, in: forceSkippedSteps),
+                    onForceSkip: { performForceSkip(.inbox) },
                     onAllCaughtUpClose: {
                         // Review actually finished here (not an early
                         // Cancel) — no reason to make the user tap Next
@@ -1589,8 +1631,47 @@ struct NightlyReviewView: View {
     }
 
     private var twoMinuteCanProceed: Bool {
+        // The bypass is checked *beside* the timer, never written into it —
+        // see `forceSkippedSteps`.
+        if ForceSkipRecord.isBypassed(Step.twoMinuteTasks, in: forceSkippedSteps) { return true }
         let counts = twoMinuteUnresolvedCounts
         return twoMinuteEngagementTimer.canProceed(missed: counts.missed, unanswered: counts.unanswered)
+    }
+
+    /// **The one force-skip path**, whichever host asked for it. Records the
+    /// skip and marks the step bypassed; touches no timer, and deliberately
+    /// leaves the must-be-marked gates alone.
+    private func performForceSkip(_ skipStep: Step) {
+        ForceSkipRecord.record(step: skipStep.skipLabel, in: modelContext)
+        forceSkippedSteps.insert(skipStep)
+    }
+
+    /// Whether a must-be-marked gate is *also* holding Next — what the
+    /// confirmation has to be honest about.
+    private func isAlsoGateBlocked(_ candidate: Step) -> Bool {
+        switch candidate {
+        case .twoMinuteTasks: return !unresolvedTwoMinuteRows.isEmpty
+        case .habits: return !unresolvedHabitOccurrencesForGate.isEmpty
+        case .today: return !unresolvedGateReviewItems.isEmpty
+        default: return false
+        }
+    }
+
+    /// Extracted out of the dialog's argument list: inlined there it pushed
+    /// `body` past the type-checker's budget.
+    private var forceSkipMessage: String {
+        guard let skipStep = forceSkipConfirmation else { return "" }
+        return ForceSkipRecord.confirmationMessage(
+            stepName: skipStep.skipLabel,
+            alsoBlockedByGate: isAlsoGateBlocked(skipStep)
+        )
+    }
+
+    private var isConfirmingForceSkip: Binding<Bool> {
+        Binding(
+            get: { forceSkipConfirmation != nil },
+            set: { if !$0 { forceSkipConfirmation = nil } }
+        )
     }
 
     /// "1:47", floored at "0:00" — same shape as
@@ -1676,6 +1757,18 @@ struct NightlyReviewView: View {
                         )
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        // **Force skip lives on the thing making you wait.**
+                        // Not the Next button: it is `.disabled` while
+                        // gated, and a disabled SwiftUI Button receives no
+                        // gestures — dead in exactly the situation this
+                        // exists for. This label only appears while a timer
+                        // is running, so the affordance exists only when it
+                        // means something, and nothing else on the row is
+                        // interactive for it to compete with.
+                        .contentShape(Rectangle())
+                        .onLongPressGesture(minimumDuration: 0.45) {
+                            forceSkipConfirmation = .twoMinuteTasks
+                        }
                     }
                 }
             }

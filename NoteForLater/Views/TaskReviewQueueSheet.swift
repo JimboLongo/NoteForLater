@@ -25,6 +25,16 @@ struct TaskReviewQueueSheet: View {
     /// `advance()`, the "Skip Remaining" gate, and the countdown shown in
     /// the toolbar.
     let engagementTimer: InboxEngagementTimer
+    /// Whether this step's timer has been force-skipped — held by
+    /// `NightlyReviewView`, never written into the timer. See
+    /// `ForceSkipRecord`.
+    var isForceSkipped: Bool = false
+    /// Long-pressing this sheet's own countdown asks to force-skip. The
+    /// sheet confirms locally (it is presented modally, so a dialog from the
+    /// review underneath would not appear) and then calls this — the skip
+    /// and its record live in one place, `performForceSkip`.
+    var onForceSkip: (() -> Void)? = nil
+    @State private var isConfirmingForceSkip = false
     /// Fires when Close is tapped specifically from the "All Caught Up"
     /// screen — not from the toolbar Cancel shown mid-review — so a caller
     /// that wants to keep moving once review is genuinely finished (see
@@ -51,10 +61,14 @@ struct TaskReviewQueueSheet: View {
     @State private var tagQueue: [Tag] = []
     @State private var currentTag: Tag?
 
-    init(shelves: [Shelf], queue: [TaskItem], engagementTimer: InboxEngagementTimer, onAllCaughtUpClose: (() -> Void)? = nil) {
+    init(shelves: [Shelf], queue: [TaskItem], engagementTimer: InboxEngagementTimer,
+         isForceSkipped: Bool = false, onForceSkip: (() -> Void)? = nil,
+         onAllCaughtUpClose: (() -> Void)? = nil) {
         self.shelves = shelves
         self.initialQueue = queue
         self.engagementTimer = engagementTimer
+        self.isForceSkipped = isForceSkipped
+        self.onForceSkip = onForceSkip
         self.onAllCaughtUpClose = onAllCaughtUpClose
     }
 
@@ -155,6 +169,13 @@ struct TaskReviewQueueSheet: View {
                         Text(Self.formattedRemaining(engagementTimer.remaining))
                             .font(.subheadline.monospacedDigit())
                             .foregroundStyle(engagementTimer.isExpired ? .secondary : .primary)
+                            // Same host as the review's own force skip: the
+                            // thing making you wait. A plain `Text` in a
+                            // toolbar slot with no other gesture on it.
+                            .contentShape(Rectangle())
+                            .onLongPressGesture(minimumDuration: 0.45) {
+                                isConfirmingForceSkip = true
+                            }
                     }
                     ToolbarItem(placement: .topBarTrailing) {
                         // Hidden once nothing is left to address — a countdown with an
@@ -163,7 +184,7 @@ struct TaskReviewQueueSheet: View {
                         // teardown are untouched, so resume-not-reset is unchanged.
                         if !AttributeReviewSession.queueCandidates(from: initialQueue).isEmpty {
                             Button(skipRemainingTitle, action: skipRemaining)
-                                .disabled(!engagementTimer.isExpired)
+                                .disabled(!(isForceSkipped || engagementTimer.isExpired))
                         }
                     }
                     ToolbarItem(placement: .confirmationAction) {
@@ -171,6 +192,16 @@ struct TaskReviewQueueSheet: View {
                             .tint(.green)
                     }
                 }
+            }
+            .confirmationDialog(
+                // The Inbox step has no must-be-marked gate, so the plain
+                // wording is the honest one here.
+                ForceSkipRecord.confirmationMessage(stepName: "Inbox", alsoBlockedByGate: false),
+                isPresented: $isConfirmingForceSkip,
+                titleVisibility: .visible
+            ) {
+                Button("Skip the Wait", role: .destructive) { onForceSkip?() }
+                Button("Cancel", role: .cancel) { isConfirmingForceSkip = false }
             }
             // Ticks the engagement floor once a second — only while this
             // sheet is actually on screen, since `.onReceive`'s

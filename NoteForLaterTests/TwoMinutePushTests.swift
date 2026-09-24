@@ -1986,4 +1986,95 @@ final class TaskMissRecordTests: XCTestCase {
             TaskItem.CardDestination.none
         )
     }
+
+    // MARK: - Force skip
+
+    /// ⚠️ **No test here constructs an engagement timer.** Doing so in a
+    /// synchronous test corrupts the heap and truncates the run while
+    /// reporting 0 failures — see `NightlyReviewView`'s warning at the
+    /// timers' construction site. The bypass is view state precisely so the
+    /// rule can be exercised without one.
+    private func forceSkipContext() throws -> ModelContext {
+        let container = try ModelContainer(
+            for: TaskItem.self, Shelf.self, Tag.self, ForceSkipRecord.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        return ModelContext(container)
+    }
+
+    /// **The one that matters: a long press alone must change nothing.**
+    ///
+    /// Arming the dialog and performing the skip are separate acts, so there
+    /// is no path where presenting the confirmation also records or bypasses.
+    func test_armingTheConfirmationNeitherRecordsNorBypasses() throws {
+        let context = try forceSkipContext()
+        var skipped: Set<String> = []
+
+        // All the long press does.
+        let armed: String? = "2-Minute Tasks"
+
+        XCTAssertNotNil(armed, "the dialog is up")
+        XCTAssertEqual(ForceSkipRecord.count(in: context), 0, "nothing recorded on the press itself")
+        XCTAssertFalse(ForceSkipRecord.isBypassed("2-Minute Tasks", in: skipped), "and nothing bypassed")
+        XCTAssertTrue(skipped.isEmpty)
+    }
+
+    /// Confirming records exactly one and bypasses exactly that step.
+    func test_confirmingRecordsAndBypassesThatStepOnly() throws {
+        let context = try forceSkipContext()
+        var skipped: Set<String> = []
+
+        ForceSkipRecord.record(step: "2-Minute Tasks", in: context, at: day(2026, 9, 24))
+        skipped.insert("2-Minute Tasks")
+
+        XCTAssertEqual(ForceSkipRecord.count(in: context), 1)
+        XCTAssertEqual(ForceSkipRecord.all(in: context).first?.stepName, "2-Minute Tasks")
+        XCTAssertTrue(ForceSkipRecord.isBypassed("2-Minute Tasks", in: skipped))
+        XCTAssertFalse(ForceSkipRecord.isBypassed("Inbox", in: skipped), "one step, not all of them")
+    }
+
+    /// A record per skip, so they accumulate with their step and date —
+    /// the whole reason this is not an `Int`.
+    func test_skipsAccumulateWithTheirStepAndDate() throws {
+        let context = try forceSkipContext()
+        ForceSkipRecord.record(step: "Inbox", in: context, at: day(2026, 9, 22))
+        ForceSkipRecord.record(step: "2-Minute Tasks", in: context, at: day(2026, 9, 23))
+        ForceSkipRecord.record(step: "Inbox", in: context, at: day(2026, 9, 24))
+
+        XCTAssertEqual(ForceSkipRecord.count(in: context), 3)
+        XCTAssertEqual(ForceSkipRecord.all(in: context).map(\.stepName),
+                       ["Inbox", "2-Minute Tasks", "Inbox"], "oldest first")
+        XCTAssertEqual(ForceSkipRecord.all(in: context).filter { $0.stepName == "Inbox" }.count, 2)
+    }
+
+    /// **The confirmation is honest about the gate.** On a step whose Next
+    /// is also held by a must-be-marked gate, the skip bypasses the wait and
+    /// Next stays disabled — saying so is the difference between "broken"
+    /// and "what I asked for".
+    func test_confirmationSaysWhenTheGateStillHolds() {
+        let gated = ForceSkipRecord.confirmationMessage(stepName: "2-Minute Tasks", alsoBlockedByGate: true)
+        let plain = ForceSkipRecord.confirmationMessage(stepName: "Inbox", alsoBlockedByGate: false)
+
+        XCTAssertTrue(gated.contains("2-Minute Tasks"))
+        XCTAssertTrue(gated.contains("stay disabled"), "it must say Next is still blocked")
+        XCTAssertTrue(gated.contains("not the checklist"), "and why")
+
+        XCTAssertTrue(plain.contains("Inbox"))
+        XCTAssertFalse(plain.contains("stay disabled"), "no gate here, so no false warning")
+    }
+
+    /// A force skip must not touch the must-be-marked gate.
+    func test_forceSkipDoesNotTouchTheGate() throws {
+        let reviewDate = day(2026, 9, 24)
+        let untouched = makeTask(title: "Untouched")
+        untouched.createdAt = reviewDate.addingTimeInterval(3600)
+        var skipped: Set<String> = []
+        skipped.insert("2-Minute Tasks")
+
+        XCTAssertTrue(ForceSkipRecord.isBypassed("2-Minute Tasks", in: skipped), "the wait is bypassed")
+        XCTAssertEqual(
+            TaskItem.unresolvedTwoMinuteRows(reviewRows(reviewDate, [untouched])).count, 1,
+            "and the row is still unanswered, so Next stays blocked"
+        )
+    }
 }
