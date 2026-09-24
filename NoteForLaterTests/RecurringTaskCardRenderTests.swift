@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 import SwiftUI
 import SwiftData
 @testable import NoteForLater
@@ -31,12 +32,59 @@ final class RecurringTaskCardRenderTests: XCTestCase {
     private var container: ModelContainer!
     private var context: ModelContext!
 
+    /// **The Dynamic Type size every baseline was recorded at.**
+    ///
+    /// Pinned in the same spirit as `renderWidth`, `renderScale` and
+    /// `renderAsOf` — the three other things that used to make a baseline a
+    /// function of the machine rather than the code. This was the one gap:
+    /// nothing declared it, so it was inherited from whatever the simulator
+    /// happened to be set to.
+    ///
+    /// ⚠️ **It got here by accident, and is deliberate only from now on.**
+    /// The simulator was left at the largest accessibility size at some
+    /// point and every baseline was recorded through it. A `simctl erase`
+    /// reset it to `large` and all six fixtures failed at once, with 62–70%
+    /// of pixels differing — which reads exactly like a content regression
+    /// and cost an hour of pixel-diffing before anyone opened the images.
+    /// The check below exists so that hour is never spent again.
+    ///
+    /// Kept rather than corrected so today's references stay valid: moving
+    /// it would re-record all six for no behavioural reason. The cost is
+    /// that the suite only covers the most extreme layout — see the note in
+    /// docs/session-handoff.md about adding a normal-size pass.
+    ///
+    /// Set it with:
+    ///     xcrun simctl ui booted content_size accessibility-extra-extra-extra-large
+    static let expectedContentSize: UIContentSizeCategory = .accessibilityExtraExtraExtraLarge
+
     override func setUpWithError() throws {
+        // Checked before any fixture runs — six simultaneous "does not
+        // match its baseline" failures name the wrong cause entirely.
+        //
+        // **Fails rather than skips.** A skip would leave the suite green
+        // with zero render coverage, which is the silent-loss shape this
+        // codebase keeps getting bitten by — the same reason a deleted test
+        // never goes red. The `XCTSkip` afterwards only stops the fixture
+        // bodies from piling six misleading baseline failures on top of the
+        // real one.
+        let actual = UIApplication.shared.preferredContentSizeCategory
+        if actual != Self.expectedContentSize {
+            XCTFail(Self.contentSizeMismatchMessage(actual: actual))
+            throw XCTSkip("Wrong Dynamic Type size — see the failure above.")
+        }
         container = try ModelContainer(
             for: TaskItem.self, ScheduledBlock.self, Shelf.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
         context = ModelContext(container)
+    }
+
+    private static func contentSizeMismatchMessage(actual: UIContentSizeCategory) -> String {
+        "Render baselines were recorded at \(Self.expectedContentSize.rawValue), but this "
+            + "simulator is at \(actual.rawValue). These fixtures are NOT failing because of a "
+            + "code change. Set the simulator back and re-run: "
+            + "xcrun simctl ui booted content_size accessibility-extra-extra-extra-large — "
+            + "see `expectedContentSize` for why this size, and why it is pinned rather than corrected."
     }
 
     /// Worst-case Relative Date values: `.months` (the "On the" row only
