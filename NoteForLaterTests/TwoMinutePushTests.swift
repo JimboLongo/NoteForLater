@@ -1934,4 +1934,56 @@ final class TaskMissRecordTests: XCTestCase {
         XCTAssertNil(row.task)
         XCTAssertEqual(row.status, .complete, "the record is the only evidence left and that is what it says")
     }
+
+    // MARK: - Long-press card destinations
+
+    /// A live 2-minute row opens its own task's card.
+    func test_liveRowOpensItsTask() {
+        let task = makeTask(title: "Water the plant")
+
+        XCTAssertEqual(
+            TaskItem.cardDestination(for: .task(task), liveTaskIDs: [task.id]),
+            .task(task.id)
+        )
+    }
+
+    /// A miss row opens the card of the task it names, while that task
+    /// still exists.
+    func test_missRowOpensTheTaskItNames() {
+        let task = makeTask(title: "Water the plant")
+        let record = TaskMissRecord(taskID: task.id, title: task.title, missedDay: day(2026, 9, 21))
+        context.insert(record)
+
+        XCTAssertEqual(
+            TaskItem.cardDestination(for: .miss(record), liveTaskIDs: [task.id]),
+            .task(task.id)
+        )
+    }
+
+    /// **The deleted-task case, decided rather than crashed into.**
+    /// `TaskMissRecord` copies `title`/`taskID` so the row outlives its
+    /// task, so this is reachable in normal use. Nothing to open, so
+    /// nothing happens.
+    func test_missRowWhoseTaskIsGoneOpensNothing() {
+        let record = TaskMissRecord(taskID: UUID(), title: "Deleted since", missedDay: day(2026, 9, 21))
+        context.insert(record)
+
+        XCTAssertEqual(
+            TaskItem.cardDestination(for: .miss(record), liveTaskIDs: []),
+            TaskItem.CardDestination.none
+        )
+    }
+
+    /// A different task being alive does not make this record openable —
+    /// the lookup is by id, not by "some task exists".
+    func test_missRowDoesNotOpenAnUnrelatedTask() {
+        let other = makeTask(title: "Unrelated")
+        let record = TaskMissRecord(taskID: UUID(), title: "Deleted since", missedDay: day(2026, 9, 21))
+        context.insert(record)
+
+        XCTAssertEqual(
+            TaskItem.cardDestination(for: .miss(record), liveTaskIDs: [other.id]),
+            TaskItem.CardDestination.none
+        )
+    }
 }

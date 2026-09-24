@@ -821,6 +821,36 @@ final class TaskItem {
         }
     }
 
+    /// What a long press on a day-calendar row opens.
+    ///
+    /// One rule for every row kind, rather than a long-press handler per
+    /// row deciding for itself — the destinations already existed
+    /// (`TaskCardSheet` via `taskCardTarget`, `HabitDetailView` via
+    /// `habitDetailTarget`), they were just only reachable from a block's
+    /// action menu and from tapping a habit *block*.
+    ///
+    /// `.none` is a real answer, not a failure: a miss row whose task has
+    /// since been deleted has nothing to open. `TaskMissRecord` copies
+    /// `title`/`taskID` precisely so the row outlives its task, so this is
+    /// reachable in normal use and must do nothing rather than crash.
+    enum CardDestination: Equatable {
+        case task(UUID)
+        case habit(UUID)
+        case none
+    }
+
+    /// A 2-Minute row's destination. A live task opens its card; a miss
+    /// record opens the card of the task it names, if that task still
+    /// exists.
+    static func cardDestination(for row: TwoMinuteRow, liveTaskIDs: Set<UUID>) -> CardDestination {
+        switch row {
+        case .task(let task):
+            return .task(task.id)
+        case .miss(let record):
+            return liveTaskIDs.contains(record.taskID) ? .task(record.taskID) : .none
+        }
+    }
+
     /// Every 2-Minute row **Nightly Review's step** shows, in one order.
     ///
     /// The calendar's sibling is `twoMinuteRows(on:from:context:)`. They

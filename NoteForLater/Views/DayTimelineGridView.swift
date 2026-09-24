@@ -259,6 +259,15 @@ struct DayTimelineGridView: View {
     /// tradeoff `HabitsTodayView` already makes, for the same reason.
     @State private var cachedHabitStreaks: [UUID: Int] = [:]
     @State private var streakRefreshCoordinator = HabitStatsRefreshCoordinator.shared
+    /// Long-press destinations for the occurrence and 2-Minute sections.
+    ///
+    /// `DayTimelineSegment` has its own pair for the grid's block rows —
+    /// two sets rather than one because the two views own separate sheet
+    /// stacks, and a sheet presented from the wrong one would not appear.
+    /// The *destination rule* is shared (`TaskItem.cardDestination`); only
+    /// the presentation is local.
+    @State private var sectionTaskCardTarget: TaskItem?
+    @State private var sectionHabitDetailTarget: Habit?
 
     private func refreshHabitStreaks() {
         cachedHabitStreaks = ScheduleReviewViewModel.habitStreaks(for: allHabits, asOf: targetDate)
@@ -603,7 +612,9 @@ struct DayTimelineGridView: View {
                     occurrences: occurrenceLists.am,
                     habitStreaks: cachedHabitStreaks,
                     onToggleHabitOccurrence: { habit, index in toggleHabitOccurrence(habit: habit, index: index) },
-                    onCycleRecurringTaskOccurrence: { task in cycleRecurringTaskOccurrence(task: task) }
+                    onCycleRecurringTaskOccurrence: { task in cycleRecurringTaskOccurrence(task: task) },
+                    onOpenHabitCard: { sectionHabitDetailTarget = $0 },
+                    onOpenTaskCard: { sectionTaskCardTarget = $0 }
                 )
                     .onGeometryChange(for: CGFloat.self) { proxy in
                         proxy.size.height
@@ -645,7 +656,9 @@ struct DayTimelineGridView: View {
                     occurrences: occurrenceLists.midday,
                     habitStreaks: cachedHabitStreaks,
                     onToggleHabitOccurrence: { habit, index in toggleHabitOccurrence(habit: habit, index: index) },
-                    onCycleRecurringTaskOccurrence: { task in cycleRecurringTaskOccurrence(task: task) }
+                    onCycleRecurringTaskOccurrence: { task in cycleRecurringTaskOccurrence(task: task) },
+                    onOpenHabitCard: { sectionHabitDetailTarget = $0 },
+                    onOpenTaskCard: { sectionTaskCardTarget = $0 }
                 )
                         // Extra breathing room specifically here — sitting
                         // directly between the two grid segments, this one
@@ -722,7 +735,9 @@ struct DayTimelineGridView: View {
                     occurrences: occurrenceLists.pm,
                     habitStreaks: cachedHabitStreaks,
                     onToggleHabitOccurrence: { habit, index in toggleHabitOccurrence(habit: habit, index: index) },
-                    onCycleRecurringTaskOccurrence: { task in cycleRecurringTaskOccurrence(task: task) }
+                    onCycleRecurringTaskOccurrence: { task in cycleRecurringTaskOccurrence(task: task) },
+                    onOpenHabitCard: { sectionHabitDetailTarget = $0 },
+                    onOpenTaskCard: { sectionTaskCardTarget = $0 }
                 )
                     .padding(.top, 14)
             }
@@ -762,6 +777,21 @@ struct DayTimelineGridView: View {
         }
         .onChange(of: streakRefreshCoordinator.idleRefreshTick) { _, _ in
             refreshHabitStreaks()
+        }
+        // Long-press destinations — see `sectionTaskCardTarget`. Same two
+        // sheets `DayTimelineSegment` presents for the grid's own rows.
+        .sheet(item: $sectionTaskCardTarget) { task in
+            TaskCardSheet(task: task, shelves: allShelves.filter { !$0.isKitchen })
+        }
+        .sheet(item: $sectionHabitDetailTarget) { habit in
+            NavigationStack {
+                HabitDetailView(habit: habit)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { sectionHabitDetailTarget = nil }
+                        }
+                    }
+            }
         }
     }
 
@@ -868,7 +898,11 @@ struct DayTimelineGridView: View {
     private func twoMinuteRowView(_ row: TaskItem.TwoMinuteRow) -> some View {
         switch row {
         case .task(let task):
-            Button {
+            // Not a `Button` — see `rowCardLongPress`. A Button fires on
+            // release, so a long press would cycle this row's status on the
+            // way into the card.
+            twoMinuteRowLabel(title: task.title, status: task.status)
+            .rowCardLongPress(onTap: {
                 // The same shared owner Nightly Review's 2-Minute row calls
                 // — see `TwoMinutePush.cycle`. Marking missed pushes here
                 // too now; see `twoMinuteStatusCircle` for why that became
@@ -890,14 +924,14 @@ struct DayTimelineGridView: View {
                     missedOn: targetDate,
                     context: modelContext
                 )
-            } label: {
-                twoMinuteRowLabel(title: task.title, status: task.status)
-            }
-            .buttonStyle(.plain)
+            }, onLongPress: {
+                sectionTaskCardTarget = task
+            })
             .opacity(task.status == .none ? 1 : 0.5)
 
         case .miss(let record):
-            Button {
+            twoMinuteRowLabel(title: record.title, status: .missed)
+            .rowCardLongPress(onTap: {
                 // UNDO — see this function's own warning. The task comes
                 // back to this day and the record goes with the push.
                 //
@@ -911,10 +945,20 @@ struct DayTimelineGridView: View {
                     // it, so there is nothing to put back.
                     modelContext.delete(record)
                 }
-            } label: {
-                twoMinuteRowLabel(title: record.title, status: .missed)
-            }
-            .buttonStyle(.plain)
+            }, onLongPress: {
+                // **Nothing to open when the task is gone**, and that is a
+                // real case rather than a guard against the impossible:
+                // `TaskMissRecord` copies `title`/`taskID` precisely so the
+                // row outlives its task. Resolved through
+                // `TaskItem.cardDestination` so the rule is one tested
+                // function rather than an `if let` per row.
+                switch TaskItem.cardDestination(for: row, liveTaskIDs: Set(allTasks.map(\.id))) {
+                case .task(let id):
+                    sectionTaskCardTarget = allTasks.first { $0.id == id }
+                case .habit, .none:
+                    break
+                }
+            })
             .opacity(0.5)
         }
     }

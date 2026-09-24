@@ -50,6 +50,32 @@ struct OpenRecurringTaskOccurrence: Identifiable {
 /// (see `computeOpenHabitOccurrenceLists`) so the two interleave in
 /// one section instead of habits and recurring tasks living in visibly
 /// separate lists for the same part of the day.
+/// **One long press, applied to a row, alongside its existing tap.**
+///
+/// ⚠️ The row must NOT be a `Button`. A `Button` claims the press and fires
+/// its action on release, so a long press would cycle the row's status on
+/// the way out — the exact failure this is written to avoid. Every row that
+/// takes this modifier was converted to a plain view with
+/// `.contentShape` + `.onTapGesture`, which lets SwiftUI resolve the two:
+/// hold past the threshold and the long press wins and the tap never fires;
+/// release early and only the tap fires.
+///
+/// `onLongPress` is called once, at the moment the threshold is crossed —
+/// before the finger lifts — so nothing about the lift can re-enter the tap
+/// path.
+extension View {
+    func rowCardLongPress(onTap: @escaping () -> Void,
+                          onLongPress: @escaping () -> Void) -> some View {
+        self
+            .contentShape(Rectangle())
+            // Long press first: attached before the tap so it is offered
+            // the sequence first, and a tap that never reaches the
+            // threshold still falls through to `onTapGesture` below.
+            .onLongPressGesture(minimumDuration: 0.45, perform: onLongPress)
+            .onTapGesture(perform: onTap)
+    }
+}
+
 enum OpenOccurrenceRow: Identifiable {
     case habit(OpenHabitOccurrence)
     case recurringTask(OpenRecurringTaskOccurrence)
@@ -108,6 +134,10 @@ struct OccurrenceSectionView: View {
     let habitStreaks: [UUID: Int]
     let onToggleHabitOccurrence: (Habit, Int) -> Void
     let onCycleRecurringTaskOccurrence: (TaskItem) -> Void
+    /// Long press opens the item's card — see `rowCardLongPress`. Additive:
+    /// tap still cycles status.
+    var onOpenHabitCard: ((Habit) -> Void)? = nil
+    var onOpenTaskCard: ((TaskItem) -> Void)? = nil
 
     @ViewBuilder
     var body: some View {
@@ -205,13 +235,17 @@ struct OccurrenceSectionView: View {
                 ForEach(rows) { row in
                     switch row {
                     case .habit(let occurrence):
-                        occurrenceRow(name: occurrence.habit.name, isCompleted: occurrence.isCompleted, isMissed: occurrence.isMissed, isExcused: occurrence.isExcused, streak: habitStreaks[occurrence.habit.id]) {
+                        occurrenceRow(name: occurrence.habit.name, isCompleted: occurrence.isCompleted, isMissed: occurrence.isMissed, isExcused: occurrence.isExcused, streak: habitStreaks[occurrence.habit.id], onTap: {
                             onToggleHabitOccurrence(occurrence.habit, occurrence.index)
-                        }
+                        }, onLongPress: {
+                            onOpenHabitCard?(occurrence.habit)
+                        })
                     case .recurringTask(let occurrence):
-                        occurrenceRow(name: occurrence.task.title, isCompleted: occurrence.isCompleted, isMissed: occurrence.isMissed, isPushed: occurrence.isPushed) {
+                        occurrenceRow(name: occurrence.task.title, isCompleted: occurrence.isCompleted, isMissed: occurrence.isMissed, isPushed: occurrence.isPushed, onTap: {
                             onCycleRecurringTaskOccurrence(occurrence.task)
-                        }
+                        }, onLongPress: {
+                            onOpenTaskCard?(occurrence.task)
+                        })
                     }
                 }
             }
@@ -240,7 +274,13 @@ struct OccurrenceSectionView: View {
     /// `HabitsView.fillColor`/`occurrenceIcon` already use for `.missed`/
     /// `.excused`, so a habit reads the same way whether you're looking at
     /// the Habits tab or this calendar.
-    private func occurrenceRow(name: String, isCompleted: Bool, isMissed: Bool = false, isExcused: Bool = false, isPushed: Bool = false, streak: Int? = nil, onToggle: @escaping () -> Void) -> some View {
+    /// REVERSAL: this was a `Button`. It cannot be one any more — a
+    /// `Button` claims the press and fires `onToggle` when the finger
+    /// lifts, so a long press would cycle the row's status on its way into
+    /// the card. Plain content plus `rowCardLongPress` lets SwiftUI resolve
+    /// the two instead: hold and only the long press fires, release early
+    /// and only the tap does.
+    private func occurrenceRow(name: String, isCompleted: Bool, isMissed: Bool = false, isExcused: Bool = false, isPushed: Bool = false, streak: Int? = nil, onTap: @escaping () -> Void, onLongPress: @escaping () -> Void) -> some View {
         // Same fill/stroke mapping as `HabitsView.fillColor`, and the same
         // icon mapping as `HabitsView.occurrenceIcon` — kept as plain
         // local values rather than a fifth boolean branch inline below,
@@ -248,7 +288,7 @@ struct OccurrenceSectionView: View {
         // where a chain of ternaries stops being readable.
         let circleColor: Color = isCompleted ? .green : (isMissed ? .red.opacity(0.55) : (isExcused ? .gray.opacity(0.4) : .clear))
         let circleStrokeColor: Color = isCompleted || isMissed || isExcused ? circleColor : .secondary.opacity(0.7)
-        return Button(action: onToggle) {
+        return Group {
             HStack(spacing: 10) {
                 // Same checkmark-circle look
                 // `DayTimelineSegment.completeCircle` uses for a calendar
@@ -299,9 +339,8 @@ struct OccurrenceSectionView: View {
                 }
                 Spacer()
             }
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .rowCardLongPress(onTap: onTap, onLongPress: onLongPress)
         .opacity(isCompleted || isMissed || isExcused ? 0.5 : 1)
     }
 
