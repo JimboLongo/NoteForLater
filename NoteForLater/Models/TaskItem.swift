@@ -1386,7 +1386,15 @@ final class TaskItem {
     /// if a fixture's dates move with the clock, and this default would
     /// otherwise make every baseline expire overnight.
     static func makeForDirectCapture(title: String, shelf: Shelf, now: Date = .now) -> TaskItem {
-        let task = TaskItem(title: title, shelf: shelf)
+        // **One instant, threaded into both.** `createdAt` and the Can Start
+        // By default are the same moment by construction, not by two
+        // independent `.now` calls happening to agree.
+        //
+        // They used to be exactly that, and it was not theoretical: `now` is
+        // a parameter, so a render fixture pinning it got `createdAt` = real
+        // today and `startDate` = June 2026 — months apart. Across midnight
+        // an ordinary capture could split them by a day.
+        let task = TaskItem(title: title, shelf: shelf, createdAt: now)
         task.applyCreationDefaults(shelf: shelf, now: now)
         if shelf.isRecurringTasks {
             task.setRecurring(true)
@@ -1464,8 +1472,9 @@ final class TaskItem {
         // sync it directly, but only for a task that is *already* recurring
         // — which at this point it is not.
         //
-        // **Which "today" — the creation instant's, not the day being
-        // planned.** A task added at 00:30 during a review session that
+        // **The creation instant's day — and it *is* `createdAt`'s day**,
+        // because `makeForDirectCapture` threads one value into both. Not
+        // the day being planned.** A task added at 00:30 during a review session that
         // began the previous evening gets the *new* calendar day. That is
         // deliberate: Can Start By means "not before this", and the earliest
         // you could start is now, which is a fact about the clock rather

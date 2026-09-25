@@ -1729,4 +1729,96 @@ final class TaskAttributeToggleTests: XCTestCase {
             "June 2, not the June 1 evening the session started on"
         )
     }
+
+    // MARK: - Creation day is one instant, not two
+
+    /// **`createdAt` and the Can Start By default are the same moment.**
+    ///
+    /// They used to be two independent `.now` captures that agreed by
+    /// coincidence — and `now:` is a parameter, so a render fixture pinning
+    /// it got `createdAt` = real today and `startDate` = June 2026. Threaded
+    /// through both now, so they are identical by construction.
+    func test_creationDayAndCanStartByAreTheSameInstant() {
+        let pinned = Calendar.current.date(from: DateComponents(year: 2026, month: 6, day: 1, hour: 9))!
+        let shelf = Shelf(name: "Work")
+
+        let task = TaskItem.makeForDirectCapture(title: "Pinned", shelf: shelf, now: pinned)
+
+        XCTAssertEqual(task.createdAt, pinned, "createdAt takes the passed instant")
+        XCTAssertEqual(
+            task.startDate, Calendar.current.startOfDay(for: pinned),
+            "and Can Start By is that same instant's day"
+        )
+        XCTAssertEqual(
+            task.startDate, Calendar.current.startOfDay(for: task.createdAt),
+            "the two cannot diverge — this is the assertion that goes red if they split again"
+        )
+    }
+
+    /// The midnight case we never resolved: a task created just before
+    /// midnight must not get tomorrow as its Can Start By.
+    func test_taskCreatedJustBeforeMidnight_anchorsToItsOwnCreationDay() {
+        let almostMidnight = Calendar.current.date(
+            from: DateComponents(year: 2026, month: 6, day: 1, hour: 23, minute: 59, second: 59))!
+        let shelf = Shelf(name: "Work")
+
+        let task = TaskItem.makeForDirectCapture(title: "Late", shelf: shelf, now: almostMidnight)
+
+        XCTAssertEqual(
+            task.startDate, Calendar.current.date(from: DateComponents(year: 2026, month: 6, day: 1)),
+            "June 1, the day it was created — not June 2"
+        )
+        XCTAssertEqual(task.startDate, Calendar.current.startOfDay(for: task.createdAt))
+    }
+
+    // MARK: - Ineligible schedules are overridable, but only sometimes
+
+    /// **Only `.exceedsConstraint` is a real judgement.** The two
+    /// "not ready yet" statuses are not ineligible at all — no comparison
+    /// has been possible — so confirming you know they are would be
+    /// confirming something untrue.
+    func test_onlyExceedsConstraintIsOverridable() {
+        XCTAssertTrue(SchedulingFitStatus.exceedsConstraint.isOverridable)
+        XCTAssertFalse(SchedulingFitStatus.needsDuration.isOverridable, "not ineligible, just unanswered")
+        XCTAssertFalse(SchedulingFitStatus.needsMinimumSegment.isOverridable, "same")
+        XCTAssertFalse(SchedulingFitStatus.fits.isOverridable, "nothing to override")
+    }
+
+    /// ⚠️ **An orphaned rule is never overridable**, and that is not
+    /// expressible as a fit status — its `NamedSchedule` was deleted, so
+    /// `generateProposedSchedule` skips it entirely. An enabled toggle would
+    /// look scheduled and never schedule: the §9.2 trap.
+    ///
+    /// The view composes `status.isOverridable && !isOrphaned`; this pins
+    /// the composition, since `isOverridable` alone cannot know.
+    func test_anOrphanedRuleIsNeverOverridableHoweverItFits() {
+        for status in [SchedulingFitStatus.exceedsConstraint, .needsDuration, .needsMinimumSegment, .fits] {
+            let isOrphaned = true
+            XCTAssertFalse(
+                status.isOverridable && !isOrphaned,
+                "an orphan must stay hard-disabled even at \(status)"
+            )
+        }
+    }
+
+    /// **The confirmation cannot be bypassed.** Turning an overridable,
+    /// non-fitting rule on always asks; nothing else does.
+    func test_enablingAnOverridableRuleAlwaysAsksFirst() {
+        XCTAssertTrue(
+            SchedulingFitStatus.enablingNeedsConfirmation(turningOn: true, fits: false, isOverridable: true),
+            "this is the case that must ask"
+        )
+        XCTAssertFalse(
+            SchedulingFitStatus.enablingNeedsConfirmation(turningOn: false, fits: false, isOverridable: true),
+            "turning OFF is free — removing an override, not adding one"
+        )
+        XCTAssertFalse(
+            SchedulingFitStatus.enablingNeedsConfirmation(turningOn: true, fits: true, isOverridable: true),
+            "a fitting rule has nothing to confirm"
+        )
+        XCTAssertFalse(
+            SchedulingFitStatus.enablingNeedsConfirmation(turningOn: true, fits: false, isOverridable: false),
+            "a non-overridable rule is disabled, never confirmed past"
+        )
+    }
 }

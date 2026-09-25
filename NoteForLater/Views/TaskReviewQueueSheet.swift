@@ -169,13 +169,19 @@ struct TaskReviewQueueSheet: View {
                         Text(Self.formattedRemaining(engagementTimer.remaining))
                             .font(.subheadline.monospacedDigit())
                             .foregroundStyle(engagementTimer.isExpired ? .secondary : .primary)
-                            // Same host as the review's own force skip: the
-                            // thing making you wait. A plain `Text` in a
-                            // toolbar slot with no other gesture on it.
-                            .contentShape(Rectangle())
-                            .onLongPressGesture(minimumDuration: 0.45) {
-                                isConfirmingForceSkip = true
-                            }
+
+                    }
+                    ToolbarItem(placement: .principal) {
+                        // **Visible, beside the countdown** — see
+                        // `NightlyReviewView`'s own Skip button. Only while
+                        // the wait is actually on; once expired there is
+                        // nothing to skip and `Skip Remaining` is live.
+                        if !engagementTimer.isExpired && !isForceSkipped {
+                            Button("Skip") { isConfirmingForceSkip = true }
+                                .font(.subheadline.weight(.medium))
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                        }
                     }
                     ToolbarItem(placement: .topBarTrailing) {
                         // Hidden once nothing is left to address — a countdown with an

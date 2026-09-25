@@ -1751,23 +1751,26 @@ struct NightlyReviewView: View {
                     // no timer at all, not a timer reading 0:00.
                     Section {
                         let counts = twoMinuteUnresolvedCounts
+                        HStack {
                         Label(
                             "Wait \(Self.formattedRemaining(twoMinuteEngagementTimer.remaining(missed: counts.missed, unanswered: counts.unanswered))) or complete them",
                             systemImage: "timer"
                         )
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                        // **Force skip lives on the thing making you wait.**
-                        // Not the Next button: it is `.disabled` while
-                        // gated, and a disabled SwiftUI Button receives no
-                        // gestures — dead in exactly the situation this
-                        // exists for. This label only appears while a timer
-                        // is running, so the affordance exists only when it
-                        // means something, and nothing else on the row is
-                        // interactive for it to compete with.
-                        .contentShape(Rectangle())
-                        .onLongPressGesture(minimumDuration: 0.45) {
-                            forceSkipConfirmation = .twoMinuteTasks
+
+                        Spacer()
+                        // **A visible button, not a gesture on the
+                        // countdown.** REVERSAL: this was a hidden long
+                        // press on the label. An affordance nobody can see
+                        // is not an affordance, and a live-ticking number as
+                        // a tap target reads as "tap to change the time".
+                        // The countdown explains *why* Next is disabled; the
+                        // button is the action. Two jobs, two controls.
+                        Button("Skip") { forceSkipConfirmation = .twoMinuteTasks }
+                            .font(.subheadline.weight(.medium))
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                         }
                     }
                 }
@@ -2304,6 +2307,29 @@ struct TaskReviewCard: View {
     /// every actual field write happens in the `selectXxx`/`onSelect`
     /// functions that separately, additionally, mutate this.
     @State private var expandedRows: Set<CardRow> = []
+
+    /// The rule an ineligible-schedule override is being confirmed for —
+    /// non-nil only while that dialog is up. Lives on the card, not the
+    /// review, because the toggle does: a dialog presented from the wrong
+    /// view never appears.
+    @State private var ineligibleRuleConfirmation: SchedulingRule?
+
+    /// **One debounce for every wheel, keyed by row** — not a timer per
+    /// wheel.
+    ///
+    /// Duration and Divisible are the two rows answered by *spinning*
+    /// rather than by a single tap, so the ordinary "answered, collapse"
+    /// rule every other row uses (`expandedRows.remove(.x)`) would slam them
+    /// shut mid-scroll: every intermediate value a spin passes through reads
+    /// as an answer. Waiting for the wheel to be still for
+    /// `wheelSettleSeconds` is what distinguishes "landed on a value" from
+    /// "passing through one".
+    ///
+    /// Keyed by `CardRow` so a third spun row inherits the behaviour by
+    /// calling `scheduleCollapseAfterSettle(.thatRow)`, rather than growing
+    /// a third `@State` timer that can drift from the other two.
+    @State private var wheelSettleTasks: [CardRow: Task<Void, Never>] = [:]
+    private static let wheelSettleSeconds: Double = 2
 
     /// Which expandable rows the card could draw last time this was
     /// checked — the baseline `newlyRelevantExpandableRows` diffs against,
@@ -3297,6 +3323,20 @@ struct TaskReviewCard: View {
             // is selected and would miss the "No" / untap-"Yes" resets
             // that also write `estimatedMinutes` directly.
             task.remainingMinutes = newValue
+            // The wheel moved — restart the settle. See `wheelSettleTasks`.
+            scheduleCollapseAfterSettle(.duration)
+        }
+        .onChange(of: task.minimumSegmentMinutes) { _, _ in
+            scheduleCollapseAfterSettle(.divisible)
+        }
+        .onChange(of: task.isDivisible) { _, _ in
+            scheduleCollapseAfterSettle(.divisible)
+        }
+        .onDisappear {
+            // A pending settle outliving the card would collapse a row on a
+            // task that is no longer on screen.
+            for (_, settle) in wheelSettleTasks { settle.cancel() }
+            wheelSettleTasks.removeAll()
         }
         // A row that was hidden when the card opened is not in
         // `expandedRows`, so it would appear collapsed. Duration is what
@@ -3311,6 +3351,59 @@ struct TaskReviewCard: View {
             ))
             drawableExpandableRows = current
         }
+        // **The override never happens on the toggle itself** — only from
+        // the confirming button here. See `SchedulingFitStatus.isOverridable`.
+        .confirmationDialog(
+            ineligibleOverrideMessage,
+            isPresented: isConfirmingIneligibleOverride,
+            titleVisibility: .visible
+        ) {
+            Button("Schedule It Anyway", role: .destructive) {
+                if let rule = ineligibleRuleConfirmation {
+                    task.setEligible(true, for: rule)
+                }
+                ineligibleRuleConfirmation = nil
+            }
+            Button("Cancel", role: .cancel) { ineligibleRuleConfirmation = nil }
+        }
+    }
+
+    /// Collapse `row` once its wheel has been still for
+    /// `wheelSettleSeconds` — see `wheelSettleTasks`.
+    ///
+    /// Each call cancels the previous pending settle for that row, so a
+    /// continuous spin never reaches the collapse: the clock restarts on
+    /// every value the wheel passes through, and only stopping lets it run
+    /// out. The collapse itself is the same `expandedRows.remove(row)` every
+    /// other row performs — the existing mechanism, just deferred.
+    private func scheduleCollapseAfterSettle(_ row: CardRow) {
+        wheelSettleTasks[row]?.cancel()
+        wheelSettleTasks[row] = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(Self.wheelSettleSeconds))
+            guard !Task.isCancelled else { return }
+            // Re-checked after the wait, not before: the row may have been
+            // spun back to unanswered while the clock ran.
+            guard Self.isConfigured(row, task: task, shelf: previewedShelf,
+                                    segmentOptions: TaskItem.validSegmentOptions(for: task.estimatedMinutes))
+            else { return }
+            expandedRows.remove(row)
+        }
+    }
+
+    /// Extracted out of the dialog's argument list — inlined there it pushed
+    /// `body` past the type-checker's budget, same as `forceSkipMessage`.
+    private var ineligibleOverrideMessage: String {
+        guard let rule = ineligibleRuleConfirmation else { return "" }
+        let name = rule.displayName.isEmpty ? rule.summary : rule.displayName
+        return "\"\(name)\" can't fit this task — it's longer than the schedule allows. "
+            + "Schedule it there anyway?"
+    }
+
+    private var isConfirmingIneligibleOverride: Binding<Bool> {
+        Binding(
+            get: { ineligibleRuleConfirmation != nil },
+            set: { if !$0 { ineligibleRuleConfirmation = nil } }
+        )
     }
 
     /// The Eligible Schedules row's own subtitle — one distinct caption
@@ -4555,18 +4648,35 @@ struct TaskReviewCard: View {
                         // already does.
                         let isOrphaned = rule.namedSchedule == nil
                         let fits = status == .fits && !isOrphaned
+                        // Overridable only for `.exceedsConstraint`, and
+                        // never for an orphan — see
+                        // `SchedulingFitStatus.isOverridable`.
+                        let isOverridable = status.isOverridable && !isOrphaned
                         HStack(spacing: 10) {
                             Toggle(
                                 isOn: Binding(
                                     get: { task.isEligible(for: rule) },
-                                    set: { focusedField = nil; task.setEligible($0, for: rule) }
+                                    set: { newValue in
+                                        focusedField = nil
+                                        // Turning an overridable rule ON is
+                                        // the only direction that asks. Off
+                                        // is always free — you are removing
+                                        // an override, not adding one.
+                                        if SchedulingFitStatus.enablingNeedsConfirmation(
+                                            turningOn: newValue, fits: fits, isOverridable: isOverridable
+                                        ) {
+                                            ineligibleRuleConfirmation = rule
+                                        } else {
+                                            task.setEligible(newValue, for: rule)
+                                        }
+                                    }
                                 )
                             ) {
                                 EmptyView()
                             }
                             .labelsHidden()
                             .tint(.green)
-                            .disabled(!fits)
+                            .disabled(!fits && !isOverridable)
 
                             VStack(alignment: .leading, spacing: 1) {
                                 HStack(spacing: 6) {

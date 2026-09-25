@@ -23,6 +23,40 @@ enum FillStrategy: String, Codable, CaseIterable, Identifiable {
 
 /// Whether — and if not, why not — a rule could ever place a task with a
 /// given duration/divisibility. See `SchedulingRule.fitStatus`.
+extension SchedulingFitStatus {
+    /// **Whether this status can be overridden by confirming.**
+    ///
+    /// Only `.exceedsConstraint`. It is the one case that is a real
+    /// judgement — a genuine comparison of duration/segment against the
+    /// rule's cap — so "I know it's ineligible, do it anyway" means
+    /// something.
+    ///
+    /// `.needsDuration` and `.needsMinimumSegment` are *not ready yet*, not
+    /// ineligible: no comparison has been possible. Confirming you know they
+    /// are ineligible would be confirming something untrue, and they resolve
+    /// themselves the moment a duration or segment is chosen.
+    ///
+    /// ⚠️ An **orphaned** rule is never overridable and is deliberately not
+    /// represented here — it is not a fit status at all. Its `NamedSchedule`
+    /// was deleted, so `generateProposedSchedule` skips it outright: an
+    /// enabled toggle would look scheduled and never schedule, which is the
+    /// §9.2 trap. The caller checks orphanhood separately and must keep
+    /// doing so.
+    var isOverridable: Bool { self == .exceedsConstraint }
+
+    /// **Whether flipping this toggle on must ask first.**
+    ///
+    /// Extracted out of the toggle's `Binding` so the rule is reachable
+    /// from a test — inside the setter, sabotaging it broke nothing.
+    ///
+    /// Only *turning on* asks. Turning off is always free: you are removing
+    /// an override, not adding one, and making someone confirm their way out
+    /// of a mistake is how a confirmation becomes noise.
+    static func enablingNeedsConfirmation(turningOn: Bool, fits: Bool, isOverridable: Bool) -> Bool {
+        turningOn && !fits && isOverridable
+    }
+}
+
 enum SchedulingFitStatus {
     /// No duration set at all — nothing to compare against the rule's
     /// cap yet, so no fit judgment is possible either way.
