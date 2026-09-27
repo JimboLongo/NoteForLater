@@ -1821,4 +1821,72 @@ final class TaskAttributeToggleTests: XCTestCase {
             "a non-overridable rule is disabled, never confirmed past"
         )
     }
+
+    // MARK: - Can Start By cannot be set into the past
+
+    private let floorNow = Calendar.current.date(from: DateComponents(year: 2026, month: 6, day: 10, hour: 14))!
+
+    /// With no existing value, today is the floor.
+    func test_startDateFloorIsTodayForAFreshTask() {
+        XCTAssertEqual(
+            TaskReviewCard.startDateFloor(existing: nil, now: floorNow),
+            Calendar.current.date(from: DateComponents(year: 2026, month: 6, day: 10))
+        )
+    }
+
+    /// **An existing past date is preserved, not erased.** `UICalendarView`
+    /// will not show a selection outside its available range, so flooring at
+    /// today would make an already-set past date read as unanswered. The
+    /// floor stops you *setting* the past; it does not rewrite what is
+    /// stored.
+    func test_anExistingPastDateWidensTheFloorRatherThanBeingHidden() {
+        let past = Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 3))!
+
+        XCTAssertEqual(
+            TaskReviewCard.startDateFloor(existing: past, now: floorNow),
+            Calendar.current.startOfDay(for: past),
+            "the existing value stays reachable and selected"
+        )
+    }
+
+    /// An existing *future* date does not lower the floor.
+    func test_anExistingFutureDateLeavesTheFloorAtToday() {
+        let future = Calendar.current.date(from: DateComponents(year: 2026, month: 12, day: 25))!
+
+        XCTAssertEqual(
+            TaskReviewCard.startDateFloor(existing: future, now: floorNow),
+            Calendar.current.date(from: DateComponents(year: 2026, month: 6, day: 10)),
+            "still today — the past stays unreachable"
+        )
+    }
+
+    /// **The push machinery is unaffected.** A push writes through
+    /// `setStartDate` on the model, never through the picker, so the floor
+    /// cannot block it — and the captured pre-push date survives whatever
+    /// it was, including a past one.
+    func test_theFloorDoesNotConstrainPushes() throws {
+        let container = try ModelContainer(
+            for: TaskItem.self, Shelf.self, Tag.self, TaskMissRecord.self, TaskCompletionRecord.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let shelf = Shelf(name: "2-Minute Tasks"); shelf.isTwoMinuteTasks = true
+        context.insert(shelf)
+        let past = Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 3))!
+        let task = TaskItem(title: "Old", shelf: shelf)
+        context.insert(task)
+        task.setStartDate(past)
+
+        let missed = Calendar.current.date(from: DateComponents(year: 2026, month: 6, day: 10))!
+        let planned = Calendar.current.date(byAdding: .day, value: 1, to: missed)!
+        for _ in 0..<2 {
+            _ = TwoMinutePush.cycle(task, planDate: planned, missedOn: missed, context: context)
+        }
+
+        XCTAssertEqual(task.startDate.map { Calendar.current.startOfDay(for: $0) },
+                       Calendar.current.startOfDay(for: planned), "the push wrote freely")
+        XCTAssertEqual(task.startDateBeforePush.map { Calendar.current.startOfDay(for: $0) },
+                       Calendar.current.startOfDay(for: past),
+                       "and captured the past date it actually had")
+    }
 }

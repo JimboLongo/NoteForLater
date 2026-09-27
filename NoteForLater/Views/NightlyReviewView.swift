@@ -4124,7 +4124,23 @@ struct TaskReviewCard: View {
     private var startsExpandedContent: some View {
         StartDateCalendarPicker(
             initialSelection: task.startDatePicked ? task.startDate : nil,
-            minimumDate: nil
+            // **The past is unreachable, rather than accepted and corrected
+            // later.** Same mechanism the Due Date picker above already
+            // uses. A `setStartDate` that quietly clamped would be a silent
+            // rewrite of what you just tapped.
+            //
+            // **Widened to include an existing earlier selection.** A task
+            // that already holds a past start date keeps it — nothing here
+            // rewrites stored data, and `UICalendarView` will not display a
+            // selection outside its `availableDateRange`, so without this
+            // the row would open showing nothing selected and read as
+            // unanswered. The floor stops you *setting* a past date; it does
+            // not erase one.
+            //
+            // The push machinery is untouched: `TwoMinutePush.apply` writes
+            // through `setStartDate` on the model, never through this
+            // picker, and its destination is always after the miss anyway.
+            minimumDate: Self.startDateFloor(existing: task.startDatePicked ? task.startDate : nil)
         ) { selectedDate in
             task.setStartDate(selectedDate)
             // For a recurring task, Start Date *is* the recurrence anchor
@@ -5260,6 +5276,20 @@ private struct CollapsibleAnswerRow<Content: View>: View {
 /// .dateSelection(_:didSelectDate:)` fires on every discrete tap
 /// regardless of prior selection — it's an event callback, not a diffed
 /// binding, so re-tapping the same date still fires.
+extension TaskReviewCard {
+    /// The earliest day the Can Start By picker will offer.
+    ///
+    /// Today, except when the task already holds an earlier date — then that
+    /// date, so an existing value stays visible and selected instead of
+    /// silently reading as unanswered. Stored data is never rewritten; only
+    /// new selections are floored.
+    static func startDateFloor(existing: Date?, now: Date = .now, calendar: Calendar = .current) -> Date {
+        let today = calendar.startOfDay(for: now)
+        guard let existing else { return today }
+        return min(today, calendar.startOfDay(for: existing))
+    }
+}
+
 private struct StartDateCalendarPicker: UIViewRepresentable {
     /// nil shows no date highlighted at all — the caller passes this only
     /// when the task's Start Date has actually been picked before (see
