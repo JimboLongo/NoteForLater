@@ -1933,6 +1933,48 @@ final class TaskItem {
         set { priorityRaw = newValue.rawValue }
     }
 
+    /// The rules a task should arrive on a shelf already selected for —
+    /// every enabled rule **except** the ones it cannot fit.
+    ///
+    /// "Initially" here means **at task creation only** (Inbox routing is
+    /// the one path that auto-selects). A rule the task is too big for was
+    /// being switched on for it, which then rendered as a disabled,
+    /// already-on toggle — the app asserting a choice nobody made.
+    ///
+    /// `.needsDuration` and `.needsMinimumSegment` stay **selected**: no
+    /// comparison has been possible yet, so there is nothing to exclude on.
+    /// Only `.exceedsConstraint` — a real comparison — is dropped.
+    ///
+    /// ⚠️ **Deliberately NOT applied when a task's duration later grows past
+    /// a cap, and that is not an oversight.**
+    ///
+    /// Deselecting then would undo a choice already made, and it cannot tell
+    /// "I picked this before it got big" from "I deliberately confirmed the
+    /// override" (see `SchedulingFitStatus.isOverridable`) — the two look
+    /// identical in the data. The real store had five tasks holding over-cap
+    /// selections when this landed; a growth rule would have silently
+    /// dropped them on next open.
+    ///
+    /// Building it would first require storing *that the override was
+    /// confirmed*, per rule per task, so the two cases could be told apart.
+    /// Until that exists, the inconsistency is the better failure.
+    static func initiallyEligibleRuleIDs(
+        for task: TaskItem,
+        on shelf: Shelf,
+        estimatedMinutes: Int,
+        isDivisible: Bool,
+        minimumSegmentMinutes: Int
+    ) -> [UUID] {
+        (shelf.schedulingRules ?? [])
+            .filter(\.isEnabled)
+            .filter { rule in
+                rule.fitStatus(estimatedMinutes: estimatedMinutes,
+                               isDivisible: isDivisible,
+                               minimumSegmentMinutes: minimumSegmentMinutes) != .exceedsConstraint
+            }
+            .map(\.id)
+    }
+
     func isEligible(for rule: SchedulingRule) -> Bool {
         includedSchedulingRuleIDs.contains(rule.id)
     }

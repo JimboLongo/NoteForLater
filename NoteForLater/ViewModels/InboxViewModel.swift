@@ -47,7 +47,15 @@ final class InboxViewModel {
         if !shelf.effectiveTracksDueDates {
             task.dueDate = nil
         }
-        task.includedSchedulingRuleIDs = (shelf.schedulingRules ?? []).filter(\.isEnabled).map(\.id)
+        // Over-cap rules arrive OFF — see
+        // `TaskItem.initiallyEligibleRuleIDs`, including why this is not
+        // re-applied when a duration later grows.
+        task.includedSchedulingRuleIDs = TaskItem.initiallyEligibleRuleIDs(
+            for: task, on: shelf,
+            estimatedMinutes: task.estimatedMinutes,
+            isDivisible: task.isDivisible,
+            minimumSegmentMinutes: task.minimumSegmentMinutes
+        )
     }
 
     func discard(_ task: TaskItem) {

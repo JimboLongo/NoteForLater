@@ -1889,4 +1889,71 @@ final class TaskAttributeToggleTests: XCTestCase {
                        Calendar.current.startOfDay(for: past),
                        "and captured the past date it actually had")
     }
+
+    // MARK: - Over-cap schedules arrive unselected
+
+    private func ruleFixture(_ shelf: Shelf, strategy: FillStrategy, maxTotal: Int, maxPerTask: Int) -> SchedulingRule {
+        let rule = SchedulingRule(shelf: shelf)
+        rule.isEnabled = true
+        rule.fillStrategy = strategy
+        rule.maxTotalMinutes = maxTotal
+        rule.maxMinutesPerTask = maxPerTask
+        return rule
+    }
+
+    /// A rule the task is too big for is **not** auto-selected on arrival.
+    /// It used to be, which rendered as a disabled toggle already switched
+    /// on — the app asserting a choice nobody made.
+    func test_overCapRulesAreNotSelectedOnArrival() {
+        let shelf = Shelf(name: "Work")
+        let fits = ruleFixture(shelf, strategy: .maxDuration, maxTotal: 240, maxPerTask: 15)
+        let tooSmall = ruleFixture(shelf, strategy: .maxDuration, maxTotal: 60, maxPerTask: 15)
+        shelf.schedulingRules = [fits, tooSmall]
+        let task = TaskItem(title: "Big job", estimatedMinutes: 120)
+
+        let ids = TaskItem.initiallyEligibleRuleIDs(
+            for: task, on: shelf, estimatedMinutes: 120, isDivisible: false, minimumSegmentMinutes: 0)
+
+        XCTAssertTrue(ids.contains(fits.id), "120 fits a 240 cap")
+        XCTAssertFalse(ids.contains(tooSmall.id), "120 does not fit a 60 cap")
+    }
+
+    /// **"Not ready yet" is not "ineligible".** With no duration set, no
+    /// comparison is possible, so nothing is excluded.
+    func test_aTaskWithNoDurationKeepsEveryRule() {
+        let shelf = Shelf(name: "Work")
+        let tiny = ruleFixture(shelf, strategy: .maxDuration, maxTotal: 15, maxPerTask: 15)
+        shelf.schedulingRules = [tiny]
+        let task = TaskItem(title: "Unsized")
+
+        let ids = TaskItem.initiallyEligibleRuleIDs(
+            for: task, on: shelf, estimatedMinutes: 0, isDivisible: false, minimumSegmentMinutes: 0)
+
+        XCTAssertEqual(ids, [tiny.id], "no judgement is possible, so nothing is dropped")
+    }
+
+    /// A divisible task is judged on its segment, matching `fitStatus`.
+    func test_aDivisibleTaskIsJudgedOnItsSegment() {
+        let shelf = Shelf(name: "Work")
+        let rule = ruleFixture(shelf, strategy: .maxDuration, maxTotal: 120, maxPerTask: 15)
+        shelf.schedulingRules = [rule]
+        let task = TaskItem(title: "Big but divisible")
+
+        let ids = TaskItem.initiallyEligibleRuleIDs(
+            for: task, on: shelf, estimatedMinutes: 480, isDivisible: true, minimumSegmentMinutes: 60)
+
+        XCTAssertEqual(ids, [rule.id], "a 60-minute segment fits a 120 cap even though the task is 480")
+    }
+
+    /// A disabled rule is never selected, over-cap or not.
+    func test_disabledRulesAreNeverSelected() {
+        let shelf = Shelf(name: "Work")
+        let off = ruleFixture(shelf, strategy: .fillToFit, maxTotal: 120, maxPerTask: 15)
+        off.isEnabled = false
+        shelf.schedulingRules = [off]
+
+        XCTAssertTrue(TaskItem.initiallyEligibleRuleIDs(
+            for: TaskItem(title: "x"), on: shelf,
+            estimatedMinutes: 30, isDivisible: false, minimumSegmentMinutes: 0).isEmpty)
+    }
 }
