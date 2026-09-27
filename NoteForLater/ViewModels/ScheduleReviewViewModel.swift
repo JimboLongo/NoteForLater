@@ -3536,6 +3536,126 @@ final class ScheduleReviewViewModel {
     /// flag still clears; only the two restores are skipped, because there is
     /// no honest value to write and a guess here corrupts a task's ledger
     /// silently.
+    /// **Re-place one task against its current eligible set, on this day
+    /// only.** Returns the new block, or `nil` when the task no longer fits
+    /// anywhere it is allowed today.
+    ///
+    /// Called when a card edit changed a *plan input* — today only the
+    /// eligible-schedules list. Title and notes are not plan inputs: rows
+    /// hold a `ScheduledBlock` reference and read those live, so they update
+    /// with no re-plan at all and must never come through here.
+    ///
+    /// **Scoped to `targetDate`, deliberately.** It does not walk forward to
+    /// a later day the way `guaranteePlacement` does. The review is about
+    /// this day, and silently writing blocks onto days you are not looking
+    /// at is the kind of invisible change this screen should not make. A
+    /// task that cannot fit today returns to the shelf and is picked up by
+    /// ordinary planning for a later day.
+    ///
+    /// **Displacement goes through `insertWithRipple`, not a second path** —
+    /// so locked blocks, high-priority tasks and anything up against a due
+    /// date stay protected by the rules that already exist.
+    ///
+    /// **Only the edited task moves.** Nothing else is regenerated; other
+    /// blocks keep their placement unless the ripple has to shift them to
+    /// make room.
+    /// Block length for a task that has stated none. Shown with a "~".
+    static let unstatedDurationMinutes = 30
+
+    /// What a re-placement should do — **the decision, separated from the
+    /// mutation.**
+    ///
+    /// ⚠️ Extracted because a test must never construct or mutate a
+    /// `ScheduleReviewViewModel`: it is a main-actor-isolated `@Observable`,
+    /// and doing so corrupts the heap (`pointer being freed was not
+    /// allocated`), aborting the bundle mid-run while XCTest reports a
+    /// *truncated* count with 0 failures. Same failure as the engagement
+    /// timers — see `NightlyReviewView`'s warning at their construction
+    /// site. The rule is a pure function so it can be exercised directly.
+    enum ReplacementOutcome: Equatable {
+        /// Place it at this rule's window start on the day being reviewed.
+        case place(ruleID: UUID)
+        /// Nothing it is allowed to sit in today — take it off the calendar.
+        case removeFromCalendar
+    }
+
+    /// Which rule a task should be re-placed under on `day`, or that it
+    /// belongs nowhere today.
+    ///
+    /// Earliest applicable window, matching `guaranteePlacement`'s own
+    /// selection: enabled, the task is eligible for it, and it applies on
+    /// this weekday.
+    ///
+    /// **Scoped to `day`.** It does not walk forward the way
+    /// `guaranteePlacement` does — the review is about this day, and
+    /// silently writing blocks onto days you are not looking at is not a
+    /// change this screen should make.
+    static func replacementOutcome(
+        for task: TaskItem, on day: Date, calendar: Calendar = .current
+    ) -> ReplacementOutcome {
+        let weekday = calendar.component(.weekday, from: day)
+        let rule = (task.shelf?.schedulingRules ?? [])
+            .filter { $0.isEnabled && task.isEffectivelyEligible(for: $0) && $0.effectiveDaysOfWeek.contains(weekday) }
+            .min { lhs, rhs in
+                (lhs.effectiveStartHour, lhs.effectiveStartMinute) < (rhs.effectiveStartHour, rhs.effectiveStartMinute)
+            }
+        guard let rule else { return .removeFromCalendar }
+        return .place(ruleID: rule.id)
+    }
+
+    @discardableResult
+    func replacePlacement(for task: TaskItem, calendar: Calendar = .current) -> ScheduledBlock? {
+        // Clear today's placement first, so the re-place sees the free slot
+        // its own block was occupying rather than colliding with itself.
+        let existing = blocks.filter { $0.task?.id == task.id && calendar.isDate($0.date, inSameDayAs: targetDate) }
+        for block in existing {
+            deregisterBlock(block)
+            modelContext.delete(block)
+        }
+
+        // The decision is `replacementOutcome` — a pure function, so it is
+        // testable without touching this object. Only the mutation is here.
+        let outcome = Self.replacementOutcome(for: task, on: targetDate, calendar: calendar)
+        guard case .place(let ruleID) = outcome,
+              let rule = (task.shelf?.schedulingRules ?? []).first(where: { $0.id == ruleID })
+        else {
+            // **Nothing it is allowed to sit in today.** It leaves the
+            // calendar rather than staying in a slot it is no longer
+            // permitted in, and goes back to the shelf unscheduled. A dated
+            // task will also read as at-risk, since losing its placement
+            // takes its slack negative.
+            task.isScheduled = false
+            // Surfaced by `ScheduleReviewView`'s "N Tasks Couldn't Be
+            // Rescheduled" banner — the same one `guaranteePlacement` and
+            // `RippleSchedulingService` already write to, so a task
+            // vanishing from the calendar always leaves a reason somewhere
+            // a person will see it.
+            modelContext.insert(PushRecursionWarning(
+                taskID: task.id, taskTitle: task.title,
+                message: "No eligible schedule left for it on this day, so it was taken off the calendar and put back on its shelf."
+            ))
+            try? modelContext.save()
+            return nil
+        }
+
+        // A task with no stated duration still gets a block, flagged
+        // `isEstimatedDuration` so the timeline draws it with a "~" — same
+        // treatment `guaranteePlacement` gives one.
+        let minutes = task.estimatedMinutes > 0 ? task.estimatedMinutes : Self.unstatedDurationMinutes
+        guard let start = calendar.date(bySettingHour: rule.effectiveStartHour,
+                                        minute: rule.effectiveStartMinute,
+                                        second: 0, of: targetDate) else { return nil }
+        let block = ScheduledBlock(
+            date: targetDate, startTime: start,
+            endTime: start.addingTimeInterval(TimeInterval(minutes * 60)),
+            task: task, isEstimatedDuration: task.estimatedMinutes <= 0
+        )
+        modelContext.insert(block)
+        task.isScheduled = true
+        insertWithRipple(block)
+        return block
+    }
+
     func undoGuaranteedPlacement(for block: ScheduledBlock, task: TaskItem) {
         if let replacementID = block.guaranteedReplacementBlockID,
            let replacement = blocks.first(where: { $0.id == replacementID })

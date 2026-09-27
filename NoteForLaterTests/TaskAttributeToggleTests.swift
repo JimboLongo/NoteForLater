@@ -1956,4 +1956,91 @@ final class TaskAttributeToggleTests: XCTestCase {
             for: TaskItem(title: "x"), on: shelf,
             estimatedMinutes: 30, isDivisible: false, minimumSegmentMinutes: 0).isEmpty)
     }
+
+    // MARK: - Re-placing one task after its eligible set changes
+
+    /// ⚠️ These drive `replacementOutcome`, a pure function — never a
+    /// `ScheduleReviewViewModel`. Constructing or mutating one in a test
+    /// corrupts the heap and truncates the run while reporting 0 failures;
+    /// that is why the decision was pulled out of the mutation.
+    private func placementFixture(ruleDays: [Int], startHour: Int = 9, eligible: Bool = true)
+        -> (task: TaskItem, rule: SchedulingRule) {
+        let shelf = Shelf(name: "Work")
+        let rule = SchedulingRule(shelf: shelf)
+        rule.isEnabled = true
+        rule.daysOfWeek = ruleDays
+        rule.startHour = startHour
+        shelf.schedulingRules = [rule]
+        let task = TaskItem(title: "Edited", shelf: shelf, estimatedMinutes: 60)
+        if eligible { task.setEligible(true, for: rule) }
+        return (task, rule)
+    }
+
+    private var aMonday: Date {
+        var components = DateComponents(year: 2026, month: 6, day: 1)
+        components.hour = 0
+        return Calendar.current.date(from: components)!
+    }
+
+    /// Eligible and the rule applies today → placed under that rule.
+    func test_replacementOutcome_placesUnderTheApplicableRule() {
+        let f = placementFixture(ruleDays: [2])   // Monday
+
+        XCTAssertEqual(
+            ScheduleReviewViewModel.replacementOutcome(for: f.task, on: aMonday),
+            .place(ruleID: f.rule.id)
+        )
+    }
+
+    /// **No longer eligible for anything today → off the calendar.** It goes
+    /// back to the shelf rather than sitting in a slot it is not allowed in.
+    func test_replacementOutcome_withNoEligibleRule_removesItFromTheCalendar() {
+        let f = placementFixture(ruleDays: [2], eligible: false)
+
+        XCTAssertEqual(
+            ScheduleReviewViewModel.replacementOutcome(for: f.task, on: aMonday),
+            .removeFromCalendar
+        )
+    }
+
+    /// **Scoped to the day being reviewed** — a rule that applies on other
+    /// days is not reached for by walking forward.
+    func test_replacementOutcome_doesNotWalkForwardToAnotherDay() {
+        let f = placementFixture(ruleDays: [3, 4, 5])   // Tue-Thu, not Monday
+
+        XCTAssertEqual(
+            ScheduleReviewViewModel.replacementOutcome(for: f.task, on: aMonday),
+            .removeFromCalendar,
+            "it may fit Tuesday, but this review is about Monday"
+        )
+    }
+
+    /// Earliest applicable window wins, matching `guaranteePlacement`.
+    func test_replacementOutcome_takesTheEarliestApplicableWindow() {
+        let shelf = Shelf(name: "Work")
+        let late = SchedulingRule(shelf: shelf)
+        late.isEnabled = true; late.daysOfWeek = [2]; late.startHour = 15
+        let early = SchedulingRule(shelf: shelf)
+        early.isEnabled = true; early.daysOfWeek = [2]; early.startHour = 8
+        shelf.schedulingRules = [late, early]
+        let task = TaskItem(title: "Edited", shelf: shelf, estimatedMinutes: 60)
+        task.setEligible(true, for: late)
+        task.setEligible(true, for: early)
+
+        XCTAssertEqual(
+            ScheduleReviewViewModel.replacementOutcome(for: task, on: aMonday),
+            .place(ruleID: early.id)
+        )
+    }
+
+    /// A disabled rule is not a placement, even when eligible.
+    func test_replacementOutcome_ignoresDisabledRules() {
+        let f = placementFixture(ruleDays: [2])
+        f.rule.isEnabled = false
+
+        XCTAssertEqual(
+            ScheduleReviewViewModel.replacementOutcome(for: f.task, on: aMonday),
+            .removeFromCalendar
+        )
+    }
 }

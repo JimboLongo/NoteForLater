@@ -781,7 +781,16 @@ struct DayTimelineGridView: View {
         // Long-press destinations — see `sectionTaskCardTarget`. Same two
         // sheets `DayTimelineSegment` presents for the grid's own rows.
         .sheet(item: $sectionTaskCardTarget) { task in
-            TaskCardSheet(task: task, shelves: allShelves.filter { !$0.isKitchen })
+            TaskCardSheet(
+                task: task,
+                shelves: allShelves.filter { !$0.isKitchen },
+                // **Only the edited task is re-placed**, and only when its
+                // eligible set actually changed — see
+                // `ScheduleReviewViewModel.replacePlacement`. The rest of
+                // the day keeps its placement unless the ripple has to move
+                // something to make room.
+                onSchedulingRulesChanged: { viewModel.replacePlacement(for: $0) }
+            )
         }
         .sheet(item: $sectionHabitDetailTarget) { habit in
             NavigationStack {
@@ -1616,7 +1625,16 @@ private struct DayTimelineSegment: View {
             )
         }
         .sheet(item: $taskCardTarget) { task in
-            TaskCardSheet(task: task, shelves: allShelves.filter { !$0.isKitchen })
+            TaskCardSheet(
+                task: task,
+                shelves: allShelves.filter { !$0.isKitchen },
+                // **Only the edited task is re-placed**, and only when its
+                // eligible set actually changed — see
+                // `ScheduleReviewViewModel.replacePlacement`. The rest of
+                // the day keeps its placement unless the ripple has to move
+                // something to make room.
+                onSchedulingRulesChanged: { viewModel.replacePlacement(for: $0) }
+            )
         }
         .sheet(item: $divisibleAdjustTarget) { block in
             DivisibleAdjustSheet(block: block)

@@ -11,6 +11,18 @@ import SwiftData
 struct TaskCardSheet: View {
     @Bindable var task: TaskItem
     let shelves: [Shelf]
+    /// Fired on close **only when the eligible-schedules set actually
+    /// changed** — the one card edit that is a *plan input* rather than a
+    /// display value, so the one that needs a re-placement.
+    ///
+    /// Compared against `snapshot`, which is captured when the card opens.
+    /// Cancel restores from that same snapshot, so a cancelled edit leaves
+    /// the sets equal and this never fires — no special-casing needed.
+    ///
+    /// Title and notes are deliberately *not* here: timeline rows hold a
+    /// `ScheduledBlock` reference and read those live, so they already
+    /// update with no re-plan at all.
+    var onSchedulingRulesChanged: ((TaskItem) -> Void)? = nil
     /// True only when the caller just created `task` and is presenting
     /// its card for the first time in the same gesture (today, only
     /// `ShelfListView`'s plus button — see its own `PresentedTask`
@@ -109,6 +121,15 @@ struct TaskCardSheet: View {
             }
             .onAppear {
                 if snapshot == nil { snapshot = TaskEditSnapshot(task) }
+            }
+            .onDisappear {
+                // On disappear rather than on each close path, so every way
+                // out of this card is covered by one check — including
+                // swipe-to-dismiss, which no button handler sees.
+                guard let opened = snapshot?.includedSchedulingRuleIDs else { return }
+                if Set(opened) != Set(task.includedSchedulingRuleIDs) {
+                    onSchedulingRulesChanged?(task)
+                }
             }
         }
     }
